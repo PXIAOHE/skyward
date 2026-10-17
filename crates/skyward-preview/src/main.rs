@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
-use skyward_ui::app::{App, Screen};
+use skyward_ui::app::{Action, App, Screen, Touch};
 use skyward_ui::widgets::{self, Bar};
 use skyward_ui::{Canvas, Fonts, Theme};
 use skyward_vab::{Slot, SnapshotState};
@@ -51,7 +51,9 @@ fn main() -> Result<()> {
     let info = nezha(&cfg);
     let pending = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info.clone() };
     let open = DataState::Decrypted;
-    let shots: [Shot; 10] = [
+    // Whole pages, the way a long screenshot shows them. The About page's
+    // field is drawn only on screen, so it appears among the moments below.
+    let shots: [Shot; 9] = [
         ("01-decrypt-dark", Screen::Decrypt, true, &info, DataState::Locked, &[0, 3, 4, 5, 8]),
         ("02-home-light", Screen::Home, false, &info, open, &[]),
         ("03-home-dark-update-pending", Screen::Home, true, &pending, open, &[]),
@@ -59,8 +61,6 @@ fn main() -> Result<()> {
         ("05-settings-dark", Screen::Settings, true, &info, open, &[]),
         ("06-reboot-dark", Screen::Reboot, true, &info, open, &[]),
         ("07-wipe-light", Screen::Wipe, false, &info, open, &[]),
-        // The About backdrop is the same in both themes.
-        ("08-about", Screen::About, false, &info, open, &[]),
         ("09-specs-light", Screen::Specs, false, &info, open, &[]),
         ("10-specs-dark", Screen::Specs, true, &info, open, &[]),
     ];
@@ -72,7 +72,83 @@ fn main() -> Result<()> {
         write_png(&path, &whole_page(&mut app, &fonts, info, data))?;
         println!("wrote {}", path.display());
     }
+
+    // The panel mid-gesture, to set beside recordings of the same moves.
+    let moments: [Moment; 12] = [
+        ("08-about-light", Screen::About, false, &|_, _| 2000),
+        ("08-about-dark", Screen::About, true, &|_, _| 2000),
+        ("08-about-light-later", Screen::About, false, &|_, _| 9000),
+        ("21-settings-scrolled", Screen::Settings, false, &|app, f| drag(app, f, 1900.0, 1300.0)),
+        ("22-settings-scrolled-dark", Screen::Settings, true, &|app, f| drag(app, f, 1900.0, 1300.0)),
+        ("23-specs-title-fading", Screen::Specs, false, &|app, f| drag(app, f, 1900.0, 1870.0)),
+        ("24-specs-title-gone", Screen::Specs, false, &|app, f| drag(app, f, 1900.0, 1820.0)),
+        ("25-specs-under-bar", Screen::Specs, false, &|app, f| drag(app, f, 1900.0, 1450.0)),
+        ("26-reboot-pulled-down", Screen::Reboot, false, &|app, f| hold(app, f, 900.0, 1700.0)),
+        ("27-back-cue-short", Screen::Home, false, &|app, f| swipe_in(app, f, &info, 133.0)),
+        ("28-back-cue-armed", Screen::Home, false, &|app, f| swipe_in(app, f, &info, 323.0)),
+        ("29-about-scrolled", Screen::About, false, &|app, f| drag(app, f, 1900.0, 1500.0)),
+    ];
+    for (name, screen, dark, act) in moments {
+        let mut app = App::new(screen, w, h, ppd);
+        app.state.dark = dark;
+        app.frame(&fonts, &info, open);
+        app.tick(0);
+        let now = act(&mut app, &fonts);
+        // Time passes frame by frame, as on the panel.
+        for ms in (0..now).step_by(16) {
+            app.tick(ms);
+        }
+        app.tick(now);
+        let mut c = Canvas::new(w, h);
+        app.compose(&mut c, &fonts, &info, open, CLOCK, now);
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &c)?;
+        println!("wrote {}", path.display());
+    }
     Ok(())
+}
+
+/// File name, page, dark theme, and the touches leading up to the moment,
+/// which return the time it is shown at.
+type Moment<'a> = (&'a str, Screen, bool, &'a dyn Fn(&mut App, &Fonts) -> u64);
+
+/// Drag from `y0` to `y1` at x = 600 and rest before lifting, so the page
+/// stays where the finger left it; returns a time after the bar has
+/// settled.
+fn drag(app: &mut App, f: &Fonts, y0: f32, y1: f32) -> u64 {
+    app.touch(Touch::Down(600.0, y0), f, 0);
+    for k in 1..=10u64 {
+        app.touch(Touch::Move(600.0 + (k % 2) as f32, y0 + (y1 - y0) * k as f32 / 10.0), f, 40 * k);
+    }
+    app.touch(Touch::Up, f, 800);
+    for ms in (800..2000).step_by(8) {
+        app.tick(ms);
+    }
+    2000
+}
+
+/// Pull from `y0` to `y1` at x = 600 and keep the finger down.
+fn hold(app: &mut App, f: &Fonts, y0: f32, y1: f32) -> u64 {
+    app.touch(Touch::Down(600.0, y0), f, 0);
+    for k in 1..=10u64 {
+        app.touch(Touch::Move(600.0, y0 + (y1 - y0) * k as f32 / 10.0), f, 40 * k);
+    }
+    400
+}
+
+/// Open the reboot page from the home page, which leaves a page to go back
+/// to, then swipe in from the left edge at y = 1300 to `x` and keep the
+/// finger down, the way the 17U recordings were made.
+fn swipe_in(app: &mut App, f: &Fonts, info: &DeviceInfo, x: f32) -> u64 {
+    let hits = &app.frame(f, info, DataState::Decrypted).hits;
+    let (rx, ry) = hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("the home page opens the reboot page").rect.centre();
+    app.touch(Touch::Down(rx, ry), f, 0);
+    app.touch(Touch::Up, f, 0);
+    app.touch(Touch::Down(3.0, 1300.0), f, 0);
+    for k in 1..=8u64 {
+        app.touch(Touch::Move(3.0 + (x - 3.0) * k as f32 / 8.0, 1300.0 + k as f32), f, 8 * k);
+    }
+    64
 }
 
 /// The full length of a page with the status bar over its top, the way a
@@ -81,9 +157,8 @@ fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo, data: DataState) -> C
     let t = app.theme();
     let frame = app.frame(f, info, data);
     let mut c = Canvas { w: frame.canvas.w, h: frame.canvas.h, data: frame.canvas.data.clone() };
-    let ink = if frame.hero { t.hero.status } else { t.pal.status };
     let battery = info.battery.as_ref().map(|b| (b.level, b.charge == Charge::Charging));
-    widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery }, ink);
+    widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery }, t.pal.status);
     c
 }
 

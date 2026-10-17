@@ -1,4 +1,4 @@
-use crate::app::{Action, Confirm, Frame, Hit, Screen, State, Switch, Target, TARGETS};
+use crate::app::{Action, Confirm, Frame, HeroArt, Hit, Screen, State, Switch, Target, TARGETS};
 use crate::canvas::Canvas;
 use crate::color::Rgba;
 use crate::fmt;
@@ -86,7 +86,7 @@ pub fn home(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let mut c = page(t);
     let mut out = Vec::new();
-    let mut y = widgets::header(&mut c, t, f, "Skyward", false);
+    let mut y = t.m.content_top;
     let search_top = y;
     y = widgets::search_bar(&mut c, t, f, y, "搜索功能与分区");
     out.push(Hit { rect: Rect::new(t.m.margin, search_top, t.m.w as f32 - t.m.margin * 2.0, t.m.search_h), action: Action::Unavailable("搜索还没实现") });
@@ -146,15 +146,15 @@ pub fn home(cx: &Ctx) -> Frame {
         Action::Open(Screen::Settings),
         Action::Open(Screen::Reboot),
     ]));
-    Frame { canvas: c, hits: out, title: "Skyward", back: false, hero: false, pattern: None }
+    Frame { canvas: c, hits: out, title: "Skyward", back: false, header: true, content_top: search_top, hero: None, pattern: None }
 }
 
 /// Preferences, opening with the stock「显示与亮度」theme previews.
 pub fn settings(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = long_page(t);
-    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
-    let top = widgets::header(&mut c, t, f, "设置", true);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
     let themes = widgets::theme_picker(&mut c, t, f, top + t.m.dp(8.9));
     out.extend(hits(&themes.rows, &[Action::Theme { dark: false }, Action::Theme { dark: true }]));
     let mut y = widgets::section(&mut c, t, f, themes.bottom, "亮度");
@@ -183,25 +183,19 @@ pub fn settings(cx: &Ctx) -> Frame {
     y = widgets::section(&mut c, t, f, debug.bottom, "关于");
     let about = widgets::list(&mut c, t, f, y, &[Row::new("关于本机").trail(Trail::Value(VERSION))]);
     out.extend(hits(&about.rows, &[Action::Open(Screen::About)]));
-    Frame { canvas: fit(c, t, about.bottom), hits: out, title: "设置", back: true, hero: false, pattern: None }
+    Frame { canvas: fit(c, t, about.bottom), hits: out, title: "设置", back: true, header: true, content_top: top, hero: None, pattern: None }
 }
 
-/// About this device, modelled on the stock「我的设备」at rest: the wordmark
-/// over a deep blue backdrop, then translucent summary, hardware and link
-/// cards.
+/// About this device, modelled on the stock「我的设备」: the wordmark and
+/// version over a moving colour field, and the summary, hardware and link
+/// cards scrolling over it. Only the cards are drawn here; the canvas is
+/// clear wherever the field shows.
 pub fn about(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let m = &t.m;
     let tone = Tone::hero(t);
-    let mut c = long_page(t);
-    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
-    widgets::hero_backdrop(&mut c, t);
-    widgets::back_arrow(&mut c, t, t.hero.title);
-    widgets::wordmark(&mut c, t, f, "Skyward", m.dp(233.7), m.dp(37.8));
-    let version_px = m.dp(13.3);
-    let w = c.text_width(&f.body, VERSION, version_px);
-    let base = m.dp(296.3) + f.body.cap(version_px);
-    c.text(&f.body, VERSION, (m.w as f32 - w) / 2.0, base, version_px, t.hero.caption, None);
+    let mut c = Canvas::new(m.w, m.h * 3);
+    let mut out = Vec::new();
 
     let storage = fmt::storage_used(&i.storage).unwrap_or_else(|| fmt::capacity(i.storage.total));
     let mut facts = vec![
@@ -230,7 +224,13 @@ pub fn about(cx: &Ctx) -> Frame {
     let y = widgets::spec_card(&mut c, t, f, summary.bottom + m.card_gap, &fmt::model_lines(&i.model), &specs, &tone);
     let links = widgets::list_toned(&mut c, t, f, y + m.card_gap, &[Row::new("全部参数与信息"), Row::new("导出日志")], &tone);
     out.extend(hits(&links.rows, &[Action::Open(Screen::Specs), Action::Unavailable("导出日志还没实现")]));
-    Frame { canvas: fit(c, t, links.bottom), hits: out, title: "关于本机", back: true, hero: true, pattern: None }
+    let canvas = fit(c, t, links.bottom);
+    let art = HeroArt {
+        wordmark: widgets::wordmark(t, f, "Skyward", m.dp(233.7), m.dp(37.8)),
+        version: widgets::version_line(t, f, VERSION),
+        runs: canvas.runs(),
+    };
+    Frame { canvas, hits: out, title: "关于本机", back: true, header: false, content_top: summary.rows[0].y, hero: Some(art), pattern: None }
 }
 
 /// Every reading the recovery has, modelled on the stock「全部参数与信息」.
@@ -238,8 +238,7 @@ pub fn specs(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let gap = t.m.card_gap;
     let mut c = long_page(t);
-    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
-    widgets::header(&mut c, t, f, "全部参数与信息", true);
+    let mut out = Vec::new();
     // This page leaves more room under the title than the settings pages.
     let top = t.m.dp(188.0);
 
@@ -315,7 +314,7 @@ pub fn specs(cx: &Ctx) -> Frame {
         Row::new("界面字体").trail(Trail::Value("MiSans")),
     ]);
     out.extend(hits(&links.rows, &[Action::Unavailable("许可证全文还没放进来"), Action::Unavailable("字体许可还没放进来")]));
-    Frame { canvas: fit(c, t, links.bottom), hits: out, title: "全部参数与信息", back: true, hero: false, pattern: None }
+    Frame { canvas: fit(c, t, links.bottom), hits: out, title: "全部参数与信息", back: true, header: true, content_top: top, hero: None, pattern: None }
 }
 
 /// File-based-encryption unlock.
@@ -338,15 +337,15 @@ pub fn decrypt(cx: &Ctx) -> Frame {
         Hit { rect: Rect::new(pcx - reach, pcy - reach, reach * 2.0, reach * 2.0), action: Action::Pattern },
         Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip },
     ];
-    Frame { canvas: c, hits: out, title: "解密", back: false, hero: false, pattern: Some((pcx, pcy, span)) }
+    Frame { canvas: c, hits: out, title: "解密", back: false, header: false, content_top: 0.0, hero: None, pattern: Some((pcx, pcy, span)) }
 }
 
 /// Reboot target picker with a swipe-to-confirm control.
 pub fn reboot(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = page(t);
-    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
-    let top = widgets::header(&mut c, t, f, "重启", true);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
     let mut y = widgets::section_first(&mut c, t, f, top, "重启到");
     let rows: Vec<Row> = REBOOT_TARGETS
         .iter()
@@ -380,15 +379,15 @@ pub fn reboot(cx: &Ctx) -> Frame {
     let (label, danger) = confirm_label(Confirm::Reboot);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Reboot) });
-    Frame { canvas: c, hits: out, title: "重启", back: true, hero: false, pattern: None }
+    Frame { canvas: c, hits: out, title: "重启", back: true, header: true, content_top: top, hero: None, pattern: None }
 }
 
 /// Destructive wipe with the partitions to clear.
 pub fn wipe(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = page(t);
-    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
-    let top = widgets::header(&mut c, t, f, "清除数据", true);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
     let y = widgets::section_first(&mut c, t, f, top, "选择要清除的内容");
     let items = widgets::list(&mut c, t, f, y, &[
         Row::new("用户数据").subtitle("应用、账户与设置").trail(Trail::Check(s.wipe[0])),
@@ -401,5 +400,5 @@ pub fn wipe(cx: &Ctx) -> Frame {
     let (label, danger) = confirm_label(Confirm::Wipe);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Wipe) });
-    Frame { canvas: c, hits: out, title: "清除数据", back: true, hero: false, pattern: None }
+    Frame { canvas: c, hits: out, title: "清除数据", back: true, header: true, content_top: top, hero: None, pattern: None }
 }

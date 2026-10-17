@@ -144,7 +144,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
                 fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
             }
         }
-        let until_due = app.deadline().map(|d| d.saturating_sub(now) as i32);
+        let until_due = app.deadline(now).map(|d| d.saturating_sub(now) as i32);
         let timeout = until_due.map_or(1000, |t| t.clamp(1, 1000));
         wait(&inputs.fds(), timeout)?;
         let now = monotonic_ms();

@@ -1,4 +1,5 @@
 use crate::color::Rgba;
+use crate::glow::{self, Glow};
 
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -33,26 +34,17 @@ pub struct Palette {
     pub spec_label: Rgba,
 }
 
-/// The About page backdrop, the same in both themes: deep blue with a violet
-/// edge, and translucent cards on top.
+/// The About page in a theme: the moving field behind it, the version
+/// line under the wordmark, and the cards that scroll over the field.
 #[derive(Clone, Copy)]
 pub struct Hero {
-    /// Backdrop at the top, middle and bottom of the first screen.
-    pub top: Rgba,
-    pub mid: Rgba,
-    pub bottom: Rgba,
-    /// Soft colour fields: centre as fractions of the screen width and
-    /// height, radius as a fraction of the width.
-    pub blobs: [(f32, f32, f32, Rgba); 6],
-    /// Wordmark gradient, left, centre and right.
-    pub ink: [Rgba; 3],
-    pub caption: Rgba,
-    /// Cards are white at low opacity over the backdrop.
+    pub glow: &'static Glow,
+    /// The version line: black or white, partly see-through.
+    pub version: Rgba,
     pub card: Rgba,
     pub title: Rgba,
     pub value: Rgba,
     pub chevron: Rgba,
-    pub status: Rgba,
 }
 
 /// Layout metrics measured on a Xiaomi 17 Ultra's stock settings, in dp,
@@ -132,11 +124,11 @@ pub struct Theme {
 impl Theme {
     /// `px_per_dp` is the panel density over 160, e.g. 3.0 at 480 dpi.
     pub fn light(w: u32, h: u32, px_per_dp: f32) -> Self {
-        Theme { pal: LIGHT, hero: HERO, m: metrics(w, h, px_per_dp), dark: false }
+        Theme { pal: LIGHT, hero: LIGHT_HERO, m: metrics(w, h, px_per_dp), dark: false }
     }
 
     pub fn dark(w: u32, h: u32, px_per_dp: f32) -> Self {
-        Theme { pal: DARK, hero: HERO, m: metrics(w, h, px_per_dp), dark: true }
+        Theme { pal: DARK, hero: DARK_HERO, m: metrics(w, h, px_per_dp), dark: true }
     }
 }
 
@@ -256,24 +248,23 @@ const DARK: Palette = Palette {
     spec_label: Rgba::rgb(128, 128, 128),
 };
 
-// Sampled from the stock「我的设备」page at rest.
-const HERO: Hero = Hero {
-    top: Rgba::rgb(16, 25, 60),
-    mid: Rgba::rgb(20, 33, 90),
-    bottom: Rgba::rgb(10, 20, 66),
-    blobs: [
-        (0.25, 0.26, 0.36, Rgba::rgb(34, 50, 112)),
-        (1.05, 0.22, 0.38, Rgba::rgb(66, 30, 82)),
-        (1.05, -0.02, 0.25, Rgba::rgb(38, 16, 46)),
-        (-0.10, 1.05, 0.50, Rgba::rgb(0, 2, 12)),
-        (0.60, 0.75, 0.45, Rgba::rgb(14, 30, 90)),
-        (-0.10, 0.30, 0.30, Rgba::rgb(18, 28, 66)),
-    ],
-    ink: [Rgba::rgb(127, 152, 240), Rgba::rgb(125, 144, 241), Rgba::rgb(160, 136, 238)],
-    caption: Rgba::rgb(164, 169, 193),
+// Sampled from the stock「我的设备」page: in light mode the cards are
+// the ordinary settings cards; in dark mode they are white at low opacity
+// over the field.
+const LIGHT_HERO: Hero = Hero {
+    glow: &glow::LIGHT,
+    version: Rgba::rgb(0, 0, 0).with_alpha(153),
+    card: LIGHT.card,
+    title: LIGHT.text,
+    value: LIGHT.value,
+    chevron: LIGHT.chevron,
+};
+
+const DARK_HERO: Hero = Hero {
+    glow: &glow::DARK,
+    version: Rgba::rgb(255, 255, 255).with_alpha(153),
     card: Rgba::rgb(255, 255, 255).with_alpha(36),
     title: Rgba::rgb(244, 245, 248),
     value: Rgba::rgb(157, 161, 188),
     chevron: Rgba::rgb(118, 122, 160),
-    status: Rgba::rgb(255, 255, 255),
 };

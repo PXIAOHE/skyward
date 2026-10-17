@@ -11,6 +11,22 @@ pub struct Canvas {
     pub data: Vec<u8>,
 }
 
+/// How a layer covers a stretch of pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cover {
+    Clear,
+    Solid,
+    Partial,
+}
+
+/// Pixels `x0..x1` of a row, all covered the same way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Run {
+    pub x0: u16,
+    pub x1: u16,
+    pub cover: Cover,
+}
+
 // Drawing primitives take geometry plus style as plain arguments.
 #[allow(clippy::too_many_arguments)]
 impl Canvas {
@@ -74,6 +90,62 @@ impl Canvas {
             let c = paint(x);
             *p = [c.r, c.g, c.b, c.a];
         }
+    }
+
+    /// Lay `layer`, whose top-left corner goes at (`x`, `y`), over this
+    /// opaque canvas at `alpha` of its strength.
+    pub fn lay(&mut self, layer: &Canvas, x: i32, y: i32, alpha: f32) {
+        if alpha <= 0.0 {
+            return;
+        }
+        let strength = (alpha * 256.0).round() as u32;
+        let (lw, sw) = (layer.w as i32, self.w as i32);
+        let (x0, x1) = ((-x).max(0), (sw - x).min(lw));
+        for ly in 0..layer.h as i32 {
+            let py = y + ly;
+            if py < 0 || py >= self.h as i32 || x0 >= x1 {
+                continue;
+            }
+            let src = &layer.data[((ly * lw + x0) * 4) as usize..((ly * lw + x1) * 4) as usize];
+            let start = ((py * sw + x + x0) * 4) as usize;
+            let dst = &mut self.data[start..start + src.len()];
+            for (s, d) in src.as_chunks::<4>().0.iter().zip(dst.as_chunks_mut::<4>().0) {
+                if s[3] == 0 {
+                    continue;
+                }
+                let a = ((s[3] as u32 + (s[3] as u32 >> 7)) * strength) >> 8;
+                for k in 0..3 {
+                    d[k] = ((s[k] as u32 * a + d[k] as u32 * (256 - a) + 128) >> 8) as u8;
+                }
+            }
+        }
+    }
+
+    /// Each row as runs of clear, solid and partly covered pixels, for
+    /// laying the canvas over something that keeps changing.
+    pub fn runs(&self) -> Vec<Vec<Run>> {
+        let w = self.w as usize;
+        let cover = |a: u8| match a {
+            0 => Cover::Clear,
+            255 => Cover::Solid,
+            _ => Cover::Partial,
+        };
+        self.data
+            .chunks_exact(w * 4)
+            .map(|row| {
+                let mut runs = Vec::new();
+                let (mut start, mut now) = (0, cover(row[3]));
+                for x in 1..w {
+                    let c = cover(row[x * 4 + 3]);
+                    if c != now {
+                        runs.push(Run { x0: start as u16, x1: x as u16, cover: now });
+                        (start, now) = (x, c);
+                    }
+                }
+                runs.push(Run { x0: start as u16, x1: w as u16, cover: now });
+                runs
+            })
+            .collect()
     }
 
     /// Drop everything below row `h`, for pages measured after drawing.

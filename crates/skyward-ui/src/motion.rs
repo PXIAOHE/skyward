@@ -1,6 +1,7 @@
 /// A critically damped spring coming to rest at zero: the motion a page
-/// makes springing back from past its end. `period` is its response, the
-/// time one swing would take without damping.
+/// makes springing back from past its end, and the easing of bars and
+/// titles appearing. `period` is its response, the time one swing would
+/// take without damping.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Spring {
     start: u64,
@@ -26,6 +27,17 @@ impl Spring {
         // (v0 − w (v0 + w x0) t) e^(−w t) reaches zero.
         let turn = if v0 + w * x0 != 0.0 { v0 / (w * (v0 + w * x0)) } else { 0.0 };
         (x, t >= turn && x.abs() < 0.5)
+    }
+}
+
+/// How far 0 → 1 a spring of `period` released from rest has come after
+/// `ms` milliseconds.
+pub fn settle(ms: u64, period: f32) -> f32 {
+    let (x, done) = Spring::new(0, 1.0, 0.0, period).at(ms);
+    if done && x < 0.002 {
+        1.0
+    } else {
+        1.0 - x
     }
 }
 
@@ -72,6 +84,13 @@ mod tests {
         assert!(!s.at(2).1, "it has only just left");
         assert!(s.at(1500).1);
         assert!(s.at(1500).0 >= 0.0, "it never crosses back");
+    }
+
+    #[test]
+    fn settling_runs_from_zero_to_one() {
+        assert_eq!(settle(0, 0.3), 0.0);
+        assert!(settle(150, 0.3) > 0.7);
+        assert_eq!(settle(2000, 0.3), 1.0);
     }
 
     #[test]

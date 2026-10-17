@@ -1,9 +1,12 @@
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, Run};
+use crate::color::Rgba;
 use crate::fling::{Fling, Tracker};
 use crate::font::Fonts;
 use crate::geom::Rect;
+use crate::glow::{self, GlowClock};
 use crate::motion::{self, Spring};
 use crate::pages::{self, Ctx};
+use crate::sprite::{Blurs, Sprite};
 use crate::theme::Theme;
 use crate::widgets::{self, Bar};
 use skyward_info::{Charge, DataState, DeviceInfo};
@@ -72,16 +75,30 @@ pub struct Hit {
 }
 
 /// A rendered page in page coordinates. The status-bar band at its top is
-/// left empty: the bar is laid over the page when it is shown.
+/// left empty, and the `<`, the titles and the bar are laid over the page
+/// as it scrolls.
 pub struct Frame {
     pub canvas: Canvas,
     pub hits: Vec<Hit>,
     pub title: &'static str,
     pub back: bool,
-    /// The page sits on the About backdrop.
-    pub hero: bool,
+    /// The page opens with its title in large type, scrolling away with it.
+    pub header: bool,
+    /// Where the page's content starts; once it slides under the top of
+    /// the screen, the bar comes up over it.
+    pub content_top: f32,
+    /// The page sits on the About page's moving field.
+    pub hero: Option<HeroArt>,
     /// Centre and span of the pattern grid, on the unlock page.
     pub pattern: Option<(f32, f32, f32)>,
+}
+
+/// What the About page lays over its field: the wordmark and version, which
+/// stay put while the cards scroll, and the cards' coverage row by row.
+pub struct HeroArt {
+    pub wordmark: Sprite,
+    pub version: Sprite,
+    pub runs: Vec<Vec<Run>>,
 }
 
 impl Frame {
@@ -172,19 +189,117 @@ const MAX_FLING_DP: f32 = 8000.0;
 /// A glide running into a page's end faster than this, in dp per second,
 /// swings out on the slower spring.
 const HARD_BOUNCE_DP: f32 = 1667.0;
+/// Scroll, in dp, over which a large title fades out.
+const TITLE_FADE_DP: f32 = 20.0;
+/// Blur, in dp, of a title faded out completely.
+const TITLE_BLUR_DP: f32 = 25.0 / 3.0;
 /// How far, in dp, a swipe from an edge has to come in to go back.
 const BACK_SWIPE_DP: f32 = 56.0;
 /// The back cue sits this far, in dp, above where the finger came down,
 /// and stays at that height however the finger then wanders.
 const CUE_LIFT_DP: f32 = 9.0;
+/// On the About page, where the wordmark's area ends, in dp from the top:
+/// the version has faded out by the time it passes under the bar.
+const ABOUT_LOGO_DP: f32 = 160.0;
+/// Scroll, in dp, over which the wordmark then shrinks and fades.
+const ABOUT_LOGO_FADE_DP: f32 = 40.0;
+/// Scroll, in dp, over which the About page's field fades out; the field's
+/// discs sit in the band this far below the bar.
+const ABOUT_FIELD_DP: f32 = 389.0;
+/// The field is worked out every this many pixels and filled in between.
+const FIELD_CELL: usize = 24;
+
+/// How a part of the screen eases between shown and hidden.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Ease {
+    /// A critically damped spring of this period, in seconds.
+    Spring(f32),
+    /// A straight run over this many milliseconds.
+    Linear(u64),
+}
+
+impl Ease {
+    fn progress(self, ms: u64) -> f32 {
+        match self {
+            Ease::Spring(period) => motion::settle(ms, period),
+            Ease::Linear(span) => (ms as f32 / span as f32).min(1.0),
+        }
+    }
+}
+
+/// A part of the screen fading in or out: where it is headed, since when,
+/// how far in it was then, and how it eases each way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fade {
+    on: bool,
+    since: u64,
+    from: f32,
+    show: Ease,
+    hide: Ease,
+}
+
+impl Fade {
+    fn hidden(show: Ease, hide: Ease) -> Fade {
+        Fade { on: false, since: 0, from: 0.0, show, hide }
+    }
+
+    /// How far in, 0 to 1, at `now`.
+    fn level(&self, now: u64) -> f32 {
+        let (target, ease) = if self.on { (1.0, self.show) } else { (0.0, self.hide) };
+        self.from + (target - self.from) * ease.progress(now.saturating_sub(self.since))
+    }
+
+    fn set(&mut self, on: bool, now: u64) {
+        if on != self.on {
+            self.from = self.level(now);
+            self.since = now;
+            self.on = on;
+        }
+    }
+
+    fn moving(&self, now: u64) -> bool {
+        self.level(now) != if self.on { 1.0 } else { 0.0 }
+    }
+}
+
+/// How the bar's title comes and goes: sharpening in on a spring and
+/// blurring away on a quicker one, or on the About page, fading in a
+/// straight line together with the bar.
+fn title_fade(hero: bool) -> Fade {
+    if hero {
+        Fade::hidden(Ease::Linear(150), Ease::Linear(150))
+    } else {
+        Fade::hidden(Ease::Spring(0.3), Ease::Spring(0.15))
+    }
+}
+
+fn bar_fade(hero: bool) -> Fade {
+    if hero {
+        Fade::hidden(Ease::Linear(150), Ease::Linear(150))
+    } else {
+        Fade::hidden(Ease::Linear(100), Ease::Linear(100))
+    }
+}
+
+/// Lay the sprite `blurs` keeps, moved by (`dx`, `dy`), in `color` at
+/// `level` of its strength, blurred by `blur` pixels.
+fn draw_faded(out: &mut Canvas, blurs: &mut Blurs, dx: f32, dy: f32, color: Rgba, level: f32, blur: f32) {
+    if level > 0.0 {
+        blurs.get(blur).draw(out, dx, dy, color, level);
+    }
+}
 
 pub struct App {
     pub state: State,
     stack: Vec<(Screen, f32)>,
     frame: Option<Frame>,
-    /// The bar over a scrolled page, drawn once per page and theme since
-    /// it does not move with the page.
-    bar: Option<((Screen, bool), Canvas)>,
+    /// The current page's large and bar titles, for its theme, with their
+    /// blurred versions as they are needed.
+    titles: Option<((Screen, bool), Blurs, Blurs)>,
+    /// The `<` chip for the theme (dark or not), and where it goes.
+    chip: Option<(bool, Canvas, i32, i32)>,
+    /// The About page field's dither, made for the screen once.
+    dither: Option<glow::Dither>,
     toast: Option<(String, u64)>,
     drag: Drag,
     tracker: Tracker,
@@ -198,6 +313,10 @@ pub struct App {
     /// The back cue shrinking away after a swipe that did not go back:
     /// its edge, where it sits, and its depth.
     cue: Option<(bool, f32, Spring)>,
+    title: Fade,
+    bar: Fade,
+    /// The About page's moving field, while that page shows.
+    glow: Option<GlowClock>,
     display_on: bool,
     dirty: bool,
     w: u32,
@@ -211,7 +330,9 @@ impl App {
             state: State::default(),
             stack: vec![(start, 0.0)],
             frame: None,
-            bar: None,
+            titles: None,
+            chip: None,
+            dither: None,
             toast: None,
             drag: Drag::Idle,
             tracker: Tracker::default(),
@@ -219,6 +340,9 @@ impl App {
             pull: 0.0,
             bounce: None,
             cue: None,
+            title: title_fade(start == Screen::About),
+            bar: bar_fade(start == Screen::About),
+            glow: None,
             display_on: true,
             dirty: true,
             w,
@@ -255,15 +379,22 @@ impl App {
     /// When time next has to pass through [`App::tick`]: at once while
     /// something moves on its own, else when a shown message should
     /// disappear.
-    pub fn deadline(&self) -> Option<u64> {
-        if self.fling.is_some() || self.bounce.is_some() || self.cue.is_some() {
+    pub fn deadline(&self, now: u64) -> Option<u64> {
+        let moving = self.fling.is_some()
+            || self.bounce.is_some()
+            || self.cue.is_some()
+            || self.title.moving(now)
+            || self.bar.moving(now)
+            || self.glowing();
+        if moving {
             return Some(0);
         }
         self.toast.as_ref().map(|t| t.1)
     }
 
     /// Let time pass: a gliding page moves on, a page past its end springs
-    /// back, and a message past its deadline goes away.
+    /// back, the bar and its title follow the scroll, and a message past
+    /// its deadline goes away.
     pub fn tick(&mut self, now: u64) {
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
@@ -299,6 +430,44 @@ impl App {
             if s.at(now).1 {
                 self.cue = None;
             }
+        }
+        if self.screen() == Screen::About {
+            let look = self.theme().hero.glow;
+            match &mut self.glow {
+                Some(g) if std::ptr::eq(g.look(), look) => g.advance(now),
+                _ => self.glow = Some(GlowClock::new(look, now)),
+            }
+            if self.glowing() {
+                self.dirty = true;
+            }
+        }
+        self.follow_scroll(now);
+    }
+
+    /// Whether the About page's field is on screen, moving.
+    fn glowing(&self) -> bool {
+        self.glow.is_some() && self.display_on && self.top().1 < self.theme().m.dp(ABOUT_FIELD_DP)
+    }
+
+    /// Bring the bar and its title in or out for where the page is
+    /// scrolled: the title once the large one has faded, the bar once the
+    /// content slides under it. On the About page both come once the
+    /// version has faded out.
+    fn follow_scroll(&mut self, now: u64) {
+        let Some(fr) = &self.frame else { return };
+        let t = self.theme();
+        let scroll = self.top().1;
+        let (title, bar) = if fr.hero.is_some() {
+            let gone = scroll >= t.m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(&t);
+            (gone, gone)
+        } else {
+            let under = (fr.content_top - widgets::bar_bottom(&t) - t.m.dp(20.0)).max(0.0);
+            (fr.header && scroll >= t.m.dp(TITLE_FADE_DP), scroll > under)
+        };
+        self.title.set(title, now);
+        self.bar.set(bar, now);
+        if self.title.moving(now) || self.bar.moving(now) {
+            self.dirty = true;
         }
     }
 
@@ -350,53 +519,78 @@ impl App {
         top.1 = top.1.clamp(0.0, max);
     }
 
-    /// Whether the compact bar covers the top of the page.
-    fn bar_shown(&self, t: &Theme) -> bool {
-        self.top().1 > t.m.dp(60.0)
-    }
-
     /// Draw what the panel shows now: the visible part of the page, pulled
-    /// past an end if it is, the bar over a scrolled page, the status bar,
-    /// any message, and the back cue while a swipe from an edge is under
-    /// way.
+    /// past an end if it is, its large title fading as it scrolls, the bar
+    /// and its title over a scrolled page, the `<`, the status bar, any
+    /// message, and the back cue while a swipe from an edge is under way.
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, data: DataState, clock: &str, now: u64) {
         self.frame(f, info, data);
         let t = self.theme();
+        let m = t.m;
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
         }
-        let offset = (self.top().1 + self.overscroll(now)).round();
-        let bar_shown = self.bar_shown(&t);
+        let key = (self.screen(), self.state.dark);
+        if self.titles.as_ref().is_none_or(|(k, _, _)| *k != key) {
+            let title = self.frame.as_ref().expect("rendered above").title;
+            self.titles = Some((key, Blurs::new(widgets::big_title(&t, f, title)), Blurs::new(widgets::small_title(&t, f, title))));
+        }
+        if self.chip.as_ref().is_none_or(|c| c.0 != t.dark) {
+            let (art, x, y) = widgets::back_chip(&t);
+            self.chip = Some((t.dark, art, x, y));
+        }
+        let scroll = self.top().1;
+        let offset = (scroll + self.overscroll(now)).round();
         let frame = self.frame.as_ref().expect("rendered above");
-        // The page rows on screen, and the page colour past its ends.
-        let row = out.w as usize * 4;
-        let first = (-offset).clamp(0.0, out.h as f32) as usize;
-        let last = (frame.canvas.h as f32 - offset).clamp(first as f32, out.h as f32) as usize;
-        if first < last {
-            let from = (offset as isize + first as isize) as usize * row;
-            out.data[first * row..last * row].copy_from_slice(&frame.canvas.data[from..from + (last - first) * row]);
-        }
-        let (above, below) = if frame.hero { (t.hero.top, t.hero.bottom) } else { (t.pal.bg, t.pal.bg) };
-        out.fill_rect(0.0, 0.0, out.w as f32, first as f32, above);
-        out.fill_rect(0.0, last as f32, out.w as f32, (out.h as usize - last) as f32, below);
-        let (title, back, hero) = (frame.title, frame.back, frame.hero);
-        let (bg, chip, ink, status) = if hero {
-            (t.hero.top, t.hero.card, t.hero.title, t.hero.status)
+        let (_, big, small) = self.titles.as_mut().expect("drawn above");
+
+        if let Some(art) = &frame.hero {
+            // The field fills the screen and fades as the page scrolls; the
+            // cards scroll over it. The version fades and shrinks away
+            // first, then the wordmark.
+            let glow = self.glow.as_ref().expect("the About page keeps its field");
+            let fade = (1.0 - scroll / m.dp(ABOUT_FIELD_DP)).clamp(0.0, 1.0);
+            let top = (widgets::bar_bottom(&t) + m.dp(ABOUT_FIELD_DP)) / m.h as f32;
+            let field = glow::sample(glow, out.w as usize, out.h as usize, FIELD_CELL, top, t.pal.bg, fade);
+            let dither = self.dither.get_or_insert_with(|| glow::Dither::new(out.w as usize, out.h as usize));
+            glow::paint(out, &field, fade, &glow::Layer { canvas: &frame.canvas, runs: &art.runs, offset: offset as isize }, dither);
+            let range = m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(&t);
+            let v = (scroll / range).clamp(0.0, 1.0);
+            art.version.draw_scaled(out, 0.0, 0.0, 1.0 - 0.1 * v, t.hero.version, 1.0 - v);
+            let l = ((scroll - range) / m.dp(ABOUT_LOGO_FADE_DP)).clamp(0.0, 1.0);
+            glow::ink_wordmark(out, &field, &glow.look().ink, &art.wordmark, 1.0 - 0.1 * l, 1.0 - l, fade, dither);
         } else {
-            (t.pal.bg, t.pal.card, t.pal.text, t.pal.status)
-        };
-        if bar_shown {
-            let key = (self.screen(), self.state.dark);
-            if self.bar.as_ref().is_none_or(|(k, _)| *k != key) {
-                let mut c = Canvas::new(out.w, widgets::top_bar_height(&t).ceil() as u32);
-                widgets::top_bar(&mut c, &t, f, title, back, bg, chip, ink);
-                self.bar = Some((key, c));
+            // The page rows on screen, and the page colour past its ends.
+            let row = out.w as usize * 4;
+            let first = (-offset).clamp(0.0, out.h as f32) as usize;
+            let last = (frame.canvas.h as f32 - offset).clamp(first as f32, out.h as f32) as usize;
+            if first < last {
+                let from = (offset as isize + first as isize) as usize * row;
+                out.data[first * row..last * row].copy_from_slice(&frame.canvas.data[from..from + (last - first) * row]);
             }
-            let (_, c) = self.bar.as_ref().expect("drawn above");
-            out.data[..c.data.len()].copy_from_slice(&c.data);
+            out.fill_rect(0.0, 0.0, out.w as f32, first as f32, t.pal.bg);
+            out.fill_rect(0.0, last as f32, out.w as f32, (out.h as usize - last) as f32, t.pal.bg);
+            if frame.header {
+                let level = (1.0 - scroll / m.dp(TITLE_FADE_DP)).clamp(0.0, 1.0);
+                draw_faded(out, big, 0.0, -offset, t.pal.text, level, (1.0 - level) * m.dp(TITLE_BLUR_DP));
+            }
         }
+        let bar = self.bar.level(now);
+        if bar > 0.0 {
+            let stops = if frame.hero.is_some() { &widgets::ABOUT_BAR_MASK[..] } else { &widgets::BAR_MASK[..] };
+            widgets::bar_mask(out, &t, stops, t.pal.bg, bar);
+        }
+        if frame.back {
+            let (_, chip, x, y) = self.chip.as_ref().expect("drawn above");
+            out.lay(chip, *x, *y, bar);
+            widgets::back_arrow(out, &t, t.pal.text);
+        }
+        let level = self.title.level(now);
+        let blur = if frame.hero.is_some() { 0.0 } else { (1.0 - level) * m.dp(TITLE_BLUR_DP) };
+        draw_faded(out, small, 0.0, 0.0, t.pal.text, level, blur);
+
         let battery = info.battery.as_ref().map(|b| (b.level, b.charge == Charge::Charging));
-        widgets::status_bar(out, &t, f, &Bar { clock, battery }, status);
+        widgets::status_bar(out, &t, f, &Bar { clock, battery }, t.pal.status);
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
         }
@@ -413,12 +607,17 @@ impl App {
         }
     }
 
-    /// Put the page back where it rests, for a page just opened or
-    /// returned to.
+    /// Put the page back where it rests and the bar away, for a page just
+    /// opened or returned to.
     fn settle_page(&mut self) {
         self.fling = None;
         self.pull = 0.0;
         self.bounce = None;
+        self.titles = None;
+        self.glow = None;
+        let hero = self.screen() == Screen::About;
+        self.title = title_fade(hero);
+        self.bar = bar_fade(hero);
     }
 
     fn say(&mut self, text: &str, now: u64) {
@@ -509,12 +708,13 @@ impl App {
                         return fx;
                     }
                 }
-                // Over a scrolled page the compact bar covers the top; only
-                // its `<` answers there.
-                let hit = if self.bar_shown(&t) && y < widgets::top_bar_height(&t) {
-                    let back = self.frame.as_ref().is_some_and(|fr| fr.back);
-                    let r = widgets::back_rect(&t);
-                    (back && r.contains(x, y)).then_some((Action::Back, r))
+                // The `<` stays put while the page scrolls; under the bar
+                // only it answers.
+                let back = widgets::back_rect(&t);
+                let hit = if self.frame.as_ref().is_some_and(|fr| fr.back) && back.contains(x, y) {
+                    Some((Action::Back, back))
+                } else if self.bar.on && y < widgets::bar_bottom(&t) {
+                    None
                 } else {
                     self.frame.as_ref().and_then(|fr| fr.hit(x, y + scroll)).map(|h| (h.action, h.rect))
                 };
@@ -798,16 +998,39 @@ mod tests {
         fx
     }
 
+    /// Tap the `<`, which stays at the top of the screen.
+    fn tap_back(app: &mut App, f: &Fonts, i: &DeviceInfo, now: u64) {
+        app.frame(f, i, DataState::Unmounted);
+        let (x, y) = widgets::back_rect(&app.theme()).centre();
+        app.touch(Touch::Down(x, y), f, now);
+        app.touch(Touch::Up, f, now);
+    }
+
     #[test]
     fn rows_open_pages_and_back_returns() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         tap(&mut app, &f, &i, Action::Open(Screen::Settings));
         assert_eq!(app.screen(), Screen::Settings);
-        tap(&mut app, &f, &i, Action::Back);
+        tap_back(&mut app, &f, &i, 0);
         assert_eq!(app.screen(), Screen::Home);
         app.key(Key::Back, 0);
         assert_eq!(app.screen(), Screen::Home, "back on the first page stays there");
+    }
+
+    #[test]
+    fn the_back_control_stays_put_while_the_page_scrolls() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Settings));
+        app.frame(&f, &i, DataState::Unmounted);
+        app.touch(Touch::Down(700.0, 2400.0), &f, 0);
+        app.touch(Touch::Move(700.0, 2000.0), &f, 0);
+        app.touch(Touch::Move(700.0, 1800.0), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        assert_eq!(app.top().1, 600.0);
+        tap_back(&mut app, &f, &i, 0);
+        assert_eq!(app.screen(), Screen::Home);
     }
 
     /// `screen` opened from the home page, so there is a page to go back
@@ -849,7 +1072,7 @@ mod tests {
         assert!(!matches!(app.drag, Drag::Edge { .. }), "no cue");
         app.touch(Touch::Up, &f, 24);
         assert_eq!(app.screen(), Screen::Home);
-        assert_eq!(app.deadline(), None, "nothing left on screen to settle");
+        assert_eq!(app.deadline(24), None, "nothing left on screen to settle");
     }
 
     #[test]
@@ -864,9 +1087,9 @@ mod tests {
         app.touch(Touch::Move(40.0, 1600.0), &f, 32);
         app.touch(Touch::Up, &f, 40);
         assert_eq!(app.screen(), Screen::Reboot, "pulled back in, it does not go back");
-        assert_eq!(app.deadline(), Some(0), "the cue is sinking back");
+        assert_eq!(app.deadline(40), Some(0), "the cue is sinking back");
         app.tick(1000);
-        assert_eq!(app.deadline(), None);
+        assert_eq!(app.deadline(1000), None);
     }
 
     #[test]
@@ -910,12 +1133,12 @@ mod tests {
         assert!(app.overscroll(1000) > shown);
         app.touch(Touch::Up, &f, 1400);
         assert!(app.overscroll(1400) < 0.0);
-        assert_eq!(app.deadline(), Some(0));
+        assert_eq!(app.deadline(1400), Some(0));
         app.tick(1500);
         assert!(app.overscroll(1500) > app.overscroll(1400), "on its way back");
         app.tick(3000);
         assert_eq!(app.overscroll(3000), 0.0);
-        assert_eq!(app.deadline(), None);
+        assert_eq!(app.deadline(3000), None);
     }
 
     #[test]
@@ -983,11 +1206,13 @@ mod tests {
         let lift = flick(&mut app, &f, 1000, 20.0);
         let lifted = app.top().1;
         assert_eq!(lifted, 100.0);
-        assert_eq!(app.deadline(), Some(0), "the page moves on after the lift");
+        assert_eq!(app.deadline(lift), Some(0), "the page moves on after the lift");
         app.tick(lift + 50);
         assert!(app.top().1 > lifted);
-        app.tick(lift + 5000);
-        assert_eq!(app.deadline(), None, "the glide comes to rest");
+        for ms in (100..5000).step_by(8) {
+            app.tick(lift + ms);
+        }
+        assert_eq!(app.deadline(lift + 5000), None, "the glide comes to rest");
         let rest = app.top().1;
         assert!(rest > lifted + 300.0 && rest < app.max_scroll(), "{rest}");
     }
@@ -1006,7 +1231,7 @@ mod tests {
         assert_eq!(app.top().1, app.max_scroll());
         assert!(furthest > app.theme().m.dp(8.0), "it ran on past the end: {furthest}");
         assert_eq!(app.overscroll(lift + 2000), 0.0);
-        assert_eq!(app.deadline(), None);
+        assert_eq!(app.deadline(lift + 2000), None);
     }
 
     #[test]
@@ -1018,7 +1243,7 @@ mod tests {
         app.touch(Touch::Move(700.0, 2200.0), &f, 1008);
         app.touch(Touch::Move(700.0, 2000.0), &f, 1016);
         app.touch(Touch::Up, &f, 1100);
-        assert_eq!(app.deadline(), None);
+        assert!(app.fling.is_none());
         assert_eq!(app.top().1, 400.0);
     }
 
@@ -1029,7 +1254,7 @@ mod tests {
         app.frame(&f, &i, DataState::Unmounted);
         let lift = flick(&mut app, &f, 1000, 20.0);
         app.tick(lift + 30);
-        assert_eq!(app.deadline(), Some(0), "the page is gliding");
+        assert!(app.fling.is_some(), "the page is gliding");
         let held = app.top().1;
         let (x, y) = spot(&mut app, &f, &i, Action::Toggle(Switch::Vibrate));
         assert!(y > 0.0 && y < H as f32, "the switch is on screen");
@@ -1038,7 +1263,7 @@ mod tests {
         assert_eq!(app.top().1, held, "the page stopped under the finger");
         app.touch(Touch::Up, &f, lift + 520);
         assert!(app.state.vibrate, "the switch was not flipped");
-        assert_eq!(app.deadline(), None);
+        assert!(app.fling.is_none());
     }
 
     #[test]
@@ -1047,9 +1272,58 @@ mod tests {
         let mut app = App::new(Screen::Settings, W, H, PPD);
         app.frame(&f, &i, DataState::Unmounted);
         let lift = flick(&mut app, &f, 1000, 20.0);
-        assert_eq!(app.deadline(), Some(0), "the page is gliding");
+        assert!(app.fling.is_some(), "the page is gliding");
         app.key(Key::Back, lift + 20);
-        assert_eq!(app.deadline(), None);
+        assert!(app.fling.is_none());
+    }
+
+    /// Drag the page to scroll `to`, resting before lifting so it does not
+    /// glide, and let the time pass. The finger first goes 100 px, past the
+    /// touch slop, and comes back to the mark.
+    fn scroll_to(app: &mut App, f: &Fonts, to: f32, now: u64) {
+        let from = app.top().1;
+        app.touch(Touch::Down(700.0, 2400.0), f, now);
+        app.touch(Touch::Move(700.0, 2300.0), f, now + 200);
+        app.touch(Touch::Move(700.0, 2400.0 - (to - from)), f, now + 400);
+        app.touch(Touch::Up, f, now + 800);
+        app.tick(now + 800);
+        assert!((app.top().1 - to).abs() < 0.01, "{} {to}", app.top().1);
+    }
+
+    #[test]
+    fn the_bar_title_comes_after_the_large_title_fades_and_the_bar_once_content_slides_under() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        let fr = app.frame(&f, &i, DataState::Unmounted);
+        let content_top = fr.content_top;
+        let m = app.theme().m;
+        scroll_to(&mut app, &f, m.dp(TITLE_FADE_DP) - 2.0, 0);
+        assert!(!app.title.on && !app.bar.on);
+        scroll_to(&mut app, &f, m.dp(TITLE_FADE_DP) + 2.0, 1000);
+        assert!(app.title.on, "the large title is gone");
+        assert!(!app.bar.on, "the content is not under the bar yet");
+        assert!(app.title.level(1900) < 1.0 && app.title.level(1900) > 0.0, "it eases in");
+        assert_eq!(app.title.level(3000), 1.0);
+        let under = content_top - widgets::bar_bottom(&app.theme()) - m.dp(20.0);
+        scroll_to(&mut app, &f, under + 10.0, 4000);
+        assert!(app.bar.on);
+        assert_eq!(app.bar.level(4800 + 100), 1.0, "the bar comes in 100 ms");
+        scroll_to(&mut app, &f, 0.0, 6000);
+        assert!(!app.title.on && !app.bar.on);
+    }
+
+    #[test]
+    fn the_about_page_brings_title_and_bar_together_once_the_version_fades() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::About, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        let t = app.theme();
+        let gone = t.m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(&t);
+        scroll_to(&mut app, &f, gone - 4.0, 0);
+        assert!(!app.title.on && !app.bar.on);
+        scroll_to(&mut app, &f, gone + 4.0, 1000);
+        assert!(app.title.on && app.bar.on);
+        assert!((app.bar.level(1800 + 75) - 0.5).abs() < 0.01, "a straight 150 ms fade");
     }
 
     #[test]
@@ -1108,9 +1382,9 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         tap(&mut app, &f, &i, Action::Unavailable("安装还没实现"));
-        assert_eq!(app.deadline(), Some(TOAST_MS));
+        assert_eq!(app.deadline(0), Some(TOAST_MS));
         app.tick(TOAST_MS);
-        assert_eq!(app.deadline(), None);
+        assert_eq!(app.deadline(TOAST_MS), None);
     }
 
     #[test]
@@ -1122,7 +1396,7 @@ mod tests {
         assert!(!hits.iter().any(|h| h.action == Action::RebootTarget(fastboot)));
         tap(&mut app, &f, &i, Action::Unavailable("用户空间 fastboot 还没接入"));
         assert_eq!(app.state.reboot, 0, "the target stays on system");
-        assert_eq!(app.deadline(), Some(TOAST_MS));
+        assert_eq!(app.deadline(0), Some(TOAST_MS));
     }
 
     #[test]

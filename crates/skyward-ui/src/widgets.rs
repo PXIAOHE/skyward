@@ -2,6 +2,7 @@ use crate::canvas::Canvas;
 use crate::color::{mix, Rgba};
 use crate::font::{Face, Fonts};
 use crate::geom::Rect;
+use crate::sprite::Sprite;
 use crate::theme::Theme;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
 
@@ -334,35 +335,141 @@ pub fn back_cue(c: &mut Canvas, t: &Theme, from_left: bool, cy: f32, depth: f32,
     }
 }
 
-/// Optional `<` and the large page title; the status bar is laid over the
-/// page when it is shown. Returns where the page content starts.
-pub fn header(c: &mut Canvas, t: &Theme, f: &Fonts, title: &str, back: bool) -> f32 {
-    let m = &t.m;
-    if back {
-        back_arrow(c, t, t.pal.text);
-    }
-    c.text_top(&f.title, title, m.title_x, m.title_top, m.title_px, t.pal.text, None);
-    m.content_top
+/// Room left around title ink for it to blur into.
+fn blur_room(t: &Theme) -> f32 {
+    t.m.dp(14.0)
 }
 
-/// Height of the bar that replaces the large title once a page scrolls.
-pub fn top_bar_height(t: &Theme) -> f32 {
-    t.m.back_cy + t.m.dp(32.0)
+/// The large title a page opens with, as ink that fades and blurs away
+/// while the page scrolls; it sits where the page starts and scrolls with
+/// it.
+pub fn big_title(t: &Theme, f: &Fonts, title: &str) -> Sprite {
+    let m = &t.m;
+    let pad = blur_room(t);
+    let w = Canvas::new(0, 0).text_width(&f.title, title, m.title_px);
+    let (x, y) = (m.title_x - pad, m.title_top - pad);
+    let size = ((w + pad * 2.0).ceil() as u32, (m.title_px * 1.4 + pad * 2.0).ceil() as u32);
+    Sprite::capture(x, y, size.0, size.1, |c, dx, dy| {
+        c.text_top(&f.title, title, m.title_x + dx, m.title_top + dy, m.title_px, Rgba::rgb(0, 0, 0), None);
+    })
 }
 
-/// The bar shown over a scrolled page: the status bar area, the `<` inside a
-/// round chip, and the page title centred, on `bg`.
-#[allow(clippy::too_many_arguments)]
-pub fn top_bar(c: &mut Canvas, t: &Theme, f: &Fonts, title: &str, back: bool, bg: Rgba, chip: Rgba, ink: Rgba) {
+/// The page title centred in the bar over a scrolled page, as ink that
+/// fades and sharpens in.
+pub fn small_title(t: &Theme, f: &Fonts, title: &str) -> Sprite {
     let m = &t.m;
-    let h = top_bar_height(t);
-    c.shade_rows(0, h.ceil() as u32, |_, _| bg);
-    if back {
-        let r = m.dp(23.0);
-        c.fill_circle(m.back_x + m.back_w / 2.0 + m.dp(2.0), m.back_cy, r, chip);
-        back_arrow(c, t, ink);
+    let (px, pad) = (m.account_title_px, blur_room(t));
+    let w = Canvas::new(0, 0).text_width(&f.heading, title, px);
+    let h = px * 1.5;
+    let (x, y) = ((m.w as f32 - w) / 2.0 - pad, m.back_cy - h / 2.0 - pad);
+    Sprite::capture(x, y, (w + pad * 2.0).ceil() as u32, (h + pad * 2.0).ceil() as u32, |c, dx, dy| {
+        c.text_center(&f.heading, title, m.w as f32 / 2.0 + dx, m.back_cy + dy, px, Rgba::rgb(0, 0, 0));
+    })
+}
+
+/// Where the bar over a scrolled page ends: the status bar and the 56 dp
+/// title bar under it.
+pub fn bar_bottom(t: &Theme) -> f32 {
+    t.m.back_cy + t.m.dp(28.0)
+}
+
+/// Strength of the bar's mask from its top (0) to 20 dp below the bar (1).
+pub const BAR_MASK: [(f32, f32); 17] = [
+    (0.0, 0.98),
+    (0.5, 0.98),
+    (0.555, 0.97),
+    (0.605, 0.94),
+    (0.65, 0.91),
+    (0.69, 0.86),
+    (0.725, 0.8),
+    (0.76, 0.74),
+    (0.785, 0.67),
+    (0.815, 0.59),
+    (0.84, 0.51),
+    (0.865, 0.42),
+    (0.89, 0.34),
+    (0.915, 0.25),
+    (0.94, 0.16),
+    (0.97, 0.08),
+    (1.0, 0.0),
+];
+
+/// The About page's mask, solid at its top.
+pub const ABOUT_BAR_MASK: [(f32, f32); 5] = [(0.0, 1.0), (0.52, 0.98), (0.74, 0.8), (0.85, 0.5), (1.0, 0.0)];
+
+/// The mask over the top of a scrolled page: `color`, nearly solid behind
+/// the status bar and title, thinning out by 20 dp below them, with an
+/// ordered dither against banding. `level` brings it in and out.
+pub fn bar_mask(c: &mut Canvas, t: &Theme, stops: &[(f32, f32)], color: Rgba, level: f32) {
+    const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    let h = bar_bottom(t) + t.m.dp(20.0);
+    let ink = [color.r as u32, color.g as u32, color.b as u32];
+    let row_len = c.w as usize * 4;
+    for y in 0..(h.ceil() as u32).min(c.h) {
+        let f = (y as f32 + 0.5) / h;
+        let a = ramp(stops, f) * level * 255.0;
+        if a <= 0.0 {
+            continue;
+        }
+        // The dither shifts the opacity by under half a step, in a 4×4
+        // pattern. Opacities run 0 to 256 so a shift divides by them.
+        let k: [u32; 4] = std::array::from_fn(|i| {
+            let k = (a + BAYER[y as usize % 4][i] as f32 / 16.0 - 0.5).clamp(0.0, 255.0).round() as u32;
+            k + (k >> 7)
+        });
+        let lit: [[u32; 3]; 4] = k.map(|k| ink.map(|v| v * k + 128));
+        let start = y as usize * row_len;
+        for quad in c.data[start..start + row_len].as_chunks_mut::<16>().0 {
+            for (i, px) in quad.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let keep = 256 - k[i];
+                for ch in 0..3 {
+                    px[ch] = ((lit[i][ch] + px[ch] as u32 * keep) >> 8) as u8;
+                }
+            }
+        }
     }
-    c.text_center(&f.heading, title, m.w as f32 / 2.0, m.back_cy, m.account_title_px, ink);
+}
+
+/// The piecewise-linear value of `stops` at `f`.
+fn ramp(stops: &[(f32, f32)], f: f32) -> f32 {
+    let (first, last) = (stops[0], stops[stops.len() - 1]);
+    if f <= first.0 {
+        return first.1;
+    }
+    if f >= last.0 {
+        return last.1;
+    }
+    let i = stops.iter().position(|s| s.0 > f).expect("f lies inside the stops");
+    let ((p0, a0), (p1, a1)) = (stops[i - 1], stops[i]);
+    a0 + (a1 - a0) * (f - p0) / (p1 - p0)
+}
+
+/// The round chip behind `<` while the bar shows: a pale disc with a
+/// bright rim and a faint shadow. Drawn once per theme on its own canvas,
+/// returned with where that canvas's top-left corner goes.
+pub fn back_chip(t: &Theme) -> (Canvas, i32, i32) {
+    let m = &t.m;
+    let (cx, cy, r) = (m.back_x + m.back_w / 2.0 + m.dp(1.55), m.back_cy, m.dp(21.7));
+    let (fill, rim) = if t.dark { (Rgba::rgb(38, 38, 38), Rgba::rgb(62, 62, 62)) } else { (Rgba::rgb(248, 248, 248), Rgba::rgb(255, 255, 255)) };
+    let spread = m.dp(7.0);
+    let reach = r + spread;
+    let (x0, y0) = ((cx - reach).floor() as i32 - 1, (cy - reach).floor() as i32 - 1);
+    let size = (reach * 2.0).ceil() as u32 + 3;
+    let mut c = Canvas::new(size, size);
+    let (cx, cy) = (cx - x0 as f32, cy - y0 as f32);
+    for py in 0..size as i32 {
+        for px in 0..size as i32 {
+            let d = (px as f32 + 0.5 - cx).hypot(py as f32 + 0.5 - cy) - r;
+            if d > 0.0 && d < spread {
+                let k = 1.0 - d / spread;
+                c.blend(px, py, Rgba::rgb(0, 0, 0), 0.04 * k * k);
+            }
+        }
+    }
+    c.fill_circle(cx, cy, r, fill);
+    let rim_w = m.dp(0.8);
+    c.stroke_circle(cx, cy, r - rim_w / 2.0, rim_w, rim);
+    (c, x0, y0)
 }
 
 /// A short message in a dark capsule above the bottom edge.
@@ -837,57 +944,29 @@ pub fn outline(c: &mut Canvas, t: &Theme, icon: Outline, cx: f32, cy: f32) {
     }
 }
 
-/// The About page backdrop over the whole canvas: soft colour fields over a
-/// vertical blend that keeps its bottom colour past the first screen.
-pub fn hero_backdrop(c: &mut Canvas, t: &Theme) {
-    let hero = t.hero;
-    let (w, sh) = (t.m.w as f32, t.m.h as f32);
-    // Each field is a Gaussian, and exp(-(dx² + dy²)) = exp(-dx²)·exp(-dy²):
-    // one exponential per column and one per row instead of one per pixel.
-    let falloff = |d: f32| (-d * d).exp();
-    let cols = hero.blobs.map(|(bx, _, br, _)| (0..c.w).map(|x| falloff((x as f32 + 0.5 - bx * w) / (br * w))).collect::<Vec<f32>>());
-    for y in 0..c.h {
-        let py = y as f32 + 0.5;
-        let fy = py / sh;
-        let base = if fy < 0.5 { mix(hero.top, hero.mid, fy / 0.5) } else { mix(hero.mid, hero.bottom, (fy - 0.5) / 0.5) };
-        let rows = hero.blobs.map(|(_, by, br, _)| 3.0 * falloff((py - by * sh) / (br * w)));
-        // Every field this faint shifts no channel by a step: the row is the
-        // plain blend.
-        if rows.iter().all(|&k| k < 1e-6) {
-            c.paint_row(y, |_| base);
-            continue;
-        }
-        c.paint_row(y, |x| {
-            let mut acc = [base.r as f32, base.g as f32, base.b as f32];
-            let mut sum = 1.0;
-            for (i, &(_, _, _, col)) in hero.blobs.iter().enumerate() {
-                let k = rows[i] * cols[i][x];
-                acc[0] += k * col.r as f32;
-                acc[1] += k * col.g as f32;
-                acc[2] += k * col.b as f32;
-                sum += k;
-            }
-            let ch = |v: f32| (v / sum).round() as u8;
-            Rgba::rgb(ch(acc[0]), ch(acc[1]), ch(acc[2]))
-        });
-    }
+/// Centred lettering with its cap line at `cap_top`, as ink whose colour
+/// comes from the field under it.
+pub fn wordmark(t: &Theme, f: &Fonts, text: &str, cap_top: f32, px: f32) -> Sprite {
+    let face = &f.display;
+    let w = Canvas::new(0, 0).text_width(face, text, px);
+    let x = (t.m.w as f32 - w) / 2.0;
+    let pad = t.m.dp(4.0);
+    let (left, top) = (x - pad, cap_top - px * 0.4);
+    Sprite::capture(left, top, (w + pad * 2.0).ceil() as u32, (px * 1.6).ceil() as u32, |c, dx, dy| {
+        c.text(face, text, x + dx, cap_top + face.cap(px) + dy, px, Rgba::rgb(0, 0, 0), None);
+    })
 }
 
-/// Centred gradient lettering with its cap line at `cap_top`.
-pub fn wordmark(c: &mut Canvas, t: &Theme, f: &Fonts, text: &str, cap_top: f32, px: f32) {
-    let face = &f.display;
-    let w = c.text_width(face, text, px);
-    let x = (t.m.w as f32 - w) / 2.0;
-    let ink = t.hero.ink;
-    let paint = |gx: f32, _: f32| {
-        let u = ((gx - x) / w).clamp(0.0, 1.0);
-        if u < 0.5 {
-            mix(ink[0], ink[1], u / 0.5)
-        } else {
-            mix(ink[1], ink[2], (u - 0.5) / 0.5)
-        }
-    };
-    c.text_paint(face, text, x, cap_top + face.cap(px), px, &paint, None);
+/// The version line centred under the About wordmark.
+pub fn version_line(t: &Theme, f: &Fonts, text: &str) -> Sprite {
+    let m = &t.m;
+    let px = m.dp(13.3);
+    let w = Canvas::new(0, 0).text_width(&f.body, text, px);
+    let base = m.dp(296.3) + f.body.cap(px);
+    let (left, top) = ((m.w as f32 - w) / 2.0 - m.dp(2.0), base - px * 1.2);
+    Sprite::capture(left, top, (w + m.dp(4.0)).ceil() as u32, (px * 1.6).ceil() as u32, |c, dx, dy| {
+        c.text(&f.body, text, (m.w as f32 - w) / 2.0 + dx, base + dy, px, Rgba::rgb(0, 0, 0), None);
+    })
 }
 
 /// A row of the About summary card: title on the left, value on the right,
