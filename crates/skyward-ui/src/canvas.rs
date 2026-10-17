@@ -98,8 +98,24 @@ impl Canvas {
         let x1 = (x + w + 1.0).ceil() as i32;
         let y1 = (y + h + 1.0).ceil() as i32;
         for py in y0..y1 {
+            let fy = py as f32 + 0.5;
+            // Pixels at least half a pixel inside the straight edges are fully
+            // covered: the whole width between the corners' rows, the part
+            // between the corners above and below them.
+            let dy = (fy - cy).abs();
+            let reach = if dy <= hy - r {
+                hx - 0.5
+            } else if dy <= hy - 0.5 {
+                hx - r
+            } else {
+                -1.0
+            };
             for px in x0..x1 {
-                let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+                let fx = px as f32 + 0.5;
+                if (fx - cx).abs() <= reach {
+                    self.blend(px, py, paint(fx, fy), 1.0);
+                    continue;
+                }
                 let d = rr_sdf(fx, fy, cx, cy, hx, hy, r);
                 let cov = (0.5 - d).clamp(0.0, 1.0);
                 if cov > 0.0 {

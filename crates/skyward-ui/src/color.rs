@@ -30,6 +30,12 @@ pub fn blend_over(dst: &mut [u8], src: Rgba, cov: f32) {
     if sa <= 0.0 {
         return;
     }
+    // An opaque source at full coverage comes out of the formula below as
+    // itself, so write it directly.
+    if sa >= 1.0 {
+        dst.copy_from_slice(&[src.r, src.g, src.b, 255]);
+        return;
+    }
     let da = dst[3] as f32 / 255.0;
     let out_a = sa + da * (1.0 - sa);
     if out_a <= 0.0 {
