@@ -1,0 +1,12 @@
+[package]
+name = "skyward-info"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+libc = { workspace = true }
+skyward-block = { path = "../skyward-block" }
+skyward-config = { path = "../skyward-config" }
+skyward-vab = { path = "../skyward-vab" }

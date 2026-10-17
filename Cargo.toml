@@ -8,11 +8,12 @@ members = [
     "crates/skyward-modules",
     "crates/skyward-ui",
     "crates/skyward-crypto",
+    "crates/skyward-info",
     "crates/skyward-preview",
 ]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 

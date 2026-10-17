@@ -540,19 +540,20 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "skyward"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "skyward-block",
  "skyward-config",
+ "skyward-info",
  "skyward-modules",
  "skyward-vab",
 ]
 
 [[package]]
 name = "skyward-block"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -560,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "skyward-config"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -569,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "skyward-crypto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -579,8 +580,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "skyward-info"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "skyward-block",
+ "skyward-config",
+ "skyward-vab",
+]
+
+[[package]]
 name = "skyward-modules"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -588,24 +600,29 @@ dependencies = [
 
 [[package]]
 name = "skyward-preview"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "png",
+ "skyward-config",
+ "skyward-info",
  "skyward-ui",
+ "skyward-vab",
 ]
 
 [[package]]
 name = "skyward-ui"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
+ "skyward-info",
+ "skyward-vab",
 ]
 
 [[package]]
 name = "skyward-vab"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "skyward-block",

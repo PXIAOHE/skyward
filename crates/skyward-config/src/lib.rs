@@ -22,6 +22,12 @@ pub struct Device {
     pub model: String,
     #[serde(default = "default_true")]
     pub ab: bool,
+    /// SoC marketing name shown on the About page.
+    #[serde(default)]
+    pub soc: Option<String>,
+    /// System property that carries the vendor OS version.
+    #[serde(default = "default_os_version_prop")]
+    pub os_version_prop: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -58,6 +64,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_os_version_prop() -> String {
+    "ro.build.display.id".into()
+}
+
 fn default_module_sources() -> Vec<String> {
     vec!["vendor_boot".into(), "vendor_dlkm".into(), "vendor".into()]
 }
@@ -84,6 +94,7 @@ mod tests {
         let cfg = DeviceConfig::parse("[device]\ncodename = \"nezha\"\n").unwrap();
         assert_eq!(cfg.device.codename, "nezha");
         assert!(cfg.device.ab);
+        assert_eq!(cfg.device.os_version_prop, "ro.build.display.id");
         assert_eq!(cfg.modules.sources, default_module_sources());
     }
 
@@ -91,6 +102,8 @@ mod tests {
     fn parses_nezha() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
         assert_eq!(cfg.device.codename, "nezha");
+        assert_eq!(cfg.device.os_version_prop, "ro.mi.os.version.incremental");
+        assert_eq!(cfg.device.soc.as_deref(), Some("第五代骁龙®8至尊版"));
         assert_eq!(cfg.display.width, 1200);
         assert_eq!(cfg.decrypt.weaver, vec!["goodix", "thales"]);
     }

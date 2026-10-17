@@ -14,6 +14,13 @@ impl Slot {
         }
     }
 
+    pub fn letter(self) -> &'static str {
+        match self {
+            Slot::A => "A",
+            Slot::B => "B",
+        }
+    }
+
     pub fn other(self) -> Slot {
         match self {
             Slot::A => Slot::B,
@@ -86,6 +93,7 @@ mod tests {
         assert_eq!(Slot::from_suffix("_a"), Some(Slot::A));
         assert_eq!(Slot::A.other(), Slot::B);
         assert_eq!(Slot::B.suffix(), "_b");
+        assert_eq!(Slot::B.letter(), "B");
         assert_eq!(Slot::from_suffix("_c"), None);
     }
 }

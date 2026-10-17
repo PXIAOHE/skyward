@@ -3,6 +3,8 @@ codename = "nezha"
 brand = "Xiaomi"
 model = "Xiaomi 17 Ultra"
 ab = true
+soc = "第五代骁龙®8至尊版"
+os_version_prop = "ro.mi.os.version.incremental"
 
 [display]
 width = 1200
