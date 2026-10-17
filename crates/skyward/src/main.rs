@@ -204,6 +204,17 @@ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
     skyward_modules::load(&dirs, names)
 }
 
+/// Load the configured kernel modules and start the phone's own programs,
+/// both read from the partitions just mounted: on the 13 Ultra, the
+/// touchscreen driver and the touch processing.
+#[cfg(target_os = "android")]
+fn bring_up(cfg: &DeviceConfig) -> Result<()> {
+    for path in load_modules(cfg, &cfg.modules.load)? {
+        skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
+    }
+    services::start(&cfg.services)
+}
+
 /// The recovery service. adb comes up first so a failure later on can be
 /// inspected, then the boot request in misc is taken so that any reboot from
 /// here boots the system; failures go to the kernel log and still end the
@@ -235,6 +246,12 @@ fn recovery() -> Result<()> {
                         m.mount_point.display(),
                         m.filesystem
                     ))?;
+                }
+                // Without them the screen still shows and the keys still
+                // work, so this reason goes to the kernel log as well.
+                #[cfg(target_os = "android")]
+                if let Err(e) = bring_up(&cfg) {
+                    skyward_sys::kmsg(&format!("devices not brought up: {e:#}"))?;
                 }
             }
             Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
