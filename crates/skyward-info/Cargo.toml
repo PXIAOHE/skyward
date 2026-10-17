@@ -9,4 +9,5 @@ anyhow = { workspace = true }
 libc = { workspace = true }
 skyward-block = { path = "../skyward-block" }
 skyward-config = { path = "../skyward-config" }
+skyward-sys = { path = "../skyward-sys" }
 skyward-vab = { path = "../skyward-vab" }

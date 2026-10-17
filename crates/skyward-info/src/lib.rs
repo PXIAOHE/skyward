@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use skyward_config::DeviceConfig;
+use skyward_sys::prop;
 use skyward_vab::{Slot, SnapshotState};
 use std::ffi::{CStr, CString};
 use std::fs;
@@ -152,24 +153,6 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         snapshot: skyward_vab::snapshot_state()?,
         boot: Boot { unlocked, verified: skyward_block::boot_param("androidboot.verifiedbootstate")? },
     })
-}
-
-/// A system property, or `None` when it is unset.
-#[cfg(target_os = "android")]
-pub fn prop(name: &str) -> Option<String> {
-    let key = CString::new(name).expect("property names contain no NUL");
-    let mut buf = [0 as libc::c_char; libc::PROP_VALUE_MAX as usize];
-    let n = unsafe { libc::__system_property_get(key.as_ptr(), buf.as_mut_ptr()) };
-    if n <= 0 {
-        return None;
-    }
-    Some(unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned())
-}
-
-/// Hosts have no property area.
-#[cfg(not(target_os = "android"))]
-pub fn prop(_name: &str) -> Option<String> {
-    None
 }
 
 fn read(path: impl AsRef<Path>) -> Result<String> {

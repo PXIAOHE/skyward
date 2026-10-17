@@ -16,3 +16,4 @@ skyward-block = { path = "../skyward-block" }
 skyward-vab = { path = "../skyward-vab" }
 skyward-modules = { path = "../skyward-modules" }
 skyward-info = { path = "../skyward-info" }
+skyward-sys = { path = "../skyward-sys" }

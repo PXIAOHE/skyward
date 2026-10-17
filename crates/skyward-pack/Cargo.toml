@@ -1,0 +1,18 @@
+[package]
+name = "skyward-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "skyward-pack"
+path = "src/main.rs"
+
+[dependencies]
+abootimg-oxide = "0.5.2"
+anyhow = { workspace = true }
+clap = { version = "4.5.51", features = ["derive"] }
+cpio = "0.4.1"
+lz4_flex = "0.14.0"
+skyward-config = { path = "../skyward-config" }

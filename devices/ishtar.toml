@@ -1,0 +1,16 @@
+[device]
+codename = "ishtar"
+brand = "Xiaomi"
+model = "Xiaomi 13 Ultra"
+ab = true
+soc = "第二代骁龙®8移动平台"
+os_version_prop = "ro.mi.os.version.incremental"
+
+[display]
+width = 1440
+height = 3200
+density = 560
+diagonal = 6.73
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor"]

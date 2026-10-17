@@ -1,7 +1,9 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use skyward_config::DeviceConfig;
+use skyward_config::{ramdisk, DeviceConfig};
+use skyward_sys::Power;
 use skyward_vab::SnapshotState;
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "skyward", version, about = "Skyward recovery")]
@@ -25,14 +27,45 @@ enum Cmd {
         #[arg(long, default_value = "/vendor/lib/modules")]
         source: String,
     },
+    /// Run as the recovery service (what init starts as /system/bin/recovery).
+    Recovery,
+    /// Reboot through init: system, recovery, bootloader, edl, or off.
+    Reboot { target: String },
 }
 
 fn main() -> Result<()> {
+    // init starts the recovery service by path with no arguments.
+    let started_as = std::env::args().next().unwrap_or_default();
+    if Path::new(&started_as).file_name().is_some_and(|n| n == "recovery") {
+        return recovery();
+    }
     match Cli::parse().cmd {
         Cmd::Info { config } => info(&config),
         Cmd::Slot => slot(),
         Cmd::Modules { source } => modules(&source),
+        Cmd::Recovery => recovery(),
+        Cmd::Reboot { target } => {
+            let p = Power::parse(&target).ok_or_else(|| anyhow!("unknown target {target:?}"))?;
+            skyward_sys::power(p)
+        }
     }
+}
+
+/// The recovery service. Failures go to the kernel log, the only log that
+/// exists this early, and still end the process.
+fn recovery() -> Result<()> {
+    let run = || -> Result<()> {
+        let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
+        skyward_sys::kmsg(&format!("{} {} recovery up", cfg.device.codename, skyward_info::VERSION))?;
+        skyward_sys::set_prop("sys.usb.config", "adb")?;
+        // init restarts a service that exits, so the service stays resident.
+        loop {
+            std::thread::park();
+        }
+    };
+    run().inspect_err(|e| {
+        let _ = skyward_sys::kmsg(&format!("recovery failed: {e:#}"));
+    })
 }
 
 fn info(config: &str) -> Result<()> {
