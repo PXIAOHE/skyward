@@ -54,9 +54,6 @@ enum Cmd {
         /// The UI typeface.
         #[arg(long)]
         font: PathBuf,
-        /// adb public key to trust, usually ~/.android/adbkey.pub.
-        #[arg(long)]
-        adb_key: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -81,7 +78,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img)
         }
-        Cmd::Recovery { stock, binary, config, font, adb_key, out } => {
+        Cmd::Recovery { stock, binary, config, font, out } => {
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
@@ -94,15 +91,16 @@ fn main() -> Result<()> {
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             rd.add(paths::CONFIG, 0o644, read(&config)?)?;
             rd.add(paths::FONT, 0o644, read(&font)?)?;
-            rd.add(paths::ADB_KEYS, 0o644, read(&adb_key)?)?;
-            // adbd keeps root when ro.secure is 0 on an unlocked device; init
-            // lets a later line of a property file override an earlier one.
+            // On an unlocked device adbd keeps root when ro.secure is 0 and
+            // lets any computer in without authorization when ro.adb.secure is
+            // 0; init lets a later line of a property file override an earlier
+            // one.
             let mut props = rd
                 .find(paths::PROP_DEFAULT)
                 .with_context(|| format!("{} is not in the ramdisk", paths::PROP_DEFAULT))?
                 .data
                 .clone();
-            props.extend_from_slice(b"\nro.secure=0\n");
+            props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
             img.ramdisk = rd.encode()?;
             write(&out, &img)

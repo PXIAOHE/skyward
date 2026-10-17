@@ -11,8 +11,6 @@ pub mod ramdisk {
     pub const FONT: &str = "skyward/MiSansVF.ttf";
     /// The recovery service binary init starts.
     pub const RECOVERY: &str = "system/bin/recovery";
-    /// Public keys adbd accepts without a prompt.
-    pub const ADB_KEYS: &str = "adb_keys";
     /// The first property file init loads in recovery mode.
     pub const PROP_DEFAULT: &str = "prop.default";
 
