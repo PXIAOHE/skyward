@@ -12,6 +12,7 @@ members = [
     "crates/skyward-preview",
     "crates/skyward-pack",
     "crates/skyward-sys",
+    "crates/skyward-lp",
 ]
 
 [workspace.package]

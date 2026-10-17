@@ -1,0 +1,10 @@
+[package]
+name = "skyward-lp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+sha2 = "0.10.9"
+zerocopy = { version = "0.8.63", features = ["derive"] }
