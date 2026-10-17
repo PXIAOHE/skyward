@@ -1,20 +1,31 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 pub const BY_NAME: &str = "/dev/block/by-name";
 
-/// Active slot suffix (`_a` / `_b`) parsed from the kernel command line or
-/// bootconfig. Returns `None` on devices that are not A/B.
-pub fn slot_suffix() -> Option<String> {
+/// A bootloader parameter such as `androidboot.slot_suffix`, from bootconfig
+/// or, on kernels without it, the command line. Root tools can rewrite the
+/// matching `ro.boot.*` properties; these files come from the kernel.
+pub fn boot_param(key: &str) -> Result<Option<String>> {
     for src in ["/proc/bootconfig", "/proc/cmdline"] {
-        if let Ok(s) = fs::read_to_string(src) {
-            if let Some(v) = find_kv(&s, "androidboot.slot_suffix") {
-                return Some(v);
+        match fs::read_to_string(src) {
+            Ok(s) => {
+                if let Some(v) = find_kv(&s, key) {
+                    return Ok(Some(v));
+                }
             }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("read {src}")),
         }
     }
-    None
+    Ok(None)
+}
+
+/// Active slot suffix (`_a` / `_b`), or `None` on devices that are not A/B.
+pub fn slot_suffix() -> Result<Option<String>> {
+    boot_param("androidboot.slot_suffix")
 }
 
 fn find_kv(haystack: &str, key: &str) -> Option<String> {

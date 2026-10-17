@@ -60,17 +60,15 @@ fn info(config: &str) -> Result<()> {
     if snap != SnapshotState::None {
         println!("  -> dynamic-partition writes are refused while a snapshot is outstanding");
     }
-    match skyward_block::list_by_name(skyward_block::BY_NAME) {
-        Ok(parts) => println!("partitions    = {} under {}", parts.len(), skyward_block::BY_NAME),
-        Err(e) => println!("partitions    = (unavailable: {e})"),
-    }
+    let parts = skyward_block::list_by_name(skyward_block::BY_NAME)?;
+    println!("partitions    = {} under {}", parts.len(), skyward_block::BY_NAME);
     Ok(())
 }
 
 fn slot() -> Result<()> {
-    match skyward_vab::current_slot() {
+    match skyward_vab::current_slot()? {
         Some(s) => println!("{}", s.suffix()),
-        None => println!("(unknown)"),
+        None => println!("(not A/B)"),
     }
     Ok(())
 }

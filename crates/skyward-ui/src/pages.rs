@@ -5,7 +5,6 @@ use crate::font::Fonts;
 use crate::theme::Theme;
 use crate::widgets::{self, Bar, Fact, Icon, Outline, Row, Spec, Trail};
 use skyward_info::{Charge, DataState, DeviceInfo, VERSION};
-use skyward_vab::SnapshotState;
 
 // Tile colours sampled from the stock Settings, plus orange and red from the
 // same family for the destructive and reboot entries.
@@ -84,13 +83,8 @@ pub fn home(cx: &Ctx) -> Canvas {
         stats.push((v.as_str(), caption));
     }
     let mut rows = Vec::new();
-    if matches!(i.snapshot, SnapshotState::Snapshotted | SnapshotState::Merging) {
-        rows.push(
-            Row::new(fmt::snapshot(&i.snapshot))
-                .icon(ORANGE, Icon::Layers)
-                .subtitle("合并完成前不要刷写 super 里的分区")
-                .trail(Trail::None),
-        );
+    if let Some(note) = fmt::snapshot_note(&i.snapshot) {
+        rows.push(Row::new(fmt::snapshot(&i.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::None));
     }
     y = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &stats, &rows);
     y += t.m.card_gap;

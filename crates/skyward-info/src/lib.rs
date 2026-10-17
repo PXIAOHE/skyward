@@ -85,9 +85,9 @@ pub struct Battery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boot {
-    /// From `ro.boot.vbmeta.device_state`.
+    /// From `androidboot.vbmeta.device_state`.
     pub unlocked: Option<bool>,
-    /// `ro.boot.verifiedbootstate`: green, yellow, orange or red.
+    /// `androidboot.verifiedbootstate`: green, yellow, orange or red.
     pub verified: Option<String>,
 }
 
@@ -102,14 +102,16 @@ pub enum DataState {
 
 pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
     let d = &cfg.display;
-    let unlocked = match prop("ro.boot.vbmeta.device_state").as_deref() {
+    let unlocked = match skyward_block::boot_param("androidboot.vbmeta.device_state")?.as_deref() {
         None => None,
         Some("locked") => Some(false),
         Some("unlocked") => Some(true),
-        Some(other) => bail!("ro.boot.vbmeta.device_state {other:?}"),
+        Some(other) => bail!("androidboot.vbmeta.device_state {other:?}"),
     };
     Ok(DeviceInfo {
-        model: cfg.device.model.clone(),
+        // The system names the exact edition; the configured model covers
+        // recovery environments that do not carry the property.
+        model: prop("ro.product.marketname").unwrap_or_else(|| cfg.device.model.clone()),
         codename: cfg.device.codename.clone(),
         soc: cfg.device.soc.clone(),
         cpu: cpu(Path::new(CPU))?,
@@ -121,9 +123,9 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         kernel: kernel_release()?,
         storage: storage()?,
         battery: battery(Path::new(POWER_SUPPLY))?,
-        slot: skyward_vab::current_slot(),
-        snapshot: skyward_vab::snapshot_state(),
-        boot: Boot { unlocked, verified: prop("ro.boot.verifiedbootstate") },
+        slot: skyward_vab::current_slot()?,
+        snapshot: skyward_vab::snapshot_state()?,
+        boot: Boot { unlocked, verified: skyward_block::boot_param("androidboot.verifiedbootstate")? },
     })
 }
 

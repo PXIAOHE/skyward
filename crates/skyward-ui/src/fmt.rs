@@ -149,7 +149,18 @@ pub fn snapshot(s: &SnapshotState) -> &'static str {
         SnapshotState::None => "没有待合并的更新",
         SnapshotState::Snapshotted => "更新已写入快照，等待合并",
         SnapshotState::Merging => "正在合并更新",
-        SnapshotState::Unknown => "无法读取",
+        SnapshotState::MergeFailed => "更新合并失败",
+        SnapshotState::Unknown => "读不到更新状态",
+    }
+}
+
+/// Why super is off limits while an update is in flight; `None` when it is not.
+pub fn snapshot_note(s: &SnapshotState) -> Option<&'static str> {
+    match s {
+        SnapshotState::None => None,
+        SnapshotState::Snapshotted | SnapshotState::Merging => Some("合并完成前不会刷写 super 里的分区"),
+        SnapshotState::MergeFailed => Some("回到系统处理完之前不会刷写 super 里的分区"),
+        SnapshotState::Unknown => Some("读到更新状态之前不会刷写 super 里的分区"),
     }
 }
 

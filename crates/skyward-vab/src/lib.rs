@@ -1,4 +1,8 @@
+use anyhow::{anyhow, Context, Result};
+use prost::Message;
 use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
@@ -37,51 +41,84 @@ impl Slot {
     }
 }
 
-pub fn current_slot() -> Option<Slot> {
-    skyward_block::slot_suffix().and_then(|s| Slot::from_suffix(&s))
+/// The booted slot, or `None` on devices that are not A/B.
+pub fn current_slot() -> Result<Option<Slot>> {
+    match skyward_block::slot_suffix()? {
+        None => Ok(None),
+        Some(s) => Slot::from_suffix(&s).map(Some).ok_or_else(|| anyhow!("slot suffix {s:?}")),
+    }
 }
 
-/// Virtual A/B snapshot phase. A pending or active snapshot means a system
-/// update is mid-flight; destructive operations on dynamic partitions must be
-/// refused until the merge completes under Android.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Virtual A/B update phase as libsnapshot records it. Anything but `None`
+/// means dynamic partitions have live snapshots, and writing them would
+/// corrupt the pending update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotState {
+    /// No update in flight.
     None,
+    /// An update is being written, or is written and waits to be booted.
     Snapshotted,
+    /// Snapshots are being merged back into the base partitions.
     Merging,
+    /// The merge failed; Android has to recover it.
+    MergeFailed,
+    /// /metadata is not mounted, so the state cannot be read.
     Unknown,
 }
 
-pub fn snapshot_state() -> SnapshotState {
-    for p in ["/metadata/ota/state", "/metadata/ota/snapshot-boot"] {
-        if let Ok(s) = fs::read_to_string(p) {
-            let s = s.trim().to_ascii_lowercase();
-            if s.contains("merg") {
-                return SnapshotState::Merging;
-            }
-            if s.contains("snapshot") {
-                return SnapshotState::Snapshotted;
-            }
-        }
-    }
-    // An active COW mapping means snapshots are live even without a state file.
-    if let Ok(rd) = fs::read_dir("/dev/block/mapper") {
-        for e in rd.flatten() {
-            if e.file_name().to_string_lossy().contains("-cow") {
-                return SnapshotState::Snapshotted;
-            }
-        }
-    }
-    if fs::metadata("/metadata/ota").is_err() {
-        return SnapshotState::Unknown;
-    }
-    SnapshotState::None
+const OTA_DIR: &str = "/metadata/ota";
+
+/// libsnapshot's `SnapshotUpdateStatus` from snapshot.proto; only the state is
+/// read, the other fields are skipped by the decoder.
+#[derive(Clone, PartialEq, Message)]
+struct SnapshotUpdateStatus {
+    #[prost(enumeration = "UpdateState", tag = "1")]
+    state: i32,
 }
 
-/// Conservative guard: only `false` when we positively confirm no snapshot is
-/// outstanding. Callers writing to dynamic partitions must honour this.
-pub fn merge_outstanding() -> bool {
-    !matches!(snapshot_state(), SnapshotState::None)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+enum UpdateState {
+    None = 0,
+    Initiated = 1,
+    Unverified = 2,
+    Merging = 3,
+    MergeNeedsReboot = 4,
+    MergeCompleted = 5,
+    MergeFailed = 6,
+    Cancelled = 7,
+}
+
+pub fn snapshot_state() -> Result<SnapshotState> {
+    match fs::metadata(OTA_DIR) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(SnapshotState::Unknown),
+        Err(e) => return Err(e).with_context(|| format!("stat {OTA_DIR}")),
+        Ok(_) => {}
+    }
+    let path = Path::new(OTA_DIR).join("state");
+    match fs::read(&path) {
+        Ok(bytes) => parse_state(&bytes),
+        // libsnapshot writes the file with the first update.
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(SnapshotState::None),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn parse_state(bytes: &[u8]) -> Result<SnapshotState> {
+    let status = SnapshotUpdateStatus::decode(bytes).context("decode SnapshotUpdateStatus")?;
+    let state = UpdateState::try_from(status.state).map_err(|e| anyhow!("update state: {e}"))?;
+    Ok(match state {
+        UpdateState::None | UpdateState::MergeCompleted | UpdateState::Cancelled => SnapshotState::None,
+        UpdateState::Initiated | UpdateState::Unverified => SnapshotState::Snapshotted,
+        UpdateState::Merging | UpdateState::MergeNeedsReboot => SnapshotState::Merging,
+        UpdateState::MergeFailed => SnapshotState::MergeFailed,
+    })
+}
+
+/// Conservative guard: `false` only when no update is positively known to be
+/// in flight. Callers writing to dynamic partitions must honour this.
+pub fn merge_outstanding() -> Result<bool> {
+    Ok(snapshot_state()? != SnapshotState::None)
 }
 
 #[cfg(test)]
@@ -95,5 +132,31 @@ mod tests {
         assert_eq!(Slot::B.suffix(), "_b");
         assert_eq!(Slot::B.letter(), "B");
         assert_eq!(Slot::from_suffix("_c"), None);
+    }
+
+    fn encoded(state: UpdateState) -> Vec<u8> {
+        SnapshotUpdateStatus { state: state as i32 }.encode_to_vec()
+    }
+
+    #[test]
+    fn empty_state_file_means_no_update() {
+        // A Xiaomi 17 Ultra with no update pending keeps a zero-length file.
+        assert_eq!(parse_state(&[]).unwrap(), SnapshotState::None);
+    }
+
+    #[test]
+    fn update_states_map_to_phases() {
+        assert_eq!(parse_state(&encoded(UpdateState::Unverified)).unwrap(), SnapshotState::Snapshotted);
+        assert_eq!(parse_state(&encoded(UpdateState::Initiated)).unwrap(), SnapshotState::Snapshotted);
+        assert_eq!(parse_state(&encoded(UpdateState::Merging)).unwrap(), SnapshotState::Merging);
+        assert_eq!(parse_state(&encoded(UpdateState::MergeNeedsReboot)).unwrap(), SnapshotState::Merging);
+        assert_eq!(parse_state(&encoded(UpdateState::MergeFailed)).unwrap(), SnapshotState::MergeFailed);
+        assert_eq!(parse_state(&encoded(UpdateState::MergeCompleted)).unwrap(), SnapshotState::None);
+    }
+
+    #[test]
+    fn unknown_state_value_is_an_error() {
+        let bytes = SnapshotUpdateStatus { state: 42 }.encode_to_vec();
+        assert!(parse_state(&bytes).is_err());
     }
 }
