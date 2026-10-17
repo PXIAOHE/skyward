@@ -75,11 +75,7 @@ impl Power {
     }
 }
 
-/// Leave recovery for `target`. The bootloader control block is cleared
-/// first; a boot-recovery command left in it would bring the next boot back
-/// to recovery.
 pub fn power(target: Power) -> Result<()> {
-    bcb::clear(&bcb::misc())?;
     set_prop("sys.powerctl", target.command())
 }
 

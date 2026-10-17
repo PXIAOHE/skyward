@@ -60,12 +60,14 @@ fn main() -> Result<()> {
 }
 
 /// The recovery service. adb comes up first so a failure later on can be
-/// inspected; failures go to the kernel log and still end the process.
+/// inspected, then the boot request in misc is taken so that any reboot from
+/// here boots the system; failures go to the kernel log and still end the
+/// process.
 fn recovery() -> Result<()> {
     let run = || -> Result<()> {
         skyward_sys::set_prop("sys.usb.config", "adb")?;
+        let request = bcb::take(&bcb::misc())?;
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
-        let request = bcb::read(&bcb::misc())?;
         skyward_sys::kmsg(&format!(
             "{} {} recovery up, misc command {:?} args {:?}",
             cfg.device.codename,
