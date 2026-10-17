@@ -135,6 +135,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
             read_at = Instant::now();
             app.refresh();
         }
+        let mut shown = false;
         if app.take_dirty() && app.display_on() {
             let t0 = Instant::now();
             app.compose(&mut screen, &fonts, &info, data, &shown_clock, now);
@@ -143,9 +144,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
             if let Some(path) = dump {
                 fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
             }
+            shown = true;
         }
+        // A frame shown has waited for the panel, which keeps the loop to
+        // its pace; otherwise the CPU gets at least a millisecond.
+        let floor = if shown { 0 } else { 1 };
         let until_due = app.deadline(now).map(|d| d.saturating_sub(now) as i32);
-        let timeout = until_due.map_or(1000, |t| t.clamp(1, 1000));
+        let timeout = until_due.map_or(1000, |t| t.clamp(floor, 1000));
         wait(&inputs.fds(), timeout)?;
         let now = monotonic_ms();
         for ev in inputs.read()? {
