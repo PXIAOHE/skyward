@@ -6,6 +6,9 @@ members = [
     "crates/skyward-block",
     "crates/skyward-vab",
     "crates/skyward-modules",
+    "crates/skyward-ui",
+    "crates/skyward-crypto",
+    "crates/skyward-preview",
 ]
 
 [workspace.package]

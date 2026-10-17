@@ -1,0 +1,15 @@
+[package]
+name = "skyward-preview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "skyward-preview"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+png = "0.17.16"
+skyward-ui = { path = "../skyward-ui" }

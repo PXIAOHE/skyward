@@ -1,0 +1,9 @@
+[package]
+name = "skyward-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+fontdue = "0.9.3"
