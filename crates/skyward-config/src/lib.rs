@@ -29,6 +29,8 @@ pub struct DeviceConfig {
     pub display: Display,
     #[serde(default)]
     pub modules: Modules,
+    #[serde(default, rename = "service")]
+    pub services: Vec<Service>,
     #[serde(default)]
     pub decrypt: Decrypt,
 }
@@ -79,6 +81,17 @@ impl Default for Modules {
     fn default() -> Self {
         Self { sources: default_module_sources(), load: Vec::new() }
     }
+}
+
+/// A program from the phone's own partitions that the recovery keeps
+/// running, such as the touch processing of a panel that hands raw frames
+/// to the host.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Service {
+    pub path: String,
+    /// Directories for LD_LIBRARY_PATH, searched in order.
+    #[serde(default)]
+    pub libraries: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -144,5 +157,12 @@ mod tests {
         assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 560));
         assert!(cfg.decrypt.weaver.is_empty());
         assert_eq!(cfg.modules.load, ["fts_touch_spi"]);
+        assert_eq!(
+            cfg.services,
+            [
+                Service { path: "/odm/bin/touch_report".into(), libraries: Vec::new() },
+                Service { path: "/odm/bin/touchsensor".into(), libraries: vec!["/odm/lib64".into(), "/system/lib64".into()] },
+            ]
+        );
     }
 }

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
+mod services;
+#[cfg(target_os = "android")]
 mod ui;
 
 #[derive(Parser)]
@@ -58,6 +60,12 @@ enum Cmd {
     Mount,
     /// Unmount what `mount` mounted and remove its device-mapper devices.
     Umount,
+    /// Keep the configuration's services running until stopped.
+    #[cfg(target_os = "android")]
+    Services {
+        #[arg(long, default_value = "/skyward/device.toml")]
+        config: String,
+    },
     /// List the display connectors, their modes, CRTCs and planes.
     #[cfg(target_os = "android")]
     Kms {
@@ -121,6 +129,13 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Umount => skyward_vab::unmount_partitions(booted_slot()?),
+        #[cfg(target_os = "android")]
+        Cmd::Services { config } => {
+            services::start(&DeviceConfig::load(&config)?.services)?;
+            loop {
+                std::thread::park();
+            }
+        }
         #[cfg(target_os = "android")]
         Cmd::Kms { card } => {
             print!("{}", skyward_ui::surface::kms::report(&card)?);
