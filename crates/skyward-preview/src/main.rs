@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Result};
-use skyward_ui::{pages, Canvas, Fonts, Theme};
+use skyward_config::DeviceConfig;
+use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, Storage};
+use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
+use skyward_vab::{Slot, SnapshotState};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-const W: u32 = 1200;
-const H: u32 = 2608;
+const CLOCK: &str = "23:46";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -19,47 +21,37 @@ fn main() -> Result<()> {
         eprintln!("axis {tag}: {min}..{max} (default {def})");
     }
 
-    let light = Theme::light(W, H);
-    let dark = Theme::dark(W, H);
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cfg = DeviceConfig::load(root.join("devices/nezha.toml"))?;
+    let (w, h) = (cfg.display.width, cfg.display.height);
+    let light = Theme::light(w, h);
+    let dark = Theme::dark(w, h);
 
-    // Weight ladder used to match stroke widths against device screenshots.
     if args.get(2).map(String::as_str) == Some("--calibrate") {
-        let m = &light.m;
-        let weights = [330.0, 380.0, 420.0, 450.0, 480.0, 520.0, 560.0, 600.0, 650.0, 700.0];
-        let mut c = Canvas::new(W, 200 * weights.len() as u32);
-        c.clear(light.pal.bg);
-        let ink = light.pal.text;
-        for (i, w) in weights.iter().enumerate() {
-            let face = fonts.face(*w)?;
-            let top = 10.0 + 200.0 * i as f32;
-            c.text_top(&face, "设置", 10.0, top, m.title_px, ink, None);
-            c.text_top(&face, "蓝牙", 210.0, top, m.row_title_px, ink, None);
-            c.text_top(&face, "亮度", 340.0, top, m.sub_px, ink, None);
-            c.text_top(&face, "登录小米账号", 440.0, top, m.account_title_px, ink, None);
-            let b = top + 110.0;
-            c.text_top(&face, "享受更多小米服务", 10.0, b, m.sub_px, ink, None);
-            c.text_top(&face, "已开启", 340.0, b, m.sub_px, ink, None);
-            c.text_top(&face, "搜索系统设置项", 480.0, b, m.row_title_px, ink, None);
-            c.text(&face, "15:29", 840.0, b + m.status_px * 0.72, m.status_px, ink, None);
-            c.text_top(&face, "新版本", 1010.0, b, m.badge_px, ink, None);
-        }
         let path = out.join("calibrate.png");
-        write_png(&path, &c)?;
+        write_png(&path, &calibrate(&fonts, &light)?)?;
         println!("wrote {}", path.display());
         return Ok(());
     }
 
+    let info = nezha(&cfg);
+    let pending = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info.clone() };
+    let f = &fonts;
+    let open = DataState::Decrypted;
     let shots: Vec<(&str, Canvas)> = vec![
-        ("01-decrypt-dark", pages::decrypt(&dark, &fonts, &[0, 3, 4, 5, 8])),
-        ("02-home-light", pages::home(&light, &fonts)),
-        ("03-home-dark", pages::home(&dark, &fonts)),
-        ("04-settings-light", pages::settings(&light, &fonts)),
-        ("05-settings-dark", pages::settings(&dark, &fonts)),
-        ("06-reboot-dark", pages::reboot(&dark, &fonts)),
-        ("07-wipe-light", pages::wipe(&light, &fonts)),
-        ("08-install-dark", pages::install_progress(&dark, &fonts)),
+        ("01-decrypt-dark", pages::decrypt(&ctx(&dark, f, &info, DataState::Locked), &[0, 3, 4, 5, 8])),
+        ("02-home-light", pages::home(&ctx(&light, f, &info, open))),
+        ("03-home-dark-update-pending", pages::home(&ctx(&dark, f, &pending, open))),
+        ("04-settings-light", pages::settings(&ctx(&light, f, &info, open))),
+        ("05-settings-dark", pages::settings(&ctx(&dark, f, &info, open))),
+        ("06-reboot-dark", pages::reboot(&ctx(&dark, f, &info, open))),
+        ("07-wipe-light", pages::wipe(&ctx(&light, f, &info, open))),
+        ("08-install-dark", pages::install_progress(&ctx(&dark, f, &info, open))),
+        ("09-about-light", pages::about(&ctx(&light, f, &info, open))),
+        ("10-about-dark", pages::about(&ctx(&dark, f, &info, open))),
+        ("11-specs-light", pages::specs(&ctx(&light, f, &info, open))),
+        ("12-specs-dark", pages::specs(&ctx(&dark, f, &info, open))),
     ];
-
     for (name, canvas) in &shots {
         let path = out.join(format!("{name}.png"));
         write_png(&path, canvas)?;
@@ -68,12 +60,78 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn ctx<'a>(t: &'a Theme, f: &'a Fonts, info: &'a DeviceInfo, data: DataState) -> Ctx<'a> {
+    Ctx { t, f, info, data, clock: CLOCK }
+}
+
+/// Xiaomi 17 Ultra. Model, SoC name and panel come from devices/nezha.toml;
+/// the build, kernel, memory, CPU frequency table, userdata size, slot, boot
+/// state, battery capacity and cycle count were read off that phone (getprop,
+/// its boot log and `fastboot getvar all`). Battery level, temperature and
+/// voltage and the free space on /data change from moment to moment; those
+/// are representative values.
+fn nezha(cfg: &DeviceConfig) -> DeviceInfo {
+    DeviceInfo {
+        model: cfg.device.model.clone(),
+        codename: cfg.device.codename.clone(),
+        soc: cfg.device.soc.clone(),
+        cpu: Cpu { cores: 8, max_khz: Some(4_608_000) },
+        ram_kib: 15_472_464,
+        panel: Some((cfg.display.width, cfg.display.height)),
+        os_version: Some("OS4.0.4.0.XPACNXM".into()),
+        android: Some("17".into()),
+        security_patch: Some("2026-10-01".into()),
+        kernel: "6.12.69-android16-6-g43b5ab7e247d-abogki561813157-4k".into(),
+        storage: Storage { total: 0xF2_091F_B000, free: Some(789_400_000_000) },
+        battery: Some(Battery {
+            level: 74,
+            charge: Charge::Charging,
+            temp: Some(315),
+            health: Some("Good".into()),
+            cycles: Some(300),
+            design: Some(6_747_000),
+            full: None,
+            voltage: Some(4_212_000),
+        }),
+        slot: Some(Slot::B),
+        snapshot: SnapshotState::None,
+        boot: Boot { unlocked: Some(true), verified: Some("orange".into()) },
+    }
+}
+
+/// Weight ladders for matching stroke widths against device screenshots: the
+/// settings strings at their sizes, and a capital H at the wordmark size.
+fn calibrate(fonts: &Fonts, t: &Theme) -> Result<Canvas> {
+    let m = &t.m;
+    let weights = [330.0, 380.0, 420.0, 450.0, 480.0, 520.0, 560.0, 600.0, 620.0, 650.0, 700.0];
+    let mut c = Canvas::new(m.w, 200 * weights.len() as u32);
+    c.clear(t.pal.bg);
+    let ink = t.pal.text;
+    for (i, w) in weights.iter().enumerate() {
+        let face = fonts.face(*w)?;
+        let top = 10.0 + 200.0 * i as f32;
+        c.text_top(&face, "设置", 10.0, top, m.title_px, ink, None);
+        c.text_top(&face, "蓝牙", 210.0, top, m.row_title_px, ink, None);
+        c.text_top(&face, "亮度", 340.0, top, m.sub_px, ink, None);
+        c.text_top(&face, "登录小米账号", 440.0, top, m.account_title_px, ink, None);
+        let b = top + 110.0;
+        c.text_top(&face, "享受更多小米服务", 10.0, b, m.sub_px, ink, None);
+        c.text_top(&face, "已开启", 340.0, b, m.sub_px, ink, None);
+        c.text_top(&face, "搜索系统设置项", 480.0, b, m.row_title_px, ink, None);
+        c.text(&face, "15:29", 840.0, b + m.status_px * 0.72, m.status_px, ink, None);
+        c.text_top(&face, "新版本", 1010.0, b, m.badge_px, ink, None);
+        // The stock wordmark is set at a 136.5 px em on the 3.5 px/dp
+        // reference panel.
+        c.text(&face, "H", 1100.0, top + 105.0, 136.5, ink, None);
+    }
+    Ok(c)
+}
+
 fn font_path() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("SKYWARD_FONT") {
         return Ok(PathBuf::from(p));
     }
-    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/fonts/MiSansVF.ttf");
+    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/fonts/MiSansVF.ttf");
     if bundled.exists() {
         return Ok(bundled);
     }

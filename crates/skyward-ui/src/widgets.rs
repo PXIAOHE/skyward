@@ -1,5 +1,5 @@
 use crate::canvas::Canvas;
-use crate::color::Rgba;
+use crate::color::{mix, Rgba};
 use crate::font::{Face, Fonts};
 use crate::theme::Theme;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
@@ -21,6 +21,8 @@ pub enum Icon {
     Layers,
     Phone,
     Lock,
+    Sliders,
+    Vibrate,
 }
 
 /// White solid glyph centred on `(cx, cy)` inside a tile of size `tile`.
@@ -133,6 +135,23 @@ pub fn glyph(c: &mut Canvas, icon: Icon, cx: f32, cy: f32, tile: f32, fg: Rgba, 
             c.fill_round_rect(cx - 0.36 * g, cy - 0.02 * g, 0.72 * g, 0.46 * g, 0.1 * g, fg);
             c.fill_circle(cx, cy + 0.2 * g, 0.06 * g, bg);
         }
+        Icon::Sliders => {
+            for (dy, knob) in [(-0.27f32, 0.14f32), (0.0, -0.16), (0.27, 0.06)] {
+                c.line(cx - 0.4 * g, cy + dy * g, cx + 0.4 * g, cy + dy * g, sw * 0.85, fg);
+                c.fill_circle(cx + knob * g, cy + dy * g, 0.12 * g, fg);
+                c.fill_circle(cx + knob * g, cy + dy * g, 0.05 * g, bg);
+            }
+        }
+        Icon::Vibrate => {
+            c.fill_round_rect(cx - 0.17 * g, cy - 0.38 * g, 0.34 * g, 0.76 * g, 0.08 * g, fg);
+            c.fill_round_rect(cx - 0.09 * g, cy - 0.28 * g, 0.18 * g, 0.5 * g, 0.03 * g, bg);
+            for side in [-1.0f32, 1.0] {
+                let x = cx + side * 0.3 * g;
+                c.line(x, cy - 0.2 * g, x + side * 0.07 * g, cy - 0.07 * g, sw * 0.8, fg);
+                c.line(x + side * 0.07 * g, cy - 0.07 * g, x, cy + 0.07 * g, sw * 0.8, fg);
+                c.line(x, cy + 0.07 * g, x + side * 0.07 * g, cy + 0.2 * g, sw * 0.8, fg);
+            }
+        }
     }
 }
 
@@ -185,11 +204,19 @@ fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> Vec<String>
     lines
 }
 
-pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, time: &str, batt: u8, charging: bool) {
+/// Status-bar contents: the clock and, when a fuel gauge is present, the
+/// battery level and whether it is charging.
+pub struct Bar<'a> {
+    pub clock: &'a str,
+    pub battery: Option<(u8, bool)>,
+}
+
+pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar) {
     let m = &t.m;
     let cy = m.status_cy;
     // Digits carry no descender, so centre on half their height (≈0.72 em).
-    c.text(&f.status, time, m.status_x, cy + m.status_px * 0.36, m.status_px, t.pal.status, None);
+    c.text(&f.status, bar.clock, m.status_x, cy + m.status_px * 0.36, m.status_px, t.pal.status, None);
+    let Some((batt, charging)) = bar.battery else { return };
 
     let right = m.w as f32 - m.status_x;
     let bolt_w = if charging { m.dp(6.0) } else { 0.0 };
@@ -207,17 +234,22 @@ pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, time: &str, batt: u8, ch
     }
 }
 
+pub fn back_arrow(c: &mut Canvas, t: &Theme) {
+    let m = &t.m;
+    let (x, cy, w, h, sw) = (m.back_x, m.back_cy, m.back_w, m.back_h, m.stroke);
+    let tip = x + sw / 2.0;
+    c.line(tip, cy, x + w - sw / 2.0, cy, sw, t.pal.text);
+    c.line(tip, cy, tip + h / 2.0, cy - h / 2.0 + sw / 2.0, sw, t.pal.text);
+    c.line(tip, cy, tip + h / 2.0, cy + h / 2.0 - sw / 2.0, sw, t.pal.text);
+}
+
 /// Status bar, optional `←`, and the large page title. Returns where the page
 /// content starts.
-pub fn header(c: &mut Canvas, t: &Theme, f: &Fonts, title: &str, back: bool) -> f32 {
+pub fn header(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, title: &str, back: bool) -> f32 {
     let m = &t.m;
-    status_bar(c, t, f, "23:46", 74, true);
+    status_bar(c, t, f, bar);
     if back {
-        let (x, cy, w, h, sw) = (m.back_x, m.back_cy, m.back_w, m.back_h, m.stroke);
-        let tip = x + sw / 2.0;
-        c.line(tip, cy, x + w - sw / 2.0, cy, sw, t.pal.text);
-        c.line(tip, cy, tip + h / 2.0, cy - h / 2.0 + sw / 2.0, sw, t.pal.text);
-        c.line(tip, cy, tip + h / 2.0, cy + h / 2.0 - sw / 2.0, sw, t.pal.text);
+        back_arrow(c, t);
     }
     c.text_top(&f.title, title, m.title_x, m.title_top, m.title_px, t.pal.text, None);
     m.content_top
@@ -415,13 +447,40 @@ pub fn list(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row]) -> f32
     top + h
 }
 
-/// Account-style card: avatar, name and detail, optionally followed by rows.
-pub fn device_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, title: &str, sub: &str, rows: &[Row]) -> f32 {
+/// Account-style card: avatar, name and detail, then a strip of key
+/// readings (value over caption, spread edge to edge), then optional rows.
+#[allow(clippy::too_many_arguments)]
+pub fn device_card(
+    c: &mut Canvas,
+    t: &Theme,
+    f: &Fonts,
+    top: f32,
+    title: &str,
+    sub: &str,
+    stats: &[(&str, &str)],
+    rows: &[Row],
+) -> f32 {
     let m = &t.m;
     let lays: Vec<Layout> = rows.iter().map(|r| layout(c, t, f, r)).collect();
-    let h = m.account_row_h + lays.iter().map(|l| l.h).sum::<f32>();
+    let strip_h = if stats.is_empty() { 0.0 } else { m.dp(62.0) };
+    let h = m.account_row_h + strip_h + lays.iter().map(|l| l.h).sum::<f32>();
     let (card_x, right) = (m.margin, m.w as f32 - m.margin);
     c.fill_round_rect(card_x, top, right - card_x, h, m.card_radius, t.pal.card);
+
+    let strip_top = top + m.account_row_h;
+    let widths: Vec<f32> = stats
+        .iter()
+        .map(|(v, cap)| c.text_width(&f.heading, v, m.row_title_px).max(c.text_width(&f.body, cap, m.sub_px)))
+        .collect();
+    let span = right - card_x - m.inner * 2.0;
+    let gap = (span - widths.iter().sum::<f32>()) / (stats.len().max(2) - 1) as f32;
+    let mut x = card_x + m.inner;
+    let base = strip_top + m.dp(20.0);
+    for ((value, caption), w) in stats.iter().zip(&widths) {
+        c.text(&f.heading, value, x, base, m.row_title_px, t.pal.text, None);
+        c.text(&f.body, caption, x, base + m.dp(20.0), m.sub_px, t.pal.subtitle, None);
+        x += w + gap;
+    }
 
     let cy = top + m.account_row_h / 2.0;
     let av = m.avatar;
@@ -438,7 +497,7 @@ pub fn device_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, title: &str, 
     c.text_top(&f.body, sub, tx, ink_top + (tb - tt) + m.sub_gap, m.sub_px, t.pal.subtitle, None);
     chevron(c, t, right - m.chevron_inset, cy);
 
-    let mut y = top + m.account_row_h;
+    let mut y = strip_top + strip_h;
     for (r, l) in rows.iter().zip(&lays) {
         draw_row(c, t, f, r, l, y);
         y += l.h;
@@ -536,6 +595,313 @@ pub fn pattern_lock(c: &mut Canvas, t: &Theme, cx: f32, cy: f32, span: f32, path
             c.fill_circle(px, py, m.dp(6.0), t.pal.accent);
         } else {
             c.fill_circle(px, py, m.dp(5.0), t.pal.value);
+        }
+    }
+}
+
+/// Grey line icons of the parameters page, drawn on a 24 dp grid.
+#[derive(Clone, Copy)]
+pub enum Outline {
+    Phone,
+    Battery,
+    Chip,
+    Memory,
+    Resolution,
+    Storage,
+    Tag,
+}
+
+pub fn outline(c: &mut Canvas, t: &Theme, icon: Outline, cx: f32, cy: f32) {
+    let m = &t.m;
+    let d = |v: f32| m.dp(v);
+    let sw = d(1.7);
+    let col = t.pal.outline;
+    // Rounded box whose outer edge spans (x, y, w, h) in dp from the centre.
+    let boxed = |c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, r: f32| {
+        c.stroke_round_rect(cx + d(x) + sw / 2.0, cy + d(y) + sw / 2.0, d(w) - sw, d(h) - sw, d(r) - sw / 2.0, sw, col);
+    };
+    let seg = |c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32| c.line(cx + d(x0), cy + d(y0), cx + d(x1), cy + d(y1), sw, col);
+    let ring = |c: &mut Canvas, pts: &[(f32, f32)]| {
+        for (i, &(x0, y0)) in pts.iter().enumerate() {
+            let (x1, y1) = pts[(i + 1) % pts.len()];
+            seg(c, x0, y0, x1, y1);
+        }
+    };
+    match icon {
+        Outline::Phone => {
+            boxed(c, -7.7, -10.0, 15.4, 20.0, 3.4);
+            seg(c, -3.1, 5.9, 3.1, 5.9);
+        }
+        Outline::Battery => {
+            boxed(c, -10.9, -7.15, 19.0, 14.3, 3.4);
+            c.fill_round_rect(cx + d(9.2), cy - d(2.85), d(1.7), d(5.7), d(0.85), col);
+        }
+        Outline::Chip => {
+            boxed(c, -7.0, -7.0, 14.0, 14.0, 3.0);
+            c.fill_round_rect(cx - d(2.3), cy - d(2.3), d(4.6), d(4.6), d(1.0), col);
+            for k in [-2.6f32, 2.6] {
+                seg(c, k, -9.6, k, -7.4);
+                seg(c, k, 7.4, k, 9.6);
+                seg(c, -9.6, k, -7.4, k);
+                seg(c, 7.4, k, 9.6, k);
+            }
+        }
+        Outline::Memory => {
+            boxed(c, -8.0, -8.0, 16.0, 16.0, 4.0);
+            for k in [-3.4f32, 0.0, 3.4] {
+                seg(c, k, -10.3, k, -8.2);
+                seg(c, k, 8.2, k, 10.3);
+            }
+        }
+        Outline::Resolution => {
+            boxed(c, -9.5, -9.5, 19.0, 19.0, 4.5);
+            for k in 0..4 {
+                let s = -4.4 + k as f32 * 2.95;
+                seg(c, s, s, s + 0.9, s + 0.9);
+            }
+        }
+        Outline::Storage => {
+            ring(c, &[(-2.6, -8.65), (5.95, -8.65), (5.95, 8.65), (-5.95, 8.65), (-5.95, -5.3)]);
+            for x in [-0.6f32, 1.6, 3.8] {
+                seg(c, x, -5.6, x, -3.4);
+            }
+        }
+        Outline::Tag => {
+            ring(c, &[(-8.6, 0.0), (-4.3, -5.95), (8.65, -5.95), (8.65, 5.95), (-4.3, 5.95)]);
+            c.fill_circle(cx - d(3.3), cy, d(1.6), col);
+        }
+    }
+}
+
+/// The About page backdrop: soft colour fields over a vertical blend that
+/// settles into the page colour below the first screen.
+pub fn hero_backdrop(c: &mut Canvas, t: &Theme) {
+    let hero = t.pal.hero;
+    let (w, sh) = (t.m.w as f32, t.m.h as f32);
+    c.shade_rows(0, (sh * 1.15) as u32, |x, y| {
+        let fy = y / sh;
+        let base = if fy < 0.5 { mix(hero.top, hero.mid, fy / 0.5) } else { mix(hero.mid, hero.bottom, (fy - 0.5) / 0.5) };
+        let fade = ((1.15 - fy) / 0.3).clamp(0.0, 1.0);
+        let mut acc = [base.r as f32, base.g as f32, base.b as f32];
+        let mut sum = 1.0;
+        for &(bx, by, br, col) in &hero.blobs {
+            let dx = (x - bx * w) / (br * w);
+            let dy = (y - by * sh) / (br * w);
+            let k = 3.0 * fade * (-(dx * dx + dy * dy)).exp();
+            acc[0] += k * col.r as f32;
+            acc[1] += k * col.g as f32;
+            acc[2] += k * col.b as f32;
+            sum += k;
+        }
+        let ch = |v: f32| (v / sum).round() as u8;
+        Rgba::rgb(ch(acc[0]), ch(acc[1]), ch(acc[2]))
+    });
+}
+
+/// Centred gradient lettering with its cap line at `cap_top`. The stock
+/// wordmark's stems match MiSans at the body weight.
+pub fn wordmark(c: &mut Canvas, t: &Theme, f: &Fonts, text: &str, cap_top: f32, px: f32) {
+    let face = &f.body;
+    let w = c.text_width(face, text, px);
+    let x = (t.m.w as f32 - w) / 2.0;
+    let ink = t.pal.hero.ink;
+    let paint = |gx: f32, _: f32| {
+        let u = ((gx - x) / w).clamp(0.0, 1.0);
+        if u < 0.55 {
+            mix(ink[0], ink[1], u / 0.55)
+        } else {
+            mix(ink[1], ink[2], (u - 0.55) / 0.45)
+        }
+    };
+    c.text_paint(face, text, x, cap_top + face.cap(px), px, &paint, None);
+}
+
+/// Frosted capsule button centred on the page. Returns its bottom.
+pub fn pill(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str) -> f32 {
+    let m = &t.m;
+    let (w, h) = (m.dp(259.0), m.dp(50.9));
+    let x = (m.w as f32 - w) / 2.0;
+    let hero = &t.pal.hero;
+    let e = m.dp(1.0);
+    c.fill_round_rect(x, top, w, h, h / 2.0, hero.pill);
+    c.stroke_round_rect(x + e / 2.0, top + e / 2.0, w - e, h - e, (h - e) / 2.0, e, hero.pill_edge);
+    c.text_center(&f.heading, label, m.w as f32 / 2.0, top + h / 2.0, m.row_title_px, hero.pill_text);
+    top + h
+}
+
+/// A row of the About summary card: title on the left, value on the right,
+/// and a chevron when the row opens a page.
+pub struct Fact<'a> {
+    pub title: &'a str,
+    pub value: String,
+    pub link: bool,
+}
+
+/// The About summary card. Its rows are shorter than settings rows and carry
+/// slightly smaller titles.
+pub fn facts(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Fact]) -> f32 {
+    let m = &t.m;
+    let (row_h, title_px) = (m.dp(50.57), m.dp(15.1));
+    let (card_x, right) = (m.margin, m.w as f32 - m.margin);
+    let h = row_h * rows.len() as f32;
+    c.fill_round_rect(card_x, top, right - card_x, h, m.card_radius, t.pal.card);
+    for (i, r) in rows.iter().enumerate() {
+        let cy = top + row_h * (i as f32 + 0.5);
+        let tx = card_x + m.inner;
+        let tw = c.text_vc(&f.heading, r.title, tx, cy, title_px, t.pal.text, None);
+        let value_right = if r.link {
+            chevron(c, t, right - m.chevron_inset, cy);
+            right - m.chevron_inset - m.chevron_w - m.dp(12.9)
+        } else {
+            right - m.inner
+        };
+        let room = value_right - (tx + tw + m.dp(16.0));
+        let w = c.text_width(&f.value, &r.value, m.sub_px).min(room);
+        c.text_vc(&f.value, &r.value, value_right - w, cy, m.sub_px, t.pal.value, Some(room));
+    }
+    top + h
+}
+
+/// The About page hardware card: the model in large type, then values with
+/// small captions underneath.
+pub fn spec_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, title: &str, items: &[(&str, String)]) -> f32 {
+    let m = &t.m;
+    let (card_x, right) = (m.margin, m.w as f32 - m.margin);
+    let x = card_x + m.inner;
+    let room = right - m.inner - x;
+    let title_base = top + m.dp(41.1);
+    let first = title_base + m.dp(40.6);
+    let (pitch, drop) = (m.dp(44.9), m.dp(14.6));
+    let last_caption = first + pitch * items.len().saturating_sub(1) as f32 + drop;
+    let bottom = last_caption + m.dp(24.3);
+    c.fill_round_rect(card_x, top, right - card_x, bottom - top, m.card_radius, t.pal.card);
+    // The model name is set lighter than row titles; its stems match the
+    // section-label weight.
+    c.text(&f.label, title, x, title_base, m.dp(24.0), t.pal.text, Some(room));
+    for (i, (caption, value)) in items.iter().enumerate() {
+        let base = first + pitch * i as f32;
+        c.text(&f.heading, value, x, base, m.dp(14.0), t.pal.text, Some(room));
+        c.text(&f.body, caption, x, base + drop, m.dp(10.5), t.pal.spec_label, None);
+    }
+    bottom
+}
+
+/// One cell of the parameters grid. `value` may hold several lines separated
+/// by `\n`; each is wrapped to the column.
+pub struct Spec<'a> {
+    pub icon: Outline,
+    pub label: &'a str,
+    pub value: String,
+}
+
+/// Two-column grid of icon, caption and value, as on the stock「全部参数」.
+pub fn spec_grid(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, items: &[Spec]) -> f32 {
+    let m = &t.m;
+    let (card_x, right) = (m.margin, m.w as f32 - m.margin);
+    let cols = [card_x + m.inner, card_x + (right - card_x) * 0.509];
+    let widths = [cols[1] - cols[0] - m.dp(8.0), right - m.inner - cols[1]];
+    let (value_px, pitch) = (m.row_title_px, m.dp(20.0));
+    let (to_label, to_value) = (m.dp(31.1), m.dp(21.6));
+    // Grid values are a step lighter than row titles, at the body weight.
+    let cells: Vec<Vec<String>> = items
+        .iter()
+        .enumerate()
+        .map(|(i, s)| s.value.split('\n').flat_map(|l| wrap(c, &f.body, l, value_px, widths[i % 2])).collect())
+        .collect();
+    let mut centres = Vec::new();
+    let mut cy = top + m.dp(40.1);
+    let mut last = cy;
+    for pair in cells.chunks(2) {
+        centres.push(cy);
+        let lines = pair.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        last = cy + to_label + to_value + pitch * (lines - 1) as f32;
+        cy = last + m.dp(29.3);
+    }
+    let bottom = last + m.dp(20.7);
+    c.fill_round_rect(card_x, top, right - card_x, bottom - top, m.card_radius, t.pal.card);
+    for (i, (s, lines)) in items.iter().zip(&cells).enumerate() {
+        let (x, icy) = (cols[i % 2], centres[i / 2]);
+        outline(c, t, s.icon, x + m.dp(12.0), icy);
+        let label_base = icy + to_label;
+        c.text(&f.body, s.label, x, label_base, m.sub_px, t.pal.subtitle, Some(widths[i % 2]));
+        for (k, l) in lines.iter().enumerate() {
+            c.text(&f.body, l, x, label_base + to_value + pitch * k as f32, value_px, t.pal.info, None);
+        }
+    }
+    bottom
+}
+
+/// Parameters-page card of title-over-value entries; values wrap to the card.
+pub fn info_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, items: &[(&str, String)]) -> f32 {
+    let m = &t.m;
+    let (card_x, right) = (m.margin, m.w as f32 - m.margin);
+    let x = card_x + m.inner;
+    let width = right - m.inner - x;
+    let (ink_top, _) = f.heading.ink(m.row_title_px);
+    let (to_value, pitch) = (m.dp(18.7), m.dp(17.6));
+    let blocks: Vec<Vec<String>> = items.iter().map(|(_, v)| wrap(c, &f.body, v, m.sub_px, width)).collect();
+    let mut bases = Vec::new();
+    let mut title_top = top + m.dp(24.3);
+    let mut last = title_top;
+    for lines in &blocks {
+        let base = title_top - ink_top;
+        bases.push(base);
+        last = base + to_value + pitch * lines.len().saturating_sub(1) as f32;
+        title_top = last + m.dp(34.0);
+    }
+    let bottom = last + m.dp(24.3);
+    c.fill_round_rect(card_x, top, right - card_x, bottom - top, m.card_radius, t.pal.card);
+    for ((title, _), (lines, base)) in items.iter().zip(blocks.iter().zip(&bases)) {
+        c.text(&f.heading, title, x, *base, m.row_title_px, t.pal.info, Some(width));
+        for (k, l) in lines.iter().enumerate() {
+            c.text(&f.body, l, x, base + to_value + pitch * k as f32, m.sub_px, t.pal.subtitle, None);
+        }
+    }
+    bottom
+}
+
+/// Light and dark previews side by side; the active one carries an accent
+/// ring and an accent caption. Returns the bottom of the captions.
+pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32) -> f32 {
+    let m = &t.m;
+    let gap = m.dp(5.1);
+    let slot_w = (m.w as f32 - m.margin * 2.0 - gap) / 2.0;
+    let (ring, inset) = (m.dp(3.1), m.dp(6.2));
+    let tile_w = slot_w - inset * 2.0;
+    let tile_h = tile_w * 1.005;
+    let slot_h = tile_h + inset * 2.0;
+    let (ink_top, ink_bottom) = f.heading.ink(m.row_title_px);
+    let caption_base = top + slot_h + m.dp(11.4) - ink_top;
+    for (i, (label, dark)) in [("浅色模式", false), ("深色模式", true)].into_iter().enumerate() {
+        let sx = m.margin + (slot_w + gap) * i as f32;
+        let on = t.dark == dark;
+        if on {
+            let r = m.dp(23.2) - ring / 2.0;
+            c.stroke_round_rect(sx + ring / 2.0, top + ring / 2.0, slot_w - ring, slot_h - ring, r, ring, t.pal.accent);
+        }
+        theme_tile(c, t, sx + inset, top + inset, tile_w, tile_h, dark);
+        let w = c.text_width(&f.heading, label, m.row_title_px);
+        let color = if on { t.pal.accent } else { t.pal.text };
+        c.text(&f.heading, label, sx + (slot_w - w) / 2.0, caption_base, m.row_title_px, color, None);
+    }
+    caption_base + ink_bottom
+}
+
+/// Miniature settings page: a blue backdrop with two cards of placeholder
+/// lines, light cards for the light theme and dark ones for the dark theme.
+fn theme_tile(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, h: f32, dark: bool) {
+    let (top, bottom) = (Rgba::rgb(77, 113, 246), Rgba::rgb(115, 184, 249));
+    let grad = |_: f32, py: f32| mix(top, bottom, (py - y) / h);
+    c.fill_round_rect_paint(x, y, w, h, t.m.dp(17.0), &grad);
+    let card = if dark { Rgba::rgb(0, 0, 0).with_alpha(51) } else { Rgba::rgb(255, 255, 255).with_alpha(51) };
+    let lw = h * 0.027;
+    for (c0, c1) in [(0.218f32, 0.472f32), (0.523, 0.779)] {
+        c.fill_round_rect(x + w * 0.069, y + h * c0, w * 0.86, h * (c1 - c0), w * 0.045, card);
+        for (at, end) in [(0.37f32, 0.841f32), (0.64, 0.622)] {
+            let ly = y + h * (c0 + (c1 - c0) * at);
+            let base = grad(0.0, ly);
+            let ink = if dark { mix(base, Rgba::rgb(180, 190, 190), 0.45) } else { mix(base, Rgba::rgb(0, 0, 0), 0.14) };
+            c.line(x + w * 0.162 + lw / 2.0, ly, x + w * end - lw / 2.0, ly, lw, ink);
         }
     }
 }

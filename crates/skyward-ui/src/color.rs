@@ -16,6 +16,13 @@ impl Rgba {
     }
 }
 
+/// Linear blend from `a` (at 0) to `b` (at 1).
+pub fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    let t = t.clamp(0.0, 1.0);
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Rgba { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }
+}
+
 /// Source-over composite of `src` (with an extra coverage `cov` in 0..=1) onto
 /// `dst` (a 4-byte RGBA slice), straight alpha.
 pub fn blend_over(dst: &mut [u8], src: Rgba, cov: f32) {

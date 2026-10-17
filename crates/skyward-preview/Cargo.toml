@@ -12,4 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 png = "0.17.16"
+skyward-config = { path = "../skyward-config" }
+skyward-info = { path = "../skyward-info" }
 skyward-ui = { path = "../skyward-ui" }
+skyward-vab = { path = "../skyward-vab" }

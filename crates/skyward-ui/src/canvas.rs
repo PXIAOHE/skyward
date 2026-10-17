@@ -40,7 +40,30 @@ impl Canvas {
         }
     }
 
+    /// Paint rows `y0..y1` with a colour computed per pixel centre.
+    pub fn shade_rows(&mut self, y0: u32, y1: u32, paint: impl Fn(f32, f32) -> Rgba) {
+        for y in y0..y1.min(self.h) {
+            for x in 0..self.w {
+                let c = paint(x as f32 + 0.5, y as f32 + 0.5);
+                self.blend(x as i32, y as i32, c, 1.0);
+            }
+        }
+    }
+
+    /// Drop everything below row `h`, for pages measured after drawing.
+    pub fn crop_height(mut self, h: u32) -> Canvas {
+        let h = h.min(self.h);
+        self.data.truncate((self.w * h * 4) as usize);
+        self.h = h;
+        self
+    }
+
     pub fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, color: Rgba) {
+        self.fill_round_rect_paint(x, y, w, h, r, &|_, _| color);
+    }
+
+    /// [`Canvas::fill_round_rect`] with the colour chosen per pixel.
+    pub fn fill_round_rect_paint(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, paint: &dyn Fn(f32, f32) -> Rgba) {
         let (cx, cy) = (x + w / 2.0, y + h / 2.0);
         let (hx, hy) = (w / 2.0, h / 2.0);
         let r = r.min(hx).min(hy);
@@ -50,10 +73,11 @@ impl Canvas {
         let y1 = (y + h + 1.0).ceil() as i32;
         for py in y0..y1 {
             for px in x0..x1 {
-                let d = rr_sdf(px as f32 + 0.5, py as f32 + 0.5, cx, cy, hx, hy, r);
+                let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+                let d = rr_sdf(fx, fy, cx, cy, hx, hy, r);
                 let cov = (0.5 - d).clamp(0.0, 1.0);
                 if cov > 0.0 {
-                    self.blend(px, py, color, cov);
+                    self.blend(px, py, paint(fx, fy), cov);
                 }
             }
         }
@@ -258,6 +282,21 @@ impl Canvas {
         color: Rgba,
         max_w: Option<f32>,
     ) -> f32 {
+        self.text_paint(face, text, x, baseline, px, &|_, _| color, max_w)
+    }
+
+    /// [`Canvas::text`] with the ink colour chosen per pixel, for gradient
+    /// lettering.
+    pub fn text_paint(
+        &mut self,
+        face: &Face,
+        text: &str,
+        x: f32,
+        baseline: f32,
+        px: f32,
+        paint: &dyn Fn(f32, f32) -> Rgba,
+        max_w: Option<f32>,
+    ) -> f32 {
         let scale = face.scale(px);
         let sf = face.font.as_scaled(scale);
         let ell = face.font.glyph_id('…');
@@ -275,12 +314,12 @@ impl Canvas {
             if let Some(lim) = limit {
                 let more = i + 1 < chars.len();
                 if pen + aw + if more { ell_w } else { 0.0 } > lim {
-                    self.glyph(face, ell, scale, pen, baseline, color);
+                    self.glyph(face, ell, scale, pen, baseline, paint);
                     pen += ell_w;
                     break;
                 }
             }
-            self.glyph(face, id, scale, pen, baseline, color);
+            self.glyph(face, id, scale, pen, baseline, paint);
             pen += aw;
             prev = Some(id);
         }
@@ -305,14 +344,15 @@ impl Canvas {
         self.text_vc(face, text, cx - w / 2.0, cy, px, color, None);
     }
 
-    fn glyph(&mut self, face: &Face, id: GlyphId, scale: PxScale, x: f32, baseline: f32, color: Rgba) {
+    fn glyph(&mut self, face: &Face, id: GlyphId, scale: PxScale, x: f32, baseline: f32, paint: &dyn Fn(f32, f32) -> Rgba) {
         let g = id.with_scale_and_position(scale, point(x, baseline));
         if let Some(og) = face.font.outline_glyph(g) {
             let b = og.px_bounds();
             let (ox, oy) = (b.min.x as i32, b.min.y as i32);
             og.draw(|gx, gy, cov| {
                 if cov > 0.0 {
-                    self.blend(ox + gx as i32, oy + gy as i32, color, cov);
+                    let (px, py) = (ox + gx as i32, oy + gy as i32);
+                    self.blend(px, py, paint(px as f32 + 0.5, py as f32 + 0.5), cov);
                 }
             });
         }

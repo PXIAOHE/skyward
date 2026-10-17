@@ -23,6 +23,32 @@ pub struct Palette {
     pub mono_icon: Rgba,
     pub danger: Rgba,
     pub danger_soft: Rgba,
+    /// Titles and values on the parameters page, a step softer than `text`.
+    pub info: Rgba,
+    /// Line icons on the parameters page.
+    pub outline: Rgba,
+    /// Captions under the About page's spec values.
+    pub spec_label: Rgba,
+    pub hero: Hero,
+}
+
+/// The About page's coloured backdrop and wordmark.
+#[derive(Clone, Copy)]
+pub struct Hero {
+    /// Backdrop at the top, middle and bottom of the first screen.
+    pub top: Rgba,
+    pub mid: Rgba,
+    pub bottom: Rgba,
+    /// Soft colour fields: centre as fractions of the screen width and
+    /// height, radius as a fraction of the width.
+    pub blobs: [(f32, f32, f32, Rgba); 6],
+    /// Wordmark gradient, left, centre and right.
+    pub ink: [Rgba; 3],
+    /// Version caption, translucent over the backdrop.
+    pub caption: Rgba,
+    pub pill: Rgba,
+    pub pill_edge: Rgba,
+    pub pill_text: Rgba,
 }
 
 /// Layout metrics measured from the stock Settings and expressed in dp, then
@@ -178,6 +204,28 @@ const LIGHT: Palette = Palette {
     mono_icon: Rgba::rgb(179, 179, 179),
     danger: Rgba::rgb(230, 66, 60),
     danger_soft: Rgba::rgb(253, 236, 235),
+    info: Rgba::rgb(51, 51, 51),
+    outline: Rgba::rgb(102, 102, 102),
+    spec_label: Rgba::rgb(127, 127, 127),
+    // Sampled from the stock「我的设备」page.
+    hero: Hero {
+        top: Rgba::rgb(236, 233, 253),
+        mid: Rgba::rgb(250, 234, 244),
+        bottom: Rgba::rgb(247, 247, 247),
+        blobs: [
+            (0.55, 0.12, 0.38, Rgba::rgb(220, 216, 252)),
+            (0.45, 0.48, 0.42, Rgba::rgb(242, 204, 224)),
+            (1.05, 0.58, 0.36, Rgba::rgb(200, 204, 246)),
+            (1.00, 0.80, 0.32, Rgba::rgb(212, 224, 252)),
+            (-0.05, 0.38, 0.38, Rgba::rgb(253, 236, 246)),
+            (1.02, 0.05, 0.30, Rgba::rgb(250, 236, 250)),
+        ],
+        ink: [Rgba::rgb(130, 90, 161), Rgba::rgb(110, 55, 136), Rgba::rgb(128, 76, 136)],
+        caption: Rgba::rgb(0, 0, 0).with_alpha(153),
+        pill: Rgba::rgb(255, 255, 255).with_alpha(158),
+        pill_edge: Rgba::rgb(255, 255, 255).with_alpha(230),
+        pill_text: Rgba::rgb(0, 0, 0),
+    },
 };
 
 const DARK: Palette = Palette {
@@ -202,4 +250,25 @@ const DARK: Palette = Palette {
     mono_icon: Rgba::rgb(110, 110, 110),
     danger: Rgba::rgb(255, 92, 84),
     danger_soft: Rgba::rgb(52, 24, 24),
+    info: Rgba::rgb(214, 214, 214),
+    outline: Rgba::rgb(140, 140, 140),
+    spec_label: Rgba::rgb(128, 128, 128),
+    hero: Hero {
+        top: Rgba::rgb(16, 14, 30),
+        mid: Rgba::rgb(14, 10, 20),
+        bottom: Rgba::rgb(0, 0, 0),
+        blobs: [
+            (0.55, 0.12, 0.38, Rgba::rgb(42, 36, 92)),
+            (0.45, 0.48, 0.42, Rgba::rgb(72, 30, 66)),
+            (1.05, 0.58, 0.36, Rgba::rgb(30, 40, 100)),
+            (1.00, 0.80, 0.32, Rgba::rgb(22, 34, 78)),
+            (-0.05, 0.38, 0.38, Rgba::rgb(46, 26, 48)),
+            (1.02, 0.05, 0.30, Rgba::rgb(34, 24, 46)),
+        ],
+        ink: [Rgba::rgb(192, 162, 236), Rgba::rgb(172, 132, 232), Rgba::rgb(206, 160, 226)],
+        caption: Rgba::rgb(255, 255, 255).with_alpha(153),
+        pill: Rgba::rgb(255, 255, 255).with_alpha(26),
+        pill_edge: Rgba::rgb(255, 255, 255).with_alpha(46),
+        pill_text: Rgba::rgb(237, 237, 237),
+    },
 };

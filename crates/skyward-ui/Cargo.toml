@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 ab_glyph = "0.2.32"
+skyward-info = { path = "../skyward-info" }
+skyward-vab = { path = "../skyward-vab" }

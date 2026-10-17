@@ -30,14 +30,20 @@ impl Face {
     /// baseline (negative is above). Rows centre text on this, as the stock
     /// settings do.
     pub fn ink(&self, em_px: f32) -> (f32, f32) {
-        let glyph = self.font.glyph_id('中').with_scale_and_position(self.scale(em_px), ab_glyph::point(0.0, 0.0));
-        match self.font.outline_glyph(glyph) {
-            Some(og) => {
-                let b = og.px_bounds();
-                (b.min.y, b.max.y)
-            }
-            None => (-em_px * 0.84, em_px * 0.08),
-        }
+        self.bounds('中', em_px)
+    }
+
+    /// Height of a capital letter above the baseline, for Latin lettering
+    /// placed by its cap line.
+    pub fn cap(&self, em_px: f32) -> f32 {
+        -self.bounds('H', em_px).0
+    }
+
+    fn bounds(&self, ch: char, em_px: f32) -> (f32, f32) {
+        let glyph = self.font.glyph_id(ch).with_scale_and_position(self.scale(em_px), ab_glyph::point(0.0, 0.0));
+        let og = self.font.outline_glyph(glyph).unwrap_or_else(|| panic!("font has no outline for {ch:?}"));
+        let b = og.px_bounds();
+        (b.min.y, b.max.y)
     }
 }
 
@@ -72,7 +78,7 @@ pub struct Fonts {
     pub heading: Face,
     /// Section captions.
     pub label: Face,
-    /// Subtitles, placeholders and explanatory text.
+    /// Subtitles, placeholders, explanatory text and the About wordmark.
     pub body: Face,
     /// Trailing values.
     pub value: Face,
