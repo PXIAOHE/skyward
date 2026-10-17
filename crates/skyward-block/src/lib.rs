@@ -1,0 +1,102 @@
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub const BY_NAME: &str = "/dev/block/by-name";
+
+/// Active slot suffix (`_a` / `_b`) parsed from the kernel command line or
+/// bootconfig. Returns `None` on devices that are not A/B.
+pub fn slot_suffix() -> Option<String> {
+    for src in ["/proc/bootconfig", "/proc/cmdline"] {
+        if let Ok(s) = fs::read_to_string(src) {
+            if let Some(v) = find_kv(&s, "androidboot.slot_suffix") {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn find_kv(haystack: &str, key: &str) -> Option<String> {
+    // Kernel cmdline form: whitespace-separated `key=value` tokens.
+    for tok in haystack.split_whitespace() {
+        if let Some(val) = tok.strip_prefix(key).and_then(|r| r.strip_prefix('=')) {
+            let val = val.trim_matches('"').trim_end_matches(',');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    // bootconfig form: one `key = "value"` per line.
+    for line in haystack.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == key {
+                let val = v.trim().trim_matches('"').trim_end_matches(',').trim_matches('"');
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+pub struct Partition {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Enumerate the `by-name` partition links, resolving each to its block device.
+pub fn list_by_name(dir: impl AsRef<Path>) -> Result<Vec<Partition>> {
+    let dir = dir.as_ref();
+    let mut out = Vec::new();
+    for ent in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let ent = ent?;
+        let name = ent.file_name().to_string_lossy().into_owned();
+        let path = fs::canonicalize(ent.path()).unwrap_or_else(|_| ent.path());
+        out.push(Partition { name, path });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+#[cfg(target_os = "android")]
+pub fn size_bytes(path: impl AsRef<Path>) -> Result<u64> {
+    use std::os::unix::io::AsRawFd;
+    // _IOR(0x12, 114, size_t) on aarch64 Linux. bionic's ioctl request arg is
+    // a c_int, so the request is reinterpreted into it rather than widened.
+    const BLKGETSIZE64: u32 = 0x8008_1272;
+    let f = fs::File::open(path.as_ref())
+        .with_context(|| format!("open {}", path.as_ref().display()))?;
+    let mut size: u64 = 0;
+    let rc = unsafe {
+        libc::ioctl(f.as_raw_fd(), BLKGETSIZE64 as libc::c_int, &mut size as *mut u64)
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("BLKGETSIZE64");
+    }
+    Ok(size)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn size_bytes(_path: impl AsRef<Path>) -> Result<u64> {
+    anyhow::bail!("size_bytes is only implemented on android")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_slot_from_cmdline() {
+        let line = "console=ttyMSM0 androidboot.slot_suffix=_b androidboot.hardware=qcom";
+        assert_eq!(find_kv(line, "androidboot.slot_suffix").as_deref(), Some("_b"));
+    }
+
+    #[test]
+    fn parses_slot_from_bootconfig() {
+        let line = "androidboot.slot_suffix = \"_a\"\nandroidboot.force_normal_boot = \"1\"";
+        assert_eq!(find_kv(line, "androidboot.slot_suffix").as_deref(), Some("_a"));
+    }
+}

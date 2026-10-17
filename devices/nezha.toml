@@ -1,0 +1,16 @@
+[device]
+codename = "nezha"
+brand = "Xiaomi"
+model = "Xiaomi 17 Ultra"
+ab = true
+
+[display]
+width = 1200
+height = 2608
+density = 480
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor"]
+
+[decrypt]
+weaver = ["goodix", "thales"]

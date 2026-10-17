@@ -1,0 +1,97 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::path::Path;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceConfig {
+    pub device: Device,
+    #[serde(default)]
+    pub display: Display,
+    #[serde(default)]
+    pub modules: Modules,
+    #[serde(default)]
+    pub decrypt: Decrypt,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Device {
+    pub codename: String,
+    #[serde(default)]
+    pub brand: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_true")]
+    pub ab: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Display {
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub density: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Modules {
+    #[serde(default = "default_module_sources")]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub blocklist: Vec<String>,
+}
+
+impl Default for Modules {
+    fn default() -> Self {
+        Self { sources: default_module_sources(), blocklist: Vec::new() }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Decrypt {
+    #[serde(default)]
+    pub weaver: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_module_sources() -> Vec<String> {
+    vec!["vendor_boot".into(), "vendor_dlkm".into(), "vendor".into()]
+}
+
+impl DeviceConfig {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let p = path.as_ref();
+        let text = std::fs::read_to_string(p)
+            .with_context(|| format!("read config {}", p.display()))?;
+        Self::parse(&text)
+    }
+
+    pub fn parse(text: &str) -> Result<Self> {
+        toml::from_str(text).context("parse device config")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_minimal() {
+        let cfg = DeviceConfig::parse("[device]\ncodename = \"nezha\"\n").unwrap();
+        assert_eq!(cfg.device.codename, "nezha");
+        assert!(cfg.device.ab);
+        assert_eq!(cfg.modules.sources, default_module_sources());
+    }
+
+    #[test]
+    fn parses_nezha() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        assert_eq!(cfg.device.codename, "nezha");
+        assert_eq!(cfg.display.width, 1200);
+        assert_eq!(cfg.decrypt.weaver, vec!["goodix", "thales"]);
+    }
+}
