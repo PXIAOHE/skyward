@@ -38,6 +38,9 @@ pub struct Display {
     pub height: u32,
     #[serde(default)]
     pub density: u32,
+    /// Marketed screen diagonal in inches.
+    #[serde(default)]
+    pub diagonal: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,8 +106,9 @@ mod tests {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
         assert_eq!(cfg.device.codename, "nezha");
         assert_eq!(cfg.device.os_version_prop, "ro.mi.os.version.incremental");
-        assert_eq!(cfg.device.soc.as_deref(), Some("第五代骁龙®8至尊版"));
+        assert_eq!(cfg.device.soc.as_deref(), Some("第五代骁龙®8至尊版移动平台"));
         assert_eq!(cfg.display.width, 1200);
+        assert_eq!(cfg.display.diagonal, Some(6.9));
         assert_eq!(cfg.decrypt.weaver, vec!["goodix", "thales"]);
     }
 }

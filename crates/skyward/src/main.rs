@@ -43,6 +43,7 @@ fn info(config: &str) -> Result<()> {
     println!("cpu           = {} cores, max {:?} kHz", i.cpu.cores, i.cpu.max_khz);
     println!("ram           = {} KiB", i.ram_kib);
     println!("panel         = {:?}", i.panel);
+    println!("screen        = {:?} in", i.screen);
     println!("os_version    = {:?}", i.os_version);
     println!("android       = {:?}", i.android);
     println!("patch         = {:?}", i.security_patch);

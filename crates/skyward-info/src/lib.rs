@@ -19,7 +19,7 @@ const SYS_BLOCK: &str = "/sys/class/block";
 /// be absent (no battery driver loaded, build properties missing from the
 /// recovery ramdisk) is an `Option`; a source that exists but cannot be read
 /// or parsed is an error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeviceInfo {
     pub model: String,
     pub codename: String,
@@ -29,15 +29,39 @@ pub struct DeviceInfo {
     pub ram_kib: u64,
     /// Panel resolution as width × height in pixels.
     pub panel: Option<(u32, u32)>,
+    /// Marketed screen diagonal in inches.
+    pub screen: Option<f32>,
     pub os_version: Option<String>,
     pub android: Option<String>,
-    pub security_patch: Option<String>,
+    pub security_patch: Option<PatchLevel>,
     pub kernel: String,
     pub storage: Storage,
     pub battery: Option<Battery>,
     pub slot: Option<Slot>,
     pub snapshot: SnapshotState,
     pub boot: Boot,
+}
+
+/// `ro.build.version.security_patch`, a calendar date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatchLevel {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+}
+
+impl FromStr for PatchLevel {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let parts: Vec<&str> = s.split('-').collect();
+        let [y, m, d] = parts.as_slice() else { bail!("security patch {s:?} is not YYYY-MM-DD") };
+        let level = PatchLevel { year: parse(y, "patch year")?, month: parse(m, "patch month")?, day: parse(d, "patch day")? };
+        if !(1..=12).contains(&level.month) || !(1..=31).contains(&level.day) {
+            bail!("security patch {s:?} is not a date");
+        }
+        Ok(level)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,9 +141,10 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         cpu: cpu(Path::new(CPU))?,
         ram_kib: mem_total(&read("/proc/meminfo")?)?,
         panel: (d.width > 0 && d.height > 0).then_some((d.width, d.height)),
+        screen: d.diagonal,
         os_version: prop(&cfg.device.os_version_prop),
         android: prop("ro.build.version.release"),
-        security_patch: prop("ro.build.version.security_patch"),
+        security_patch: prop("ro.build.version.security_patch").map(|s| s.parse()).transpose()?,
         kernel: kernel_release()?,
         storage: storage()?,
         battery: battery(Path::new(POWER_SUPPLY))?,
@@ -312,6 +337,15 @@ mod tests {
         let text = "MemTotal:       15472464 kB\nMemFree:         2381608 kB\n";
         assert_eq!(mem_total(text).unwrap(), 15_472_464);
         assert!(mem_total("MemFree: 1 kB\n").is_err());
+    }
+
+    #[test]
+    fn patch_level_parses_dates_only() {
+        let p: PatchLevel = "2026-10-01".parse().unwrap();
+        assert_eq!(p, PatchLevel { year: 2026, month: 10, day: 1 });
+        assert!("2026-13-01".parse::<PatchLevel>().is_err());
+        assert!("2026-10".parse::<PatchLevel>().is_err());
+        assert!("October 2026".parse::<PatchLevel>().is_err());
     }
 
     #[test]

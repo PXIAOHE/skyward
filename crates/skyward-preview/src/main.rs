@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
-use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, Storage};
+use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
 use skyward_vab::{Slot, SnapshotState};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+
+mod matcher;
 
 const CLOCK: &str = "23:46";
 
@@ -27,11 +29,18 @@ fn main() -> Result<()> {
     let light = Theme::light(w, h);
     let dark = Theme::dark(w, h);
 
-    if args.get(2).map(String::as_str) == Some("--calibrate") {
-        let path = out.join("calibrate.png");
-        write_png(&path, &calibrate(&fonts, &light)?)?;
-        println!("wrote {}", path.display());
-        return Ok(());
+    match args.get(2).map(String::as_str) {
+        Some("--calibrate") => {
+            let path = out.join("calibrate.png");
+            write_png(&path, &calibrate(&fonts, &light)?)?;
+            println!("wrote {}", path.display());
+            return Ok(());
+        }
+        Some("--match") => {
+            let probes = args.get(3).ok_or_else(|| anyhow!("--match needs a probe file"))?;
+            return matcher::run(&fonts, Path::new(probes));
+        }
+        _ => {}
     }
 
     let info = nezha(&cfg);
@@ -47,10 +56,10 @@ fn main() -> Result<()> {
         ("06-reboot-dark", pages::reboot(&ctx(&dark, f, &info, open))),
         ("07-wipe-light", pages::wipe(&ctx(&light, f, &info, open))),
         ("08-install-dark", pages::install_progress(&ctx(&dark, f, &info, open))),
-        ("09-about-light", pages::about(&ctx(&light, f, &info, open))),
-        ("10-about-dark", pages::about(&ctx(&dark, f, &info, open))),
-        ("11-specs-light", pages::specs(&ctx(&light, f, &info, open))),
-        ("12-specs-dark", pages::specs(&ctx(&dark, f, &info, open))),
+        // The About backdrop is the same in both themes.
+        ("09-about", pages::about(&ctx(&light, f, &info, open))),
+        ("10-specs-light", pages::specs(&ctx(&light, f, &info, open))),
+        ("11-specs-dark", pages::specs(&ctx(&dark, f, &info, open))),
     ];
     for (name, canvas) in &shots {
         let path = out.join(format!("{name}.png"));
@@ -64,34 +73,31 @@ fn ctx<'a>(t: &'a Theme, f: &'a Fonts, info: &'a DeviceInfo, data: DataState) ->
     Ctx { t, f, info, data, clock: CLOCK }
 }
 
-/// Xiaomi 17 Ultra. Model, SoC name and panel come from devices/nezha.toml;
-/// the build, kernel, memory, CPU frequency table, userdata size, slot, boot
-/// state, battery capacity and cycle count were read off that phone (getprop,
-/// its boot log and `fastboot getvar all`). Battery level, temperature and
-/// voltage and the free space on /data change from moment to moment; those
-/// are representative values.
+/// Xiaomi 17 Ultra by Leica as `skyward info` read it on 2026-10-18 (the
+/// config supplies the SoC name, panel and screen size).
 fn nezha(cfg: &DeviceConfig) -> DeviceInfo {
     DeviceInfo {
-        model: cfg.device.model.clone(),
+        model: "Xiaomi 17 Ultra by Leica".into(),
         codename: cfg.device.codename.clone(),
         soc: cfg.device.soc.clone(),
         cpu: Cpu { cores: 8, max_khz: Some(4_608_000) },
         ram_kib: 15_472_464,
         panel: Some((cfg.display.width, cfg.display.height)),
+        screen: cfg.display.diagonal,
         os_version: Some("OS4.0.4.0.XPACNXM".into()),
         android: Some("17".into()),
-        security_patch: Some("2026-10-01".into()),
+        security_patch: Some(PatchLevel { year: 2026, month: 10, day: 1 }),
         kernel: "6.12.69-android16-6-g43b5ab7e247d-abogki561813157-4k".into(),
-        storage: Storage { total: 0xF2_091F_B000, free: Some(789_400_000_000) },
+        storage: Storage { total: 1_039_535_157_248, free: Some(620_652_802_048) },
         battery: Some(Battery {
-            level: 74,
+            level: 95,
             charge: Charge::Charging,
-            temp: Some(315),
+            temp: Some(350),
             health: Some("Good".into()),
             cycles: Some(300),
-            design: Some(6_747_000),
-            full: None,
-            voltage: Some(4_212_000),
+            design: Some(6_800_000),
+            full: Some(6_543_000),
+            voltage: Some(4_442_000),
         }),
         slot: Some(Slot::B),
         snapshot: SnapshotState::None,

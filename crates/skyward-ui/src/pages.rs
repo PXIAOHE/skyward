@@ -3,7 +3,7 @@ use crate::color::Rgba;
 use crate::fmt;
 use crate::font::Fonts;
 use crate::theme::Theme;
-use crate::widgets::{self, Bar, Fact, Icon, Outline, Row, Spec, Trail};
+use crate::widgets::{self, Bar, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DataState, DeviceInfo, VERSION};
 
 // Tile colours sampled from the stock Settings, plus orange and red from the
@@ -128,20 +128,22 @@ pub fn settings(cx: &Ctx) -> Canvas {
     fit(c, t, y)
 }
 
-/// About this device, modelled on the stock「我的设备」: the wordmark over a
-/// coloured backdrop, a summary card and the hardware card.
+/// About this device, modelled on the stock「我的设备」at rest: the wordmark
+/// over a deep blue backdrop, then translucent summary, hardware and link
+/// cards.
 pub fn about(cx: &Ctx) -> Canvas {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let m = &t.m;
+    let tone = Tone::hero(t);
     let mut c = long_page(t);
     widgets::hero_backdrop(&mut c, t);
-    widgets::status_bar(&mut c, t, f, &cx.bar());
-    widgets::back_arrow(&mut c, t);
-    widgets::wordmark(&mut c, t, f, "Skyward", m.dp(205.1), m.dp(39.0));
-    let w = c.text_width(&f.body, VERSION, m.sub_px);
-    let base = m.dp(270.3) + f.body.cap(m.sub_px);
-    c.text(&f.body, VERSION, (m.w as f32 - w) / 2.0, base, m.sub_px, t.pal.hero.caption, None);
-    widgets::pill(&mut c, t, f, m.dp(392.6), "导出日志");
+    widgets::status_bar(&mut c, t, f, &cx.bar(), t.hero.status);
+    widgets::back_arrow(&mut c, t, t.hero.title);
+    widgets::wordmark(&mut c, t, f, "Skyward", m.dp(233.7), m.dp(37.8));
+    let version_px = m.dp(13.3);
+    let w = c.text_width(&f.body, VERSION, version_px);
+    let base = m.dp(296.3) + f.body.cap(version_px);
+    c.text(&f.body, VERSION, (m.w as f32 - w) / 2.0, base, version_px, t.hero.caption, None);
 
     let storage = fmt::storage_used(&i.storage).unwrap_or_else(|| fmt::capacity(i.storage.total));
     let mut facts = vec![
@@ -154,14 +156,20 @@ pub fn about(cx: &Ctx) -> Canvas {
     if let Some(r) = &i.android {
         facts.push(Fact { title: "Android 版本", value: r.clone(), link: false });
     }
-    let mut y = widgets::facts(&mut c, t, f, m.dp(506.9), &facts);
+    let mut y = widgets::facts(&mut c, t, f, m.dp(490.7), &facts, &tone);
 
     let mut specs = vec![("处理器", i.soc.clone().unwrap_or_else(|| fmt::cpu(&i.cpu))), ("运行内存", fmt::ram(i.ram_kib))];
     if let Some(design) = i.battery.as_ref().and_then(|b| b.design) {
         specs.push(("电池容量", fmt::mah(design)));
     }
-    y = widgets::spec_card(&mut c, t, f, y + m.card_gap, &i.model, &specs);
-    y = widgets::list(&mut c, t, f, y + m.card_gap, &[Row::new("全部参数与信息")]);
+    if let Some(d) = i.screen {
+        specs.push(("屏幕尺寸", fmt::inches(d)));
+    }
+    if let Some(p) = i.panel {
+        specs.push(("分辨率", fmt::panel(p)));
+    }
+    y = widgets::spec_card(&mut c, t, f, y + m.card_gap, &fmt::model_lines(&i.model), &specs, &tone);
+    y = widgets::list_toned(&mut c, t, f, y + m.card_gap, &[Row::new("全部参数与信息"), Row::new("导出日志")], &tone);
     fit(c, t, y)
 }
 
@@ -172,9 +180,9 @@ pub fn specs(cx: &Ctx) -> Canvas {
     let mut c = long_page(t);
     widgets::header(&mut c, t, f, &cx.bar(), "全部参数与信息", true);
     // This page leaves more room under the title than the settings pages.
-    let top = t.m.dp(229.1);
+    let top = t.m.dp(188.0);
 
-    let mut grid = vec![Spec { icon: Outline::Phone, label: "设备型号", value: i.model.clone() }];
+    let mut grid = vec![Spec { icon: Outline::Phone, label: "设备型号", value: fmt::model_lines(&i.model) }];
     if let Some(design) = i.battery.as_ref().and_then(|b| b.design) {
         grid.push(Spec { icon: Outline::Battery, label: "电池容量", value: fmt::mah(design) });
     }
@@ -187,6 +195,9 @@ pub fn specs(cx: &Ctx) -> Canvas {
     if let Some(p) = i.panel {
         grid.push(Spec { icon: Outline::Resolution, label: "分辨率", value: fmt::panel(p) });
     }
+    if let Some(d) = i.screen {
+        grid.push(Spec { icon: Outline::Screen, label: "屏幕尺寸", value: fmt::inches(d) });
+    }
     grid.push(Spec { icon: Outline::Storage, label: "存储容量", value: fmt::capacity(i.storage.total) });
     grid.push(Spec { icon: Outline::Tag, label: "设备代号", value: i.codename.clone() });
     let mut y = widgets::spec_grid(&mut c, t, f, top, &grid);
@@ -195,7 +206,7 @@ pub fn specs(cx: &Ctx) -> Canvas {
         y = widgets::info_card(&mut c, t, f, y + gap, &[("OS 版本", v.clone())]);
     }
     if let Some(r) = &i.android {
-        y = widgets::info_card(&mut c, t, f, y + gap, &[("Android 版本", fmt::android(r, i.security_patch.as_deref()))]);
+        y = widgets::info_card(&mut c, t, f, y + gap, &[("Android 版本", fmt::android(r, i.security_patch.as_ref()))]);
     }
     y = widgets::info_card(&mut c, t, f, y + gap, &[
         ("Recovery 版本", format!("Skyward {VERSION}")),
@@ -250,7 +261,7 @@ pub fn decrypt(cx: &Ctx, path: &[usize]) -> Canvas {
     let (t, f) = (cx.t, cx.f);
     let mut c = page(t);
     let m = &t.m;
-    widgets::status_bar(&mut c, t, f, &cx.bar());
+    widgets::status_bar(&mut c, t, f, &cx.bar(), t.pal.status);
     let x = m.w as f32 / 2.0;
     let lock_cy = m.dp(150.0);
     c.fill_circle(x, lock_cy, m.dp(30.0), t.pal.card);

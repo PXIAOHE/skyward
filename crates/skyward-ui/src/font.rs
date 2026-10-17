@@ -47,8 +47,9 @@ impl Face {
     }
 }
 
-/// `wght` per text role, matched glyph-for-glyph against the stock Settings
-/// by comparing colour-normalised ink coverage with a rendered weight ladder.
+/// `wght` per text role, fitted on Xiaomi 17 Ultra screenshots:
+/// for each string, the size and weight whose rendering matches the ink
+/// width, height and colour-normalised coverage (`skyward-preview --match`).
 pub struct Weights {
     pub title: f32,
     pub heading: f32,
@@ -58,27 +59,29 @@ pub struct Weights {
     pub badge: f32,
     pub status: f32,
     pub strong: f32,
+    pub display: f32,
 }
 
 pub const STOCK_WEIGHTS: Weights = Weights {
-    title: 380.0,
-    heading: 560.0,
-    label: 445.0,
-    body: 480.0,
-    value: 455.0,
+    title: 322.0,
+    heading: 365.0,
+    label: 370.0,
+    body: 315.0,
+    value: 320.0,
     badge: 505.0,
-    status: 360.0,
+    status: 485.0,
     strong: 700.0,
+    display: 480.0,
 };
 
 pub struct Fonts {
     /// Large page title.
     pub title: Face,
-    /// Row and card titles.
+    /// Row, card and grid-value titles.
     pub heading: Face,
     /// Section captions.
     pub label: Face,
-    /// Subtitles, placeholders, explanatory text and the About wordmark.
+    /// Subtitles, placeholders and explanatory text.
     pub body: Face,
     /// Trailing values.
     pub value: Face,
@@ -86,6 +89,8 @@ pub struct Fonts {
     pub status: Face,
     /// Digits inside the battery pill.
     pub strong: Face,
+    /// The About page wordmark.
+    pub display: Face,
     data: &'static [u8],
     index: u32,
 }
@@ -111,6 +116,7 @@ impl Fonts {
             badge: face(w.badge)?,
             status: face(w.status)?,
             strong: face(w.strong)?,
+            display: face(w.display)?,
             data,
             index,
         })

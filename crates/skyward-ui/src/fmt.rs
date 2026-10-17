@@ -1,4 +1,4 @@
-use skyward_info::{Battery, Charge, Cpu, DataState, Storage};
+use skyward_info::{Battery, Charge, Cpu, DataState, PatchLevel, Storage};
 use skyward_vab::SnapshotState;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -8,7 +8,7 @@ pub fn ram(kib: u64) -> String {
     const SIZES: [f64; 16] = [1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 18.0, 20.0, 24.0, 32.0, 48.0, 64.0];
     let gib = kib as f64 / (1024.0 * 1024.0);
     let size = SIZES.iter().copied().find(|&s| s >= gib).unwrap_or(gib.ceil());
-    format!("{size:.1}GB")
+    format!("{size:.1} GB")
 }
 
 /// Marketed storage size in GB: the smallest power of two (in GiB) that holds
@@ -63,8 +63,18 @@ pub fn cpu(c: &Cpu) -> String {
     }
 }
 
+/// A marketing name laid out the way the stock settings stack it in large
+/// type: an edition credit ("by Leica") starts its own line.
+pub fn model_lines(name: &str) -> String {
+    name.replacen(" by ", "\nby ", 1)
+}
+
 pub fn panel((w, h): (u32, u32)) -> String {
-    format!("{}×{}", w.max(h), w.min(h))
+    format!("{} x {}", w.max(h), w.min(h))
+}
+
+pub fn inches(d: f32) -> String {
+    format!("{d}″")
 }
 
 pub fn mah(uah: u64) -> String {
@@ -126,9 +136,9 @@ pub fn wear(b: &Battery) -> Option<String> {
     }
 }
 
-pub fn android(release: &str, patch: Option<&str>) -> String {
+pub fn android(release: &str, patch: Option<&PatchLevel>) -> String {
     match patch {
-        Some(p) => format!("{release} | Android 安全更新：{p}"),
+        Some(p) => format!("{release} | Android 安全更新：{}年{}月{}日", p.year, p.month, p.day),
         None => release.to_string(),
     }
 }
@@ -182,8 +192,8 @@ mod tests {
     // the userdata size from `fastboot getvar all`.
     #[test]
     fn ram_rounds_to_module_size() {
-        assert_eq!(ram(15_556_972), "16.0GB");
-        assert_eq!(ram(15_472_464), "16.0GB");
+        assert_eq!(ram(15_556_972), "16.0 GB");
+        assert_eq!(ram(15_472_464), "16.0 GB");
     }
 
     #[test]
@@ -224,11 +234,15 @@ mod tests {
         assert_eq!(volts(b.voltage.unwrap()), "4.48V");
     }
 
-    // Xiaomi 13 Ultra build and panel.
+    // Xiaomi 17 Ultra build and panel, as its stock settings print them.
     #[test]
     fn versions_and_states() {
-        assert_eq!(android("16", Some("2026-04-01")), "16 | Android 安全更新：2026-04-01");
-        assert_eq!(panel((1440, 3200)), "3200×1440");
+        let patch = PatchLevel { year: 2026, month: 10, day: 1 };
+        assert_eq!(android("17", Some(&patch)), "17 | Android 安全更新：2026年10月1日");
+        assert_eq!(panel((1200, 2608)), "2608 x 1200");
+        assert_eq!(model_lines("Xiaomi 17 Ultra by Leica"), "Xiaomi 17 Ultra\nby Leica");
+        assert_eq!(model_lines("Xiaomi 17 Ultra"), "Xiaomi 17 Ultra");
+        assert_eq!(inches(6.9), "6.9″");
         assert_eq!(verified("orange"), "橙色 · 设备已解锁，不校验系统");
         assert_eq!(health("Watchdog timer expire"), "Watchdog timer expire");
     }

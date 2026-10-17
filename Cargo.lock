@@ -648,10 +648,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "png",
+ "serde",
  "skyward-config",
  "skyward-info",
  "skyward-ui",
  "skyward-vab",
+ "toml",
 ]
 
 [[package]]
