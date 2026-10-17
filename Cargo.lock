@@ -725,6 +725,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyfuse-kernel"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc06bee37fe7e4f2a493d99e61f98ca0ec203416a48d33186bb37e0f8cbcdbb"
+dependencies = [
+ "zerocopy",
+]
+
+[[package]]
 name = "polyval"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1019,9 +1028,12 @@ dependencies = [
  "flate2",
  "libc",
  "lz4_flex",
+ "polyfuse-kernel",
  "sha2",
+ "skyward-block",
  "skyward-vab",
  "tempfile",
+ "zerocopy",
  "zip",
 ]
 

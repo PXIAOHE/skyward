@@ -2,6 +2,8 @@
 //! packages, which the phone's own update_engine applies, and partition
 //! images, which are written here.
 
+pub mod adb;
+pub mod fuse;
 pub mod image;
 pub mod package;
 

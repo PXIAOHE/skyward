@@ -11,8 +11,11 @@ cpio = "0.4.1"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 libc = { workspace = true }
 lz4_flex = "0.14.0"
+polyfuse-kernel = "0.2.0"
 sha2 = "0.10.9"
+skyward-block = { path = "../skyward-block" }
 skyward-vab = { path = "../skyward-vab" }
+zerocopy = { version = "0.8.63", features = ["derive"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
