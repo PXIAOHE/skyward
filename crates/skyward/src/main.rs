@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use skyward_config::{ramdisk, DeviceConfig};
-use skyward_sys::Power;
+use skyward_sys::{bcb, Power};
 use skyward_vab::SnapshotState;
 use std::path::Path;
 
@@ -31,6 +31,8 @@ enum Cmd {
     Recovery,
     /// Reboot through init: system, recovery, bootloader, edl, or off.
     Reboot { target: String },
+    /// Print the bootloader control block in misc.
+    Bcb,
 }
 
 fn main() -> Result<()> {
@@ -48,6 +50,12 @@ fn main() -> Result<()> {
             let p = Power::parse(&target).ok_or_else(|| anyhow!("unknown target {target:?}"))?;
             skyward_sys::power(p)
         }
+        Cmd::Bcb => {
+            let b = bcb::read(&bcb::misc())?;
+            println!("command = {:?}", b.command);
+            println!("args    = {:?}", b.args);
+            Ok(())
+        }
     }
 }
 
@@ -57,7 +65,14 @@ fn recovery() -> Result<()> {
     let run = || -> Result<()> {
         skyward_sys::set_prop("sys.usb.config", "adb")?;
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
-        skyward_sys::kmsg(&format!("{} {} recovery up", cfg.device.codename, skyward_info::VERSION))?;
+        let request = bcb::read(&bcb::misc())?;
+        skyward_sys::kmsg(&format!(
+            "{} {} recovery up, misc command {:?} args {:?}",
+            cfg.device.codename,
+            skyward_info::VERSION,
+            request.command,
+            request.args
+        ))?;
         // init restarts a service that exits, so the service stays resident.
         loop {
             std::thread::park();
