@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
-/// Where the recovery ramdisk keeps Skyward's own files, as archive paths
+/// Recovery ramdisk files Skyward reads, adds or changes, as archive paths
 /// (they sit under `/` once the kernel unpacks the ramdisk).
 pub mod ramdisk {
     /// The device configuration, copied from `devices/<codename>.toml`.
@@ -13,6 +13,8 @@ pub mod ramdisk {
     pub const RECOVERY: &str = "system/bin/recovery";
     /// Public keys adbd accepts without a prompt.
     pub const ADB_KEYS: &str = "adb_keys";
+    /// The first property file init loads in recovery mode.
+    pub const PROP_DEFAULT: &str = "prop.default";
 }
 
 #[derive(Debug, Clone, Deserialize)]
