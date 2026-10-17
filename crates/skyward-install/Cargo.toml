@@ -1,0 +1,19 @@
+[package]
+name = "skyward-install"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+abootimg-oxide = "0.5.2"
+anyhow = { workspace = true }
+cpio = "0.4.1"
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+libc = { workspace = true }
+lz4_flex = "0.14.0"
+sha2 = "0.10.9"
+skyward-vab = { path = "../skyward-vab" }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

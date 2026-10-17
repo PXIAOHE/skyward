@@ -9,6 +9,7 @@ members = [
     "crates/skyward-ui",
     "crates/skyward-crypto",
     "crates/skyward-info",
+    "crates/skyward-install",
     "crates/skyward-preview",
     "crates/skyward-pack",
     "crates/skyward-sys",
