@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
-use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode, PropType, SynchronizationCode};
+use evdev::raw_stream::RawDevice;
+use evdev::{AbsoluteAxisCode, EventSummary, InputEvent, KeyCode, PropType, SynchronizationCode};
 use skyward_ui::app::{Key, Touch};
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -8,8 +9,26 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
 pub enum Event {
-    Touch(Touch),
+    /// A touch and when the panel reported it, on [`monotonic_ms`]'s clock.
+    Touch(Touch, u64),
     Key(Key),
+}
+
+/// Milliseconds on the monotonic clock, which the touch panel stamps its
+/// events with.
+pub fn monotonic_ms() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    assert_eq!(rc, 0, "read the monotonic clock");
+    ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 const KEYS: [KeyCode; 4] = [KeyCode::KEY_POWER, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_BACK];
@@ -32,7 +51,7 @@ fn gone(e: &io::Error) -> bool {
 /// Slot 0's value of a multitouch axis. The kernel keeps multitouch values
 /// per slot, apart from the axis state the ABS queries return, and hands
 /// them out through EVIOCGMTSLOTS: the axis code, then one value per slot.
-fn slot0_value(dev: &Device, axis: AbsoluteAxisCode, slots: usize) -> io::Result<i32> {
+fn slot0_value(dev: &RawDevice, axis: AbsoluteAxisCode, slots: usize) -> io::Result<i32> {
     let mut buf = vec![0i32; 1 + slots];
     buf[0] = i32::from(axis.0);
     // _IOC(_IOC_READ, 'E', 0x0a, size)
@@ -46,19 +65,23 @@ fn slot0_value(dev: &Device, axis: AbsoluteAxisCode, slots: usize) -> io::Result
 /// The direct-touch panel. Only the first finger is followed (multitouch
 /// protocol B, slot 0).
 struct Panel {
-    dev: Device,
+    dev: RawDevice,
     path: PathBuf,
     x_range: (i32, i32),
     y_range: (i32, i32),
+    slots: usize,
     slot: i32,
     down: bool,
     was_down: bool,
     raw: (i32, i32),
     moved: bool,
+    /// The kernel dropped events that were not read in time; what arrives
+    /// up to the next report is incomplete.
+    dropped: bool,
 }
 
 impl Panel {
-    fn new(path: PathBuf, dev: Device) -> Result<Self> {
+    fn new(path: PathBuf, dev: RawDevice) -> Result<Self> {
         let mut x_range = None;
         let mut y_range = None;
         let mut slots = 1;
@@ -72,26 +95,66 @@ impl Panel {
         }
         let x_range = x_range.ok_or_else(|| anyhow!("touch panel reports no X range"))?;
         let y_range = y_range.ok_or_else(|| anyhow!("touch panel reports no Y range"))?;
+        // Stamp events with the clock the UI keeps time by: how fast a
+        // finger moved when it lifted is measured from these stamps.
+        // EVIOCSCLOCKID: _IOW('E', 0xa0, int)
+        let request = (1u32 << 30) | (4u32 << 16) | (u32::from(b'E') << 8) | 0xa0;
+        let clock: libc::c_int = libc::CLOCK_MONOTONIC;
+        if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, &clock) } < 0 {
+            return Err(io::Error::last_os_error()).context("stamp touch events with the monotonic clock");
+        }
+        set_nonblocking(dev.as_raw_fd()).context("make touch non-blocking")?;
+        let mut panel =
+            Panel { dev, path, x_range, y_range, slots, slot: 0, down: false, was_down: false, raw: (0, 0), moved: false, dropped: false };
         // The kernel drops a position equal to the one a slot already holds,
         // so a touch landing where the last one lifted carries no position;
-        // start from what slot 0 holds now.
-        let raw = (
-            slot0_value(&dev, AbsoluteAxisCode::ABS_MT_POSITION_X, slots).context("read the touch position")?,
-            slot0_value(&dev, AbsoluteAxisCode::ABS_MT_POSITION_Y, slots).context("read the touch position")?,
+        // start from what the panel holds now.
+        panel.resync().context("read the touch state")?;
+        eprintln!("touch {:?}: x {:?} y {:?}, {slots} slots, slot 0 at {:?}", panel.dev.name().unwrap_or("?"), x_range, y_range, panel.raw);
+        Ok(panel)
+    }
+
+    /// Read the current slot and slot 0's finger back from the panel.
+    fn resync(&mut self) -> io::Result<()> {
+        self.slot = self.dev.get_abs_state()?[usize::from(AbsoluteAxisCode::ABS_MT_SLOT.0)].value;
+        self.down = slot0_value(&self.dev, AbsoluteAxisCode::ABS_MT_TRACKING_ID, self.slots)? >= 0;
+        self.raw = (
+            slot0_value(&self.dev, AbsoluteAxisCode::ABS_MT_POSITION_X, self.slots)?,
+            slot0_value(&self.dev, AbsoluteAxisCode::ABS_MT_POSITION_Y, self.slots)?,
         );
-        eprintln!("touch {:?}: x {:?} y {:?}, {slots} slots, slot 0 at {raw:?}", dev.name().unwrap_or("?"), x_range, y_range);
-        dev.set_nonblocking(true).context("make touch non-blocking")?;
-        Ok(Panel { dev, path, x_range, y_range, slot: 0, down: false, was_down: false, raw, moved: false })
+        self.moved = true;
+        Ok(())
     }
 
     fn read(&mut self, w: f32, h: f32, out: &mut Vec<Event>) -> io::Result<()> {
-        let summaries: Vec<EventSummary> = match self.dev.fetch_events() {
-            Ok(events) => events.map(|e| e.destructure()).collect(),
+        let events: Vec<InputEvent> = match self.dev.fetch_events() {
+            Ok(events) => events.collect(),
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
             Err(e) => return Err(e),
         };
-        for s in summaries {
-            match s {
+        for e in events {
+            match e.destructure() {
+                // Skip to the next report and read the state back there.
+                EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => self.dropped = true,
+                EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
+                    if std::mem::take(&mut self.dropped) {
+                        self.resync()?;
+                    }
+                    let time = e.as_ref().time;
+                    let at = time.tv_sec as u64 * 1000 + time.tv_usec as u64 / 1000;
+                    let span = |r: (i32, i32)| (r.1 - r.0).max(1) as f32;
+                    let x = (self.raw.0 - self.x_range.0) as f32 / span(self.x_range) * w;
+                    let y = (self.raw.1 - self.y_range.0) as f32 / span(self.y_range) * h;
+                    match (self.was_down, self.down) {
+                        (false, true) => out.push(Event::Touch(Touch::Down(x, y), at)),
+                        (true, true) if self.moved => out.push(Event::Touch(Touch::Move(x, y), at)),
+                        (true, false) => out.push(Event::Touch(Touch::Up, at)),
+                        _ => {}
+                    }
+                    self.was_down = self.down;
+                    self.moved = false;
+                }
+                _ if self.dropped => {}
                 EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, v) => self.slot = v,
                 EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, v) if self.slot == 0 => self.down = v >= 0,
                 EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_X, v) if self.slot == 0 => {
@@ -101,19 +164,6 @@ impl Panel {
                 EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, v) if self.slot == 0 => {
                     self.raw.1 = v;
                     self.moved = true;
-                }
-                EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
-                    let span = |r: (i32, i32)| (r.1 - r.0).max(1) as f32;
-                    let x = (self.raw.0 - self.x_range.0) as f32 / span(self.x_range) * w;
-                    let y = (self.raw.1 - self.y_range.0) as f32 / span(self.y_range) * h;
-                    match (self.was_down, self.down) {
-                        (false, true) => out.push(Event::Touch(Touch::Down(x, y))),
-                        (true, true) if self.moved => out.push(Event::Touch(Touch::Move(x, y))),
-                        (true, false) => out.push(Event::Touch(Touch::Up)),
-                        _ => {}
-                    }
-                    self.was_down = self.down;
-                    self.moved = false;
                 }
                 _ => {}
             }
@@ -128,7 +178,7 @@ impl Panel {
 pub struct Inputs {
     watch: OwnedFd,
     panel: Option<Panel>,
-    buttons: Vec<(PathBuf, Device)>,
+    buttons: Vec<(PathBuf, RawDevice)>,
     seen: HashSet<PathBuf>,
     w: f32,
     h: f32,
@@ -159,7 +209,7 @@ impl Inputs {
     /// direct multitouch device as the panel, and every device with a
     /// power, volume or back key as buttons.
     fn scan(&mut self) -> Result<()> {
-        for (path, dev) in evdev::enumerate() {
+        for (path, dev) in evdev::raw_stream::enumerate() {
             if !self.seen.insert(path.clone()) {
                 continue;
             }
@@ -172,7 +222,7 @@ impl Inputs {
             if direct && mt && self.panel.is_none() {
                 self.panel = Some(Panel::new(path, dev)?);
             } else if keys {
-                dev.set_nonblocking(true).context("make buttons non-blocking")?;
+                set_nonblocking(dev.as_raw_fd()).context("make buttons non-blocking")?;
                 self.buttons.push((path, dev));
             }
         }

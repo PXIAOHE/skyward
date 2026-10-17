@@ -1,6 +1,7 @@
 pub mod app;
 pub mod canvas;
 pub mod color;
+pub mod fling;
 pub mod fmt;
 pub mod font;
 pub mod geom;

@@ -1,4 +1,5 @@
 use crate::canvas::Canvas;
+use crate::fling::{Fling, Tracker};
 use crate::font::Fonts;
 use crate::geom::Rect;
 use crate::pages::{self, Ctx};
@@ -158,6 +159,11 @@ enum Drag {
 }
 
 const TOAST_MS: u64 = 2000;
+/// A finger lifted slower than this, in dp per second, leaves the page
+/// where it is.
+const MIN_FLING_DP: f32 = 50.0;
+/// The fastest a page starts gliding, in dp per second.
+const MAX_FLING_DP: f32 = 8000.0;
 
 pub struct App {
     pub state: State,
@@ -168,6 +174,9 @@ pub struct App {
     bar: Option<((Screen, bool), Canvas)>,
     toast: Option<(String, u64)>,
     drag: Drag,
+    tracker: Tracker,
+    /// The page gliding on after a flick.
+    fling: Option<Fling>,
     display_on: bool,
     dirty: bool,
     w: u32,
@@ -184,6 +193,8 @@ impl App {
             bar: None,
             toast: None,
             drag: Drag::Idle,
+            tracker: Tracker::default(),
+            fling: None,
             display_on: true,
             dirty: true,
             w,
@@ -217,16 +228,34 @@ impl App {
         std::mem::take(&mut self.dirty)
     }
 
-    /// When a shown message should disappear, if one is shown.
+    /// When time next has to pass through [`App::tick`]: at once while the
+    /// page glides, else when a shown message should disappear.
     pub fn deadline(&self) -> Option<u64> {
+        if self.fling.is_some() {
+            return Some(0);
+        }
         self.toast.as_ref().map(|t| t.1)
     }
 
-    /// Let time pass: a message past its deadline goes away.
+    /// Let time pass: a gliding page moves on, and a message past its
+    /// deadline goes away.
     pub fn tick(&mut self, now: u64) {
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
             self.dirty = true;
+        }
+        if let Some(fling) = self.fling {
+            let (y, done) = fling.at(now);
+            let next = y.clamp(0.0, self.max_scroll());
+            let top = self.top_mut();
+            if next != top.1 {
+                top.1 = next;
+                self.dirty = true;
+            }
+            // A glide stops at its end or where the page ends.
+            if done || next != y {
+                self.fling = None;
+            }
         }
     }
 
@@ -381,6 +410,14 @@ impl App {
         let mut fx = Vec::new();
         match ev {
             Touch::Down(x, y) => {
+                self.tracker.clear();
+                self.tracker.add(now, y);
+                // A finger landing on a page still gliding stops it and holds
+                // the page; the control under the finger is not pressed.
+                if self.fling.take().is_some_and(|fl| !fl.at(now).1) {
+                    self.drag = Drag::Scroll { last: y };
+                    return fx;
+                }
                 // Over a scrolled page the compact bar covers the top; only
                 // its `<` answers there.
                 let hit = if self.bar_shown(&t) && y < widgets::top_bar_height(&t) {
@@ -419,6 +456,7 @@ impl App {
             }
             Touch::Move(x, y) => match std::mem::replace(&mut self.drag, Drag::Idle) {
                 Drag::Press { x: x0, y: y0, action, edge: at_edge } => {
+                    self.tracker.add(now, y);
                     let (dx, dy) = (x - x0, y - y0);
                     self.drag = match at_edge {
                         Some(from_left) if dx.abs() > slop && dx.abs() > dy.abs() => Drag::Edge { start: x0, from_left, armed: false },
@@ -430,6 +468,7 @@ impl App {
                     };
                 }
                 Drag::Scroll { last } => {
+                    self.tracker.add(now, y);
                     self.scroll_by(last - y);
                     self.drag = Drag::Scroll { last: y };
                 }
@@ -455,6 +494,14 @@ impl App {
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {
                 Drag::Press { action: Some(a), .. } => fx.extend(self.act(a, now)),
+                Drag::Scroll { .. } => {
+                    // A finger lifted while still moving sends the page gliding on.
+                    let speed = -self.tracker.velocity(now);
+                    if speed.abs() >= m.dp(MIN_FLING_DP) {
+                        let speed = speed.clamp(-m.dp(MAX_FLING_DP), m.dp(MAX_FLING_DP));
+                        self.fling = Some(Fling::new(now, scroll, speed, self.px_per_dp * 160.0));
+                    }
+                }
                 Drag::Edge { armed: true, .. } => self.back(),
                 Drag::Confirm { which, track, .. } => {
                     let done = self.state.confirm > 0.9;
@@ -480,6 +527,8 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key, now: u64) -> Vec<Effect> {
+        // Any button stops a gliding page.
+        self.fling = None;
         if key == Key::Power {
             self.display_on = !self.display_on;
             self.dirty = self.display_on;
@@ -656,6 +705,90 @@ mod tests {
         app.touch(Touch::Up, &f, 0);
         assert!(app.state.vibrate, "the switch was not flipped");
         assert_eq!(app.top().1, 600.0);
+    }
+
+    /// Flick the page up from `start`: the finger travels `step` px every
+    /// 8 ms five times and lifts 8 ms after its last move. Returns when it
+    /// lifted.
+    fn flick(app: &mut App, f: &Fonts, start: u64, step: f32) -> u64 {
+        app.touch(Touch::Down(700.0, 2400.0), f, start);
+        for k in 1..=5u64 {
+            app.touch(Touch::Move(700.0, 2400.0 - step * k as f32), f, start + 8 * k);
+        }
+        let lift = start + 48;
+        app.touch(Touch::Up, f, lift);
+        lift
+    }
+
+    #[test]
+    fn a_flick_glides_on_and_comes_to_rest() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        let lift = flick(&mut app, &f, 1000, 20.0);
+        let lifted = app.top().1;
+        assert_eq!(lifted, 100.0);
+        assert_eq!(app.deadline(), Some(0), "the page moves on after the lift");
+        app.tick(lift + 50);
+        assert!(app.top().1 > lifted);
+        app.tick(lift + 5000);
+        assert_eq!(app.deadline(), None, "the glide comes to rest");
+        let rest = app.top().1;
+        assert!(rest > lifted + 300.0 && rest < app.max_scroll(), "{rest}");
+    }
+
+    #[test]
+    fn a_glide_stops_at_the_end_of_the_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        let lift = flick(&mut app, &f, 1000, 80.0);
+        app.tick(lift + 100);
+        assert_eq!(app.top().1, app.max_scroll());
+        assert_eq!(app.deadline(), None);
+    }
+
+    #[test]
+    fn a_finger_that_stops_before_lifting_leaves_the_page_still() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        app.touch(Touch::Down(700.0, 2400.0), &f, 1000);
+        app.touch(Touch::Move(700.0, 2200.0), &f, 1008);
+        app.touch(Touch::Move(700.0, 2000.0), &f, 1016);
+        app.touch(Touch::Up, &f, 1100);
+        assert_eq!(app.deadline(), None);
+        assert_eq!(app.top().1, 400.0);
+    }
+
+    #[test]
+    fn touching_a_gliding_page_stops_it_without_pressing() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        let lift = flick(&mut app, &f, 1000, 20.0);
+        app.tick(lift + 30);
+        assert_eq!(app.deadline(), Some(0), "the page is gliding");
+        let held = app.top().1;
+        let (x, y) = spot(&mut app, &f, &i, Action::Toggle(Switch::Vibrate));
+        assert!(y > 0.0 && y < H as f32, "the switch is on screen");
+        app.touch(Touch::Down(x, y), &f, lift + 40);
+        app.tick(lift + 500);
+        assert_eq!(app.top().1, held, "the page stopped under the finger");
+        app.touch(Touch::Up, &f, lift + 520);
+        assert!(app.state.vibrate, "the switch was not flipped");
+        assert_eq!(app.deadline(), None);
+    }
+
+    #[test]
+    fn a_button_stops_a_gliding_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        let lift = flick(&mut app, &f, 1000, 20.0);
+        assert_eq!(app.deadline(), Some(0), "the page is gliding");
+        app.key(Key::Back, lift + 20);
+        assert_eq!(app.deadline(), None);
     }
 
     #[test]

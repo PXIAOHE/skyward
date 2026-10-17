@@ -1,4 +1,4 @@
-use crate::input::{Event, Inputs};
+use crate::input::{monotonic_ms, Event, Inputs};
 use anyhow::{anyhow, Context, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::DataState;
@@ -117,12 +117,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
     }
     let data = data_state()?;
 
-    let started = Instant::now();
     let mut screen = Canvas::new(w, h);
     let mut shown_clock = String::new();
     let mut read_at = Instant::now();
     loop {
-        let now = started.elapsed().as_millis() as u64;
+        let now = monotonic_ms();
         app.tick(now);
         let time = clock();
         if time != shown_clock {
@@ -143,13 +142,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
                 fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
             }
         }
-        let until_toast = app.deadline().map(|d| d.saturating_sub(now) as i32);
-        let timeout = until_toast.map_or(1000, |t| t.clamp(1, 1000));
+        let until_due = app.deadline().map(|d| d.saturating_sub(now) as i32);
+        let timeout = until_due.map_or(1000, |t| t.clamp(1, 1000));
         wait(&inputs.fds(), timeout)?;
-        let now = started.elapsed().as_millis() as u64;
+        let now = monotonic_ms();
         for ev in inputs.read()? {
             let effects = match ev {
-                Event::Touch(t) => app.touch(t, &fonts, now),
+                Event::Touch(t, at) => app.touch(t, &fonts, at),
                 Event::Key(k) => app.key(k, now),
             };
             for fx in effects {
