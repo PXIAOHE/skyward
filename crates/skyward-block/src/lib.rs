@@ -3,6 +3,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+pub mod dm;
+pub mod mount;
+
 pub const BY_NAME: &str = "/dev/block/by-name";
 
 /// A bootloader parameter such as `androidboot.slot_suffix`, from bootconfig
@@ -93,6 +96,22 @@ pub fn size_bytes(path: impl AsRef<Path>) -> Result<u64> {
 #[cfg(not(target_os = "android"))]
 pub fn size_bytes(_path: impl AsRef<Path>) -> Result<u64> {
     anyhow::bail!("size_bytes is only implemented on android")
+}
+
+/// A block device's (major, minor).
+#[cfg(target_os = "android")]
+pub fn devnum(path: impl AsRef<Path>) -> Result<(u32, u32)> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let p = path.as_ref();
+    let meta = fs::metadata(p).with_context(|| format!("stat {}", p.display()))?;
+    anyhow::ensure!(meta.file_type().is_block_device(), "{} is not a block device", p.display());
+    let rdev = meta.rdev() as libc::dev_t;
+    Ok((libc::major(rdev) as u32, libc::minor(rdev) as u32))
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn devnum(path: impl AsRef<Path>) -> Result<(u32, u32)> {
+    anyhow::bail!("this host has no block device {}", path.as_ref().display())
 }
 
 #[cfg(test)]
