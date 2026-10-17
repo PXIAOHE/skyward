@@ -63,6 +63,20 @@ mod sys {
         Ok(())
     }
 
+    /// Take the mount at `target` out of the tree at once; whatever still
+    /// has files open on it keeps them until it closes them.
+    pub fn umount_detach(target: &Path) -> Result<()> {
+        if unsafe { libc::umount2(cstr(target)?.as_ptr(), libc::MNT_DETACH) } != 0 {
+            return Err(os_error()).with_context(|| format!("detach {}", target.display()));
+        }
+        Ok(())
+    }
+
+    /// Make the read-only mount at `target` writable.
+    pub fn remount_rw(target: &Path) -> Result<()> {
+        remount(target, libc::MS_REMOUNT, "writable")
+    }
+
     fn mounts() -> Result<Vec<MountInfo>> {
         Ok(Process::myself()?.mountinfo()?.0)
     }
@@ -170,8 +184,18 @@ mod sys {
 
     /// Unmount `target` and keep the mounts below it on their paths.
     pub fn umount_over(target: &Path) -> Result<()> {
+        under_parked(target, umount)
+    }
+
+    /// [`umount_detach`] `target` and keep the mounts below it on their
+    /// paths.
+    pub fn umount_detach_over(target: &Path) -> Result<()> {
+        under_parked(target, umount_detach)
+    }
+
+    fn under_parked(target: &Path, unmount: fn(&Path) -> Result<()>) -> Result<()> {
         let parked = park(target)?;
-        if let Err(e) = umount(target) {
+        if let Err(e) = unmount(target) {
             unpark(parked).with_context(|| format!("after {e:#}"))?;
             return Err(e);
         }
@@ -201,6 +225,18 @@ mod sys {
         bail!("this host does not unmount {}", target.display())
     }
 
+    pub fn umount_detach(target: &Path) -> Result<()> {
+        bail!("this host does not unmount {}", target.display())
+    }
+
+    pub fn umount_detach_over(target: &Path) -> Result<()> {
+        bail!("this host does not unmount {}", target.display())
+    }
+
+    pub fn remount_rw(target: &Path) -> Result<()> {
+        bail!("this host does not remount {}", target.display())
+    }
+
     pub fn is_mount_point(path: &Path) -> Result<bool> {
         bail!("this host has no mount table to look up {}", path.display())
     }
@@ -210,4 +246,6 @@ mod sys {
     }
 }
 
-pub use sys::{is_mount_point, mount_ro, mount_ro_over, umount, umount_over, visible};
+pub use sys::{
+    is_mount_point, mount_ro, mount_ro_over, remount_rw, umount, umount_detach, umount_detach_over, umount_over, visible,
+};
