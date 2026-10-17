@@ -11,19 +11,8 @@ impl Rgba {
         Self { r, g, b, a: 255 }
     }
 
-    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self { r, g, b, a }
-    }
-
     pub const fn with_alpha(self, a: u8) -> Self {
         Self { a, ..self }
-    }
-
-    /// Linear interpolation towards `other` by `t` in `0.0..=1.0`.
-    pub fn mix(self, other: Rgba, t: f32) -> Rgba {
-        let t = t.clamp(0.0, 1.0);
-        let l = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-        Rgba::rgba(l(self.r, other.r), l(self.g, other.g), l(self.b, other.b), l(self.a, other.a))
     }
 }
 

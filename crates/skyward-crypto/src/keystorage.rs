@@ -35,7 +35,7 @@ impl StoredKey {
         let secdiscardable = rd("secdiscardable")?;
         let stretching = match fs::read_to_string(dir.join("stretching")) {
             Ok(s) if s.trim_start().starts_with("scrypt") => {
-                let p: Vec<_> = s.trim().split_whitespace().collect();
+                let p: Vec<_> = s.split_whitespace().collect();
                 Stretching::Scrypt {
                     log_n: p.get(1).and_then(|v| v.parse().ok()).unwrap_or(15),
                     r: p.get(2).and_then(|v| v.parse().ok()).unwrap_or(8),

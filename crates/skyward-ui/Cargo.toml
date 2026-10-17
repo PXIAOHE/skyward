@@ -6,4 +6,4 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-fontdue = "0.9.3"
+ab_glyph = "0.2.32"

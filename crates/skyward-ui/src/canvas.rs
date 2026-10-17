@@ -1,5 +1,6 @@
 use crate::color::{blend_over, Rgba};
-use fontdue::Font;
+use crate::font::Face;
+use ab_glyph::{point, Font, GlyphId, PxScale, ScaleFont};
 
 /// A straight-alpha RGBA8 raster target. All primitives are antialiased via
 /// signed-distance coverage so the same code produces crisp output on the
@@ -10,6 +11,8 @@ pub struct Canvas {
     pub data: Vec<u8>,
 }
 
+// Drawing primitives take geometry plus style as plain arguments.
+#[allow(clippy::too_many_arguments)]
 impl Canvas {
     pub fn new(w: u32, h: u32) -> Self {
         Self { w, h, data: vec![0; (w * h * 4) as usize] }
@@ -32,39 +35,8 @@ impl Canvas {
     }
 
     pub fn clear(&mut self, color: Rgba) {
-        for px in self.data.chunks_exact_mut(4) {
-            px[0] = color.r;
-            px[1] = color.g;
-            px[2] = color.b;
-            px[3] = color.a;
-        }
-    }
-
-    pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba) {
-        let x0 = x.floor() as i32;
-        let y0 = y.floor() as i32;
-        let x1 = (x + w).ceil() as i32;
-        let y1 = (y + h).ceil() as i32;
-        for py in y0..y1 {
-            for px in x0..x1 {
-                self.blend(px, py, color, 1.0);
-            }
-        }
-    }
-
-    /// Vertical linear gradient from `top` to `bottom`.
-    pub fn vgradient(&mut self, x: f32, y: f32, w: f32, h: f32, top: Rgba, bottom: Rgba) {
-        let x0 = x.floor() as i32;
-        let y0 = y.floor() as i32;
-        let x1 = (x + w).ceil() as i32;
-        let y1 = (y + h).ceil() as i32;
-        let span = (h).max(1.0);
-        for py in y0..y1 {
-            let t = ((py as f32 - y) / span).clamp(0.0, 1.0);
-            let c = top.mix(bottom, t);
-            for px in x0..x1 {
-                self.blend(px, py, c, 1.0);
-            }
+        for px in self.data.as_chunks_mut::<4>().0 {
+            *px = [color.r, color.g, color.b, color.a];
         }
     }
 
@@ -107,35 +79,6 @@ impl Canvas {
         }
     }
 
-    /// Soft drop shadow for a rounded rect: a blurred alpha mask of the shape,
-    /// offset and tinted. `blur` is the box-blur radius in pixels.
-    pub fn round_rect_shadow(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, blur: f32, dy: f32, color: Rgba) {
-        let pad = (blur * 2.0 + 2.0).ceil() as i32;
-        let mw = (w.ceil() as i32 + pad * 2).max(1) as usize;
-        let mh = (h.ceil() as i32 + pad * 2).max(1) as usize;
-        let mut mask = vec![0f32; mw * mh];
-        let (cx, cy) = (pad as f32 + w / 2.0, pad as f32 + h / 2.0);
-        let (hx, hy) = (w / 2.0, h / 2.0);
-        let rr = r.min(hx).min(hy);
-        for my in 0..mh {
-            for mx in 0..mw {
-                let d = rr_sdf(mx as f32 + 0.5, my as f32 + 0.5, cx, cy, hx, hy, rr);
-                mask[my * mw + mx] = (0.5 - d).clamp(0.0, 1.0);
-            }
-        }
-        box_blur(&mut mask, mw, mh, blur.round().max(1.0) as usize);
-        let ox = x.floor() as i32 - pad;
-        let oy = y.floor() as i32 - pad + dy.round() as i32;
-        for my in 0..mh {
-            for mx in 0..mw {
-                let a = mask[my * mw + mx];
-                if a > 0.003 {
-                    self.blend(ox + mx as i32, oy + my as i32, color, a);
-                }
-            }
-        }
-    }
-
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, color: Rgba) {
         let x0 = (cx - r - 1.0).floor() as i32;
         let y0 = (cy - r - 1.0).floor() as i32;
@@ -172,6 +115,60 @@ impl Canvas {
         }
     }
 
+    /// Round-capped arc stroke. Angles are in radians in screen space (0 points
+    /// right, positive turns clockwise because y grows downward); the arc runs
+    /// from `start` through `sweep` radians.
+    pub fn stroke_arc(&mut self, cx: f32, cy: f32, r: f32, start: f32, sweep: f32, t: f32, color: Rgba) {
+        let tau = std::f32::consts::TAU;
+        let (sx, sy) = (cx + r * start.cos(), cy + r * start.sin());
+        let end = start + sweep;
+        let (ex, ey) = (cx + r * end.cos(), cy + r * end.sin());
+        let x0 = (cx - r - t).floor() as i32;
+        let y0 = (cy - r - t).floor() as i32;
+        let x1 = (cx + r + t).ceil() as i32;
+        let y1 = (cy + r + t).ceil() as i32;
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
+                let (dx, dy) = (x - cx, y - cy);
+                let rel = (dy.atan2(dx) - start).rem_euclid(tau);
+                let d = if rel <= sweep {
+                    ((dx * dx + dy * dy).sqrt() - r).abs()
+                } else {
+                    let a = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
+                    let b = ((x - ex).powi(2) + (y - ey).powi(2)).sqrt();
+                    a.min(b)
+                };
+                let cov = (0.5 - (d - t / 2.0)).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.blend(px, py, color, cov);
+                }
+            }
+        }
+    }
+
+    /// Ellipse outline using a first-order distance estimate, which is accurate
+    /// for the thin strokes icons use.
+    pub fn stroke_ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, t: f32, color: Rgba) {
+        let x0 = (cx - rx - t).floor() as i32;
+        let y0 = (cy - ry - t).floor() as i32;
+        let x1 = (cx + rx + t).ceil() as i32;
+        let y1 = (cy + ry + t).ceil() as i32;
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let (x, y) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
+                let f = (x / rx).powi(2) + (y / ry).powi(2) - 1.0;
+                let gx = 2.0 * x / (rx * rx);
+                let gy = 2.0 * y / (ry * ry);
+                let d = f.abs() / (gx * gx + gy * gy).sqrt().max(1e-6);
+                let cov = (0.5 - (d - t / 2.0)).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.blend(px, py, color, cov);
+                }
+            }
+        }
+    }
+
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Rgba) {
         let minx = (x0.min(x1) - t).floor() as i32;
         let miny = (y0.min(y1) - t).floor() as i32;
@@ -196,15 +193,64 @@ impl Canvas {
         }
     }
 
-    pub fn text_width(&self, font: &Font, text: &str, px: f32) -> f32 {
-        text.chars().map(|c| font.metrics(c, px).advance_width).sum()
+    /// Antialiased fill of a convex polygon (points in either winding).
+    pub fn fill_convex(&mut self, pts: &[(f32, f32)], color: Rgba) {
+        if pts.len() < 3 {
+            return;
+        }
+        let n = pts.len() as f32;
+        let (cx, cy) = pts.iter().fold((0.0, 0.0), |(sx, sy), &(x, y)| (sx + x / n, sy + y / n));
+        // Per edge: unit normal pointing out of the polygon and its offset.
+        let edges: Vec<(f32, f32, f32)> = (0..pts.len())
+            .map(|i| {
+                let (ax, ay) = pts[i];
+                let (bx, by) = pts[(i + 1) % pts.len()];
+                let (ex, ey) = (bx - ax, by - ay);
+                let len = (ex * ex + ey * ey).sqrt().max(1e-6);
+                let (mut nx, mut ny) = (ey / len, -ex / len);
+                if nx * (cx - ax) + ny * (cy - ay) > 0.0 {
+                    nx = -nx;
+                    ny = -ny;
+                }
+                (nx, ny, nx * ax + ny * ay)
+            })
+            .collect();
+        let minx = pts.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i32 - 1;
+        let maxx = pts.iter().map(|p| p.0).fold(f32::MIN, f32::max).ceil() as i32 + 1;
+        let miny = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i32 - 1;
+        let maxy = pts.iter().map(|p| p.1).fold(f32::MIN, f32::max).ceil() as i32 + 1;
+        for py in miny..maxy {
+            for px in minx..maxx {
+                let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
+                let d = edges.iter().map(|&(nx, ny, c)| nx * x + ny * y - c).fold(f32::MIN, f32::max);
+                let cov = (0.5 - d).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.blend(px, py, color, cov);
+                }
+            }
+        }
     }
 
-    /// Draw a run of text with its baseline at `(x, baseline)`. Returns the
-    /// advance width. Truncates with an ellipsis when `max_w` is exceeded.
+    pub fn text_width(&self, face: &Face, text: &str, px: f32) -> f32 {
+        let sf = face.font.as_scaled(face.scale(px));
+        let mut w = 0.0;
+        let mut prev: Option<GlyphId> = None;
+        for ch in text.chars() {
+            let id = face.font.glyph_id(ch);
+            if let Some(p) = prev {
+                w += sf.kern(p, id);
+            }
+            w += sf.h_advance(id);
+            prev = Some(id);
+        }
+        w
+    }
+
+    /// Draw a run of text with its baseline at `(x, baseline)`. `px` is the em
+    /// size. Returns the advance width; truncates with an ellipsis past `max_w`.
     pub fn text(
         &mut self,
-        font: &Font,
+        face: &Face,
         text: &str,
         x: f32,
         baseline: f32,
@@ -212,43 +258,64 @@ impl Canvas {
         color: Rgba,
         max_w: Option<f32>,
     ) -> f32 {
-        let mut pen = x;
+        let scale = face.scale(px);
+        let sf = face.font.as_scaled(scale);
+        let ell = face.font.glyph_id('…');
+        let ell_w = sf.h_advance(ell);
         let limit = max_w.map(|m| x + m);
-        let ell_w = font.metrics('…', px).advance_width;
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
+        let chars: Vec<char> = text.chars().collect();
+        let mut pen = x;
+        let mut prev: Option<GlyphId> = None;
+        for (i, &ch) in chars.iter().enumerate() {
+            let id = face.font.glyph_id(ch);
+            if let Some(p) = prev {
+                pen += sf.kern(p, id);
+            }
+            let aw = sf.h_advance(id);
             if let Some(lim) = limit {
-                let aw = font.metrics(ch, px).advance_width;
-                let more = chars.peek().is_some();
+                let more = i + 1 < chars.len();
                 if pen + aw + if more { ell_w } else { 0.0 } > lim {
-                    self.glyph(font, '…', pen, baseline, px, color);
+                    self.glyph(face, ell, scale, pen, baseline, color);
                     pen += ell_w;
                     break;
                 }
             }
-            pen += self.glyph(font, ch, pen, baseline, px, color);
+            self.glyph(face, id, scale, pen, baseline, color);
+            pen += aw;
+            prev = Some(id);
         }
         pen - x
     }
 
-    pub fn text_center(&mut self, font: &Font, text: &str, cx: f32, baseline: f32, px: f32, color: Rgba) {
-        let w = self.text_width(font, text, px);
-        self.text(font, text, cx - w / 2.0, baseline, px, color, None);
+    /// Text whose ink is vertically centred on `cy` (by the reference ideograph).
+    pub fn text_vc(&mut self, face: &Face, text: &str, x: f32, cy: f32, px: f32, color: Rgba, max_w: Option<f32>) -> f32 {
+        let (top, bottom) = face.ink(px);
+        self.text(face, text, x, cy - (top + bottom) / 2.0, px, color, max_w)
     }
 
-    fn glyph(&mut self, font: &Font, ch: char, pen: f32, baseline: f32, px: f32, color: Rgba) -> f32 {
-        let (m, bitmap) = font.rasterize(ch, px);
-        let gx = (pen + m.xmin as f32).round() as i32;
-        let gy = (baseline - (m.ymin as f32 + m.height as f32)).round() as i32;
-        for j in 0..m.height {
-            for i in 0..m.width {
-                let cov = bitmap[j * m.width + i] as f32 / 255.0;
+    /// Text whose ink top sits at `top_y`.
+    pub fn text_top(&mut self, face: &Face, text: &str, x: f32, top_y: f32, px: f32, color: Rgba, max_w: Option<f32>) -> f32 {
+        let (top, _) = face.ink(px);
+        self.text(face, text, x, top_y - top, px, color, max_w)
+    }
+
+    /// Text centred horizontally on `cx` and vertically on `cy`.
+    pub fn text_center(&mut self, face: &Face, text: &str, cx: f32, cy: f32, px: f32, color: Rgba) {
+        let w = self.text_width(face, text, px);
+        self.text_vc(face, text, cx - w / 2.0, cy, px, color, None);
+    }
+
+    fn glyph(&mut self, face: &Face, id: GlyphId, scale: PxScale, x: f32, baseline: f32, color: Rgba) {
+        let g = id.with_scale_and_position(scale, point(x, baseline));
+        if let Some(og) = face.font.outline_glyph(g) {
+            let b = og.px_bounds();
+            let (ox, oy) = (b.min.x as i32, b.min.y as i32);
+            og.draw(|gx, gy, cov| {
                 if cov > 0.0 {
-                    self.blend(gx + i as i32, gy + j as i32, color, cov);
+                    self.blend(ox + gx as i32, oy + gy as i32, color, cov);
                 }
-            }
+            });
         }
-        m.advance_width
     }
 }
 
@@ -260,33 +327,3 @@ fn rr_sdf(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
     (ox * ox + oy * oy).sqrt() + dx.max(dy).min(0.0) - r
 }
 
-fn box_blur(buf: &mut [f32], w: usize, h: usize, radius: usize) {
-    if radius == 0 {
-        return;
-    }
-    let mut tmp = vec![0f32; w * h];
-    let norm = 1.0 / (2 * radius + 1) as f32;
-    // Horizontal pass.
-    for y in 0..h {
-        let row = y * w;
-        for x in 0..w {
-            let mut acc = 0.0;
-            for k in 0..=2 * radius {
-                let sx = (x + k).saturating_sub(radius).min(w - 1);
-                acc += buf[row + sx];
-            }
-            tmp[row + x] = acc * norm;
-        }
-    }
-    // Vertical pass.
-    for x in 0..w {
-        for y in 0..h {
-            let mut acc = 0.0;
-            for k in 0..=2 * radius {
-                let sy = (y + k).saturating_sub(radius).min(h - 1);
-                acc += tmp[sy * w + x];
-            }
-            buf[y * w + x] = acc * norm;
-        }
-    }
-}
