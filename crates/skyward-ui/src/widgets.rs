@@ -789,23 +789,35 @@ pub fn outline(c: &mut Canvas, t: &Theme, icon: Outline, cx: f32, cy: f32) {
 pub fn hero_backdrop(c: &mut Canvas, t: &Theme) {
     let hero = t.hero;
     let (w, sh) = (t.m.w as f32, t.m.h as f32);
-    c.shade_rows(0, c.h, |x, y| {
-        let fy = y / sh;
+    // Each field is a Gaussian, and exp(-(dx² + dy²)) = exp(-dx²)·exp(-dy²):
+    // one exponential per column and one per row instead of one per pixel.
+    let falloff = |d: f32| (-d * d).exp();
+    let cols = hero.blobs.map(|(bx, _, br, _)| (0..c.w).map(|x| falloff((x as f32 + 0.5 - bx * w) / (br * w))).collect::<Vec<f32>>());
+    for y in 0..c.h {
+        let py = y as f32 + 0.5;
+        let fy = py / sh;
         let base = if fy < 0.5 { mix(hero.top, hero.mid, fy / 0.5) } else { mix(hero.mid, hero.bottom, (fy - 0.5) / 0.5) };
-        let mut acc = [base.r as f32, base.g as f32, base.b as f32];
-        let mut sum = 1.0;
-        for &(bx, by, br, col) in &hero.blobs {
-            let dx = (x - bx * w) / (br * w);
-            let dy = (y - by * sh) / (br * w);
-            let k = 3.0 * (-(dx * dx + dy * dy)).exp();
-            acc[0] += k * col.r as f32;
-            acc[1] += k * col.g as f32;
-            acc[2] += k * col.b as f32;
-            sum += k;
+        let rows = hero.blobs.map(|(_, by, br, _)| 3.0 * falloff((py - by * sh) / (br * w)));
+        // Every field this faint shifts no channel by a step: the row is the
+        // plain blend.
+        if rows.iter().all(|&k| k < 1e-6) {
+            c.paint_row(y, |_| base);
+            continue;
         }
-        let ch = |v: f32| (v / sum).round() as u8;
-        Rgba::rgb(ch(acc[0]), ch(acc[1]), ch(acc[2]))
-    });
+        c.paint_row(y, |x| {
+            let mut acc = [base.r as f32, base.g as f32, base.b as f32];
+            let mut sum = 1.0;
+            for (i, &(_, _, _, col)) in hero.blobs.iter().enumerate() {
+                let k = rows[i] * cols[i][x];
+                acc[0] += k * col.r as f32;
+                acc[1] += k * col.g as f32;
+                acc[2] += k * col.b as f32;
+                sum += k;
+            }
+            let ch = |v: f32| (v / sum).round() as u8;
+            Rgba::rgb(ch(acc[0]), ch(acc[1]), ch(acc[2]))
+        });
+    }
 }
 
 /// Centred gradient lettering with its cap line at `cap_top`.

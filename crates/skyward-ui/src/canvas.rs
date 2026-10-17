@@ -66,6 +66,16 @@ impl Canvas {
         }
     }
 
+    /// Overwrite row `y` with `paint(x)` for every column `x`.
+    pub fn paint_row(&mut self, y: u32, paint: impl Fn(usize) -> Rgba) {
+        let start = (y * self.w * 4) as usize;
+        let row = &mut self.data[start..start + (self.w * 4) as usize];
+        for (x, p) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let c = paint(x);
+            *p = [c.r, c.g, c.b, c.a];
+        }
+    }
+
     /// Drop everything below row `h`, for pages measured after drawing.
     pub fn crop_height(mut self, h: u32) -> Canvas {
         let h = h.min(self.h);
