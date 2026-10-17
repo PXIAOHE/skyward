@@ -9,6 +9,65 @@ pub trait Surface {
     fn present(&mut self, canvas: &Canvas) -> Result<()>;
 }
 
+/// How Qualcomm's display driver drives a mode, from the text of the
+/// connector's mode_properties blob: key=value lines, a block per mode_name.
+#[cfg(any(target_os = "android", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct SdeMode {
+    /// Layer mixers in the mode's topology, each blending one vertical
+    /// strip of the screen.
+    mixers: u32,
+    dsc: bool,
+}
+
+#[cfg(any(target_os = "android", test))]
+impl SdeMode {
+    fn find(text: &str, name: &str) -> Result<SdeMode> {
+        let mut current = false;
+        let (mut topology, mut dsc) = (None, false);
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            if key == "mode_name" {
+                if current {
+                    break;
+                }
+                current = value == name;
+            } else if current {
+                match key {
+                    "topology" => topology = Some(value),
+                    "dsc_mode" => dsc = value == "1",
+                    _ => {}
+                }
+            }
+        }
+        let topology = topology.ok_or_else(|| anyhow::anyhow!("mode_properties describes no topology for {name}"))?;
+        let mixers = if topology.contains("quadpipe") {
+            4
+        } else if topology.contains("dualpipe") {
+            2
+        } else {
+            1
+        };
+        Ok(SdeMode { mixers, dsc })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ISHTAR: &str = "mode_name=1440x3200x60cmd\nbit_clk_rate=1360000000\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
+                          mode_name=1440x3200x120cmd\nsubmode_idx=1\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
+                          mode_name=1080x2400x60cmd\ndsc_mode=0\ntopology=sde_singlepipe\n";
+
+    #[test]
+    fn reads_the_topology_of_the_named_mode() {
+        assert_eq!(SdeMode::find(ISHTAR, "1440x3200x120cmd").unwrap(), SdeMode { mixers: 2, dsc: true });
+        assert_eq!(SdeMode::find(ISHTAR, "1080x2400x60cmd").unwrap(), SdeMode { mixers: 1, dsc: false });
+        assert!(SdeMode::find(ISHTAR, "1440x3200x90cmd").is_err());
+    }
+}
+
 #[cfg(target_os = "android")]
 pub mod kms {
     use super::*;
@@ -117,6 +176,16 @@ pub mod kms {
         Ok(card)
     }
 
+    /// The value of the choice named `choice` of an enum property.
+    fn enum_value(card: &Card, id: property::Handle, choice: &str) -> Result<u64> {
+        let info = card.get_property(id).context("read property")?;
+        match info.value_type() {
+            property::ValueType::Enum(e) => e.values().1.iter().find(|v| v.name().to_str() == Ok(choice)).map(|v| v.value()),
+            _ => None,
+        }
+        .ok_or_else(|| anyhow!("{} offers no {choice}", info.name().to_string_lossy()))
+    }
+
     /// Built-in panel interfaces. Writeback and external outputs are never
     /// the recovery's screen.
     fn is_panel(interface: connector::Interface) -> bool {
@@ -163,8 +232,13 @@ pub mod kms {
             let c = card.get_connector(h, true).context("read connector")?;
             let encoder = c.current_encoder().map(u32::from);
             writeln!(out, "connector {} {:?} {:?} encoder {encoder:?} {} modes", u32::from(h), c.interface(), c.state(), c.modes().len())?;
-            writeln!(out, "  {}", Props::read(&card, h)?.line())?;
+            let props = Props::read(&card, h)?;
+            writeln!(out, "  {}", props.line())?;
             if is_panel(c.interface()) {
+                if let Ok((_, blob)) = props.get("mode_properties") {
+                    let text = card.get_property_blob(blob).context("read mode_properties")?;
+                    writeln!(out, "  mode_properties: {}", String::from_utf8_lossy(&text).replace('\n', " | "))?;
+                }
                 for m in c.modes() {
                     let (w, hgt) = m.size();
                     writeln!(out, "  mode {:?} {w}x{hgt} {} Hz clock {} type {:?} flags {:?}", m.name(), m.vrefresh(), m.clock(), m.mode_type(), m.flags())?;
@@ -252,8 +326,9 @@ pub mod kms {
         card: Card,
         bufs: [Buf; 2],
         back: usize,
-        plane: plane::Handle,
-        fb_prop: property::Handle,
+        /// The planes showing the buffer, one per layer mixer, with their
+        /// FB_ID properties.
+        planes: Vec<(plane::Handle, property::Handle)>,
         w: u32,
         h: u32,
         order: Order,
@@ -274,11 +349,21 @@ pub mod kms {
                 }
             }
             let conn = panel.ok_or_else(|| anyhow!("no connected built-in panel"))?;
-            let mode = *conn
+            let preferred = conn
                 .modes()
                 .iter()
                 .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
                 .ok_or_else(|| anyhow!("the panel reports no preferred mode"))?;
+            // The fastest refresh at the preferred size, the first listed among
+            // equals: Android scrolls at it, and the 13 Ultra's touch reports
+            // come at the same 120 Hz.
+            let mode = *conn
+                .modes()
+                .iter()
+                .filter(|m| m.size() == preferred.size())
+                .rev()
+                .max_by_key(|m| m.vrefresh())
+                .expect("the preferred mode itself has the preferred size");
             let (w, h) = (mode.size().0 as u32, mode.size().1 as u32);
 
             // The CRTC already driving the panel, or the first one an
@@ -302,10 +387,31 @@ pub mod kms {
                 }
             };
 
-            // The primary plane already on the CRTC, else the first primary
-            // plane that can drive it. Planes left on the CRTC by the boot
-            // splash are switched off.
-            let mut chosen: Option<(plane::Handle, Vec<u32>, Props, bool)> = None;
+            // Qualcomm's display driver blends a mode on one or more layer
+            // mixers, each owning a vertical strip of the screen; the 13
+            // Ultra's dual-pipe topology has two. The pipeline is set up the
+            // way Android's compositor sets it up: one plane per mixer
+            // covering its strip, the mode's DSC variant selected, and frame
+            // starts posted to the hardware. With one plane across both
+            // mixers, no DSC selection and the default trigger, the 13
+            // Ultra's panel tore while scrolling.
+            let conn_props = Props::read(&card, conn.handle())?;
+            let layout = match conn_props.get("mode_properties") {
+                Ok((_, blob)) => {
+                    let text = card.get_property_blob(blob).context("read mode_properties")?;
+                    SdeMode::find(&String::from_utf8_lossy(&text), &mode.name().to_string_lossy())?
+                }
+                Err(_) => SdeMode { mixers: 1, dsc: false },
+            };
+            let strips = layout.mixers as usize;
+            if w % layout.mixers != 0 {
+                return Err(anyhow!("{w} pixels do not split into {strips} strips"));
+            }
+
+            // Primary planes that can drive the CRTC, those already on it
+            // first so the boot splash's planes are reused; planes on the
+            // CRTC that are not used are switched off.
+            let mut candidates: Vec<(plane::Handle, Vec<u32>, Props, bool)> = Vec::new();
             let mut attached = Vec::new();
             for p in card.plane_handles().context("list planes")? {
                 let info = card.get_plane(p).context("read plane")?;
@@ -314,14 +420,15 @@ pub mod kms {
                 if on_crtc {
                     attached.push(p);
                 }
-                if props.value("type")? != PlaneType::Primary as u64 || !res.filter_crtcs(info.possible_crtcs()).contains(&crtc) {
-                    continue;
-                }
-                if chosen.as_ref().is_none_or(|c| on_crtc && !c.3) {
-                    chosen = Some((p, info.formats().to_vec(), props, on_crtc));
+                if props.value("type")? == PlaneType::Primary as u64 && res.filter_crtcs(info.possible_crtcs()).contains(&crtc) {
+                    candidates.push((p, info.formats().to_vec(), props, on_crtc));
                 }
             }
-            let (plane, formats, plane_props, _) = chosen.ok_or_else(|| anyhow!("no primary plane can drive the CRTC"))?;
+            candidates.sort_by_key(|c| !c.3);
+            if candidates.len() < strips {
+                return Err(anyhow!("{strips} primary planes needed, {} can drive the CRTC", candidates.len()));
+            }
+            candidates.truncate(strips);
 
             let pick = [
                 (DrmFourcc::Xbgr8888, Order::Rgba),
@@ -331,8 +438,8 @@ pub mod kms {
             ];
             let (fourcc, order) = pick
                 .into_iter()
-                .find(|(f, _)| formats.contains(&(*f as u32)))
-                .ok_or_else(|| anyhow!("the primary plane takes none of the 32-bit RGB formats"))?;
+                .find(|(f, _)| candidates.iter().all(|c| c.1.contains(&(*f as u32))))
+                .ok_or_else(|| anyhow!("the primary planes share none of the 32-bit RGB formats"))?;
 
             let make = || -> Result<Buf> {
                 let db = card.create_dumb_buffer((w, h), fourcc, 32).context("create dumb buffer")?;
@@ -349,41 +456,58 @@ pub mod kms {
                     req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
                 }
             }
-            let conn_props = Props::read(&card, conn.handle())?;
             let crtc_props = Props::read(&card, crtc)?;
             let blob = card.create_property_blob(&mode).context("create mode blob")?;
             req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
+            // The mode is DSC-compressed: select its DSC variant, as Android's
+            // compositor does.
+            if layout.dsc {
+                let (id, _) = conn_props.get("dsc_mode")?;
+                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "dsc_enabled")?));
+            }
+            // Frame starts are posted to the hardware: the driver's own
+            // default on display hardware of this generation, and Android's
+            // compositor sets the same.
+            if let Ok((id, _)) = conn_props.get("frame_trigger_mode") {
+                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "posted_start")?));
+            }
             req.add_property(crtc, crtc_props.handle("MODE_ID")?, blob);
             req.add_property(crtc, crtc_props.handle("ACTIVE")?, property::Value::Boolean(true));
-            for &other in attached.iter().filter(|&&p| p != plane) {
+            for &other in attached.iter().filter(|&&p| !candidates.iter().any(|c| c.0 == p)) {
                 let props = Props::read(&card, other)?;
                 req.add_property(other, props.handle("FB_ID")?, property::Value::Framebuffer(None));
                 req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
             }
-            let fb_prop = plane_props.handle("FB_ID")?;
-            req.add_property(plane, fb_prop, property::Value::Framebuffer(Some(bufs[0].fb)));
-            req.add_property(plane, plane_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
-            req.add_property(plane, plane_props.handle("SRC_X")?, property::Value::UnsignedRange(0));
-            req.add_property(plane, plane_props.handle("SRC_Y")?, property::Value::UnsignedRange(0));
-            req.add_property(plane, plane_props.handle("SRC_W")?, property::Value::UnsignedRange((w as u64) << 16));
-            req.add_property(plane, plane_props.handle("SRC_H")?, property::Value::UnsignedRange((h as u64) << 16));
-            req.add_property(plane, plane_props.handle("CRTC_X")?, property::Value::SignedRange(0));
-            req.add_property(plane, plane_props.handle("CRTC_Y")?, property::Value::SignedRange(0));
-            req.add_property(plane, plane_props.handle("CRTC_W")?, property::Value::UnsignedRange(w as u64));
-            req.add_property(plane, plane_props.handle("CRTC_H")?, property::Value::UnsignedRange(h as u64));
+            let strip = w / layout.mixers;
+            let mut planes = Vec::new();
+            for (i, (plane, _, props, _)) in candidates.iter().enumerate() {
+                let x = strip * i as u32;
+                let fb_prop = props.handle("FB_ID")?;
+                req.add_property(*plane, fb_prop, property::Value::Framebuffer(Some(bufs[0].fb)));
+                req.add_property(*plane, props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
+                req.add_property(*plane, props.handle("SRC_X")?, property::Value::UnsignedRange((x as u64) << 16));
+                req.add_property(*plane, props.handle("SRC_Y")?, property::Value::UnsignedRange(0));
+                req.add_property(*plane, props.handle("SRC_W")?, property::Value::UnsignedRange((strip as u64) << 16));
+                req.add_property(*plane, props.handle("SRC_H")?, property::Value::UnsignedRange((h as u64) << 16));
+                req.add_property(*plane, props.handle("CRTC_X")?, property::Value::SignedRange(x as i64));
+                req.add_property(*plane, props.handle("CRTC_Y")?, property::Value::SignedRange(0));
+                req.add_property(*plane, props.handle("CRTC_W")?, property::Value::UnsignedRange(strip as u64));
+                req.add_property(*plane, props.handle("CRTC_H")?, property::Value::UnsignedRange(h as u64));
+                planes.push((*plane, fb_prop));
+            }
             commit(&card, req, AtomicCommitFlags::ALLOW_MODESET).context("set the panel mode")?;
 
+            let ids: Vec<u32> = planes.iter().map(|p| u32::from(p.0)).collect();
             let summary = format!(
-                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, plane {} {:?}",
+                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}",
                 conn.interface(),
                 u32::from(conn.handle()),
                 mode.name(),
                 mode.vrefresh(),
                 u32::from(crtc),
-                u32::from(plane),
                 fourcc
             );
-            Ok(KmsSurface { card, bufs, back: 1, plane, fb_prop, w, h, order, summary })
+            Ok(KmsSurface { card, bufs, back: 1, planes, w, h, order, summary })
         }
 
         pub fn describe(&self) -> &str {
@@ -421,7 +545,9 @@ pub mod kms {
                 }
             }
             let mut req = atomic::AtomicModeReq::new();
-            req.add_property(self.plane, self.fb_prop, property::Value::Framebuffer(Some(buf.fb)));
+            for &(plane, fb_prop) in &self.planes {
+                req.add_property(plane, fb_prop, property::Value::Framebuffer(Some(buf.fb)));
+            }
             commit(&self.card, req, AtomicCommitFlags::empty()).context("flip")?;
             self.back = 1 - self.back;
             Ok(())
