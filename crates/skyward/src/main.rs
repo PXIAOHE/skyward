@@ -128,8 +128,9 @@ fn main() -> Result<()> {
         }
         #[cfg(target_os = "android")]
         Cmd::Ui { config, font, unlock, dump } => {
+            let cfg = DeviceConfig::load(&config)?;
             let start = if unlock { skyward_ui::app::Screen::Decrypt } else { skyward_ui::app::Screen::Home };
-            ui::run(&config, &font, start, dump.as_deref())
+            ui::run(&cfg, &font, start, dump.as_deref())
         }
     }
 }
@@ -191,7 +192,7 @@ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
 /// The recovery service. adb comes up first so a failure later on can be
 /// inspected, then the boot request in misc is taken so that any reboot from
 /// here boots the system; failures go to the kernel log and still end the
-/// process.
+/// process, which init then starts again.
 fn recovery() -> Result<()> {
     let run = || -> Result<()> {
         skyward_sys::set_prop("sys.usb.config", "adb")?;
@@ -223,9 +224,13 @@ fn recovery() -> Result<()> {
             }
             Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
         }
-        // init restarts a service that exits, so the service stays resident.
-        loop {
-            std::thread::park();
+        #[cfg(target_os = "android")]
+        {
+            ui::run(&cfg, &Path::new("/").join(ramdisk::FONT), skyward_ui::app::Screen::Home, None)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            anyhow::bail!("the recovery service runs only on Android")
         }
     };
     run().inspect_err(|e| {

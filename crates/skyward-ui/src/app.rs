@@ -708,6 +708,18 @@ mod tests {
     }
 
     #[test]
+    fn fastboot_cannot_be_chosen_until_it_is_wired_up() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Reboot, W, H, PPD);
+        let hits = &app.frame(&f, &i, DataState::Unmounted).hits;
+        let fastboot = TARGETS.iter().position(|t| *t == Target::Fastboot).unwrap();
+        assert!(!hits.iter().any(|h| h.action == Action::RebootTarget(fastboot)));
+        tap(&mut app, &f, &i, Action::Unavailable("用户空间 fastboot 还没接入"));
+        assert_eq!(app.state.reboot, 0, "the target stays on system");
+        assert_eq!(app.deadline(), Some(TOAST_MS));
+    }
+
+    #[test]
     fn power_key_turns_the_panel_off_and_on() {
         let mut app = App::new(Screen::Home, W, H, PPD);
         assert_eq!(app.key(Key::Power, 0), vec![Effect::Display(false)]);

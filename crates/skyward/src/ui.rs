@@ -2,10 +2,10 @@ use crate::input::{Event, Inputs};
 use anyhow::{anyhow, Context, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::DataState;
+use skyward_sys::Power;
 use skyward_ui::app::{App, Effect, Screen, Target};
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
-use std::ffi::CString;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -55,21 +55,16 @@ impl Backlight {
     }
 }
 
-/// Ask init to reboot or power off, the way `adb reboot` does.
+/// Leave recovery for the chosen target.
 fn power(target: Target) -> Result<()> {
-    let cmd = match target {
-        Target::System => "reboot",
-        Target::Recovery => "reboot,recovery",
-        Target::Fastboot => "reboot,fastboot",
-        Target::Bootloader => "reboot,bootloader",
-        Target::Edl => "reboot,edl",
-        Target::PowerOff => "shutdown",
-    };
-    let (k, v) = (CString::new("sys.powerctl")?, CString::new(cmd)?);
-    if unsafe { libc::__system_property_set(k.as_ptr(), v.as_ptr()) } != 0 {
-        return Err(anyhow!("setting sys.powerctl to {cmd} failed"));
-    }
-    Ok(())
+    skyward_sys::power(match target {
+        Target::System => Power::System,
+        Target::Recovery => Power::Recovery,
+        Target::Bootloader => Power::Bootloader,
+        Target::Edl => Power::Edl,
+        Target::PowerOff => Power::Off,
+        Target::Fastboot => return Err(anyhow!("userspace fastboot is not wired up")),
+    })
 }
 
 /// Local wall-clock time as `HH:MM`.
@@ -101,12 +96,11 @@ fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
     Ok(())
 }
 
-pub fn run(config: &Path, font: &Path, start: Screen, dump: Option<&Path>) -> Result<()> {
-    let cfg = DeviceConfig::load(config)?;
+pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) -> Result<()> {
     if cfg.display.density == 0 {
-        return Err(anyhow!("{}: [display] density is required to lay out the UI", config.display()));
+        return Err(anyhow!("{}: [display] density is required to lay out the UI", cfg.device.codename));
     }
-    let mut info = skyward_info::collect(&cfg)?;
+    let mut info = skyward_info::collect(cfg)?;
     let fonts = Fonts::load(font, 0)?;
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
     let (w, h) = surface.size();
@@ -136,7 +130,7 @@ pub fn run(config: &Path, font: &Path, start: Screen, dump: Option<&Path>) -> Re
             app.redraw();
         }
         if read_at.elapsed().as_secs() >= 30 {
-            info = skyward_info::collect(&cfg)?;
+            info = skyward_info::collect(cfg)?;
             read_at = Instant::now();
             app.refresh();
         }

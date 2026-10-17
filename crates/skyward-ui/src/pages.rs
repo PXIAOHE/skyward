@@ -1,4 +1,4 @@
-use crate::app::{Action, Confirm, Frame, Hit, Screen, State, Switch};
+use crate::app::{Action, Confirm, Frame, Hit, Screen, State, Switch, Target, TARGETS};
 use crate::canvas::Canvas;
 use crate::color::Rgba;
 use crate::fmt;
@@ -360,7 +360,14 @@ pub fn reboot(cx: &Ctx) -> Frame {
         })
         .collect();
     let targets = widgets::list(&mut c, t, f, y, &rows);
-    let picks: Vec<Action> = (0..rows.len()).map(Action::RebootTarget).collect();
+    let picks: Vec<Action> = TARGETS
+        .iter()
+        .enumerate()
+        .map(|(k, target)| match target {
+            Target::Fastboot => Action::Unavailable("用户空间 fastboot 还没接入"),
+            _ => Action::RebootTarget(k),
+        })
+        .collect();
     out.extend(hits(&targets.rows, &picks));
     y = targets.bottom;
     if let Some(slot) = cx.info.slot {
