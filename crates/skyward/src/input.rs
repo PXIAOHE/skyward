@@ -29,6 +29,20 @@ fn gone(e: &io::Error) -> bool {
     e.raw_os_error() == Some(libc::ENODEV)
 }
 
+/// Slot 0's value of a multitouch axis. The kernel keeps multitouch values
+/// per slot, apart from the axis state the ABS queries return, and hands
+/// them out through EVIOCGMTSLOTS: the axis code, then one value per slot.
+fn slot0_value(dev: &Device, axis: AbsoluteAxisCode, slots: usize) -> io::Result<i32> {
+    let mut buf = vec![0i32; 1 + slots];
+    buf[0] = i32::from(axis.0);
+    // _IOC(_IOC_READ, 'E', 0x0a, size)
+    let request = (2u32 << 30) | (((buf.len() * 4) as u32) << 16) | (u32::from(b'E') << 8) | 0x0a;
+    if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, buf.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(buf[1])
+}
+
 /// The direct-touch panel. Only the first finger is followed (multitouch
 /// protocol B, slot 0).
 struct Panel {
@@ -47,18 +61,27 @@ impl Panel {
     fn new(path: PathBuf, dev: Device) -> Result<Self> {
         let mut x_range = None;
         let mut y_range = None;
+        let mut slots = 1;
         for (axis, info) in dev.get_absinfo().context("read touch axis ranges")? {
             match axis {
                 AbsoluteAxisCode::ABS_MT_POSITION_X => x_range = Some((info.minimum(), info.maximum())),
                 AbsoluteAxisCode::ABS_MT_POSITION_Y => y_range = Some((info.minimum(), info.maximum())),
+                AbsoluteAxisCode::ABS_MT_SLOT => slots = info.maximum() as usize + 1,
                 _ => {}
             }
         }
         let x_range = x_range.ok_or_else(|| anyhow!("touch panel reports no X range"))?;
         let y_range = y_range.ok_or_else(|| anyhow!("touch panel reports no Y range"))?;
-        eprintln!("touch {:?}: x {:?} y {:?}", dev.name().unwrap_or("?"), x_range, y_range);
+        // The kernel drops a position equal to the one a slot already holds,
+        // so a touch landing where the last one lifted carries no position;
+        // start from what slot 0 holds now.
+        let raw = (
+            slot0_value(&dev, AbsoluteAxisCode::ABS_MT_POSITION_X, slots).context("read the touch position")?,
+            slot0_value(&dev, AbsoluteAxisCode::ABS_MT_POSITION_Y, slots).context("read the touch position")?,
+        );
+        eprintln!("touch {:?}: x {:?} y {:?}, {slots} slots, slot 0 at {raw:?}", dev.name().unwrap_or("?"), x_range, y_range);
         dev.set_nonblocking(true).context("make touch non-blocking")?;
-        Ok(Panel { dev, path, x_range, y_range, slot: 0, down: false, was_down: false, raw: (0, 0), moved: false })
+        Ok(Panel { dev, path, x_range, y_range, slot: 0, down: false, was_down: false, raw, moved: false })
     }
 
     fn read(&mut self, w: f32, h: f32, out: &mut Vec<Event>) -> io::Result<()> {
