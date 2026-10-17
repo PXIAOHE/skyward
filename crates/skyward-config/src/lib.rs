@@ -65,15 +65,19 @@ pub struct Display {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Modules {
+    /// Partitions the phone keeps its kernel modules on, searched in order.
     #[serde(default = "default_module_sources")]
     pub sources: Vec<String>,
+    /// Modules the recovery loads at startup that first-stage init leaves
+    /// out, such as the touchscreen driver. Dependencies come from the
+    /// source's modules.dep and load first.
     #[serde(default)]
-    pub blocklist: Vec<String>,
+    pub load: Vec<String>,
 }
 
 impl Default for Modules {
     fn default() -> Self {
-        Self { sources: default_module_sources(), blocklist: Vec::new() }
+        Self { sources: default_module_sources(), load: Vec::new() }
     }
 }
 
@@ -119,6 +123,7 @@ mod tests {
         assert!(cfg.device.ab);
         assert_eq!(cfg.device.os_version_prop, "ro.build.display.id");
         assert_eq!(cfg.modules.sources, default_module_sources());
+        assert!(cfg.modules.load.is_empty());
     }
 
     #[test]
@@ -138,5 +143,6 @@ mod tests {
         assert_eq!(cfg.device.codename, "ishtar");
         assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 560));
         assert!(cfg.decrypt.weaver.is_empty());
+        assert_eq!(cfg.modules.load, ["fts_touch_spi"]);
     }
 }

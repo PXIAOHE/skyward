@@ -32,6 +32,13 @@ enum Cmd {
         #[arg(long, default_value = "/vendor/lib/modules")]
         source: String,
     },
+    /// Load kernel modules and their dependencies from the configured
+    /// sources; with no names, the configuration's own list.
+    Load {
+        #[arg(long, default_value = "/skyward/device.toml")]
+        config: String,
+        names: Vec<String>,
+    },
     /// Run as the recovery service (what init starts as /system/bin/recovery).
     Recovery,
     /// Reboot through init: system, recovery, bootloader, edl, or off.
@@ -83,6 +90,14 @@ fn main() -> Result<()> {
         Cmd::Info { config } => info(&config),
         Cmd::Slot => slot(),
         Cmd::Modules { source } => modules(&source),
+        Cmd::Load { config, names } => {
+            let cfg = DeviceConfig::load(&config)?;
+            let names = if names.is_empty() { cfg.modules.load.clone() } else { names };
+            for path in load_modules(&cfg, &names)? {
+                println!("{}", path.display());
+            }
+            Ok(())
+        }
         Cmd::Recovery => recovery(),
         Cmd::Reboot { target } => {
             let p = Power::parse(&target).ok_or_else(|| anyhow!("unknown target {target:?}"))?;
@@ -165,6 +180,12 @@ fn lp(super_dev: &Path, slot: Option<u32>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Load `names` from the module sources the configuration lists.
+fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
+    let dirs = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
+    skyward_modules::load(&dirs, names)
 }
 
 /// The recovery service. adb comes up first so a failure later on can be

@@ -1,7 +1,43 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Where a module source's files are in the recovery: the vendor_boot
+/// ramdisk's modules under /lib/modules, and the vendor_dlkm and vendor
+/// partitions where they are mounted.
+pub fn source_dir(source: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(match source {
+        "vendor_boot" => "/lib/modules",
+        "vendor_dlkm" => "/vendor_dlkm/lib/modules",
+        "vendor" => "/vendor/lib/modules",
+        _ => bail!("unknown module source {source:?}"),
+    }))
+}
+
+/// Load `names` (module names without `.ko`) with their dependencies. Each
+/// comes from the first of `dirs` that holds it, and its dependencies from
+/// that directory's modules.dep; a module the kernel already has counts as
+/// loaded. Returns the files loaded, dependencies first.
+pub fn load(dirs: &[PathBuf], names: &[String]) -> Result<Vec<PathBuf>> {
+    let mut loaded = Vec::new();
+    for name in names {
+        let file = format!("{name}.ko");
+        let dir = dirs
+            .iter()
+            .find(|d| d.join(&file).is_file())
+            .ok_or_else(|| anyhow!("{file} is in none of {dirs:?}"))?;
+        let graph = parse_dep(dir)?;
+        for m in graph.load_order(std::slice::from_ref(&file)) {
+            let path = graph
+                .resolve_path(&m)
+                .ok_or_else(|| anyhow!("{m} is listed in {}/modules.dep but missing", dir.display()))?;
+            insmod(&path, "")?;
+            loaded.push(path);
+        }
+    }
+    Ok(loaded)
+}
 
 /// A `modules.dep` graph: each module file mapped to the module files it
 /// depends on. Keys and values are reduced to bare file names so the graph is

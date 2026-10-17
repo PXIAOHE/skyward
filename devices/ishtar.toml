@@ -14,3 +14,6 @@ diagonal = 6.73
 
 [modules]
 sources = ["vendor_boot", "vendor_dlkm", "vendor"]
+# The touchscreen: ST FTS over SPI. Its firmware, st_fts_m1.ftb, is read
+# from /odm/firmware.
+load = ["fts_touch_spi"]
