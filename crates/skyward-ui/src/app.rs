@@ -692,21 +692,28 @@ impl App {
             Touch::Down(x, y) => {
                 self.tracker.clear();
                 self.tracker.add(now, y);
-                // A finger landing on a page still gliding stops it and holds
-                // the page; the control under the finger is not pressed.
-                if self.fling.take().is_some_and(|fl| !fl.at(now).1) {
-                    self.drag = Drag::Scroll { last: y };
+                let side = if x < edge {
+                    Some(true)
+                } else if x > m.w as f32 - edge {
+                    Some(false)
+                } else {
+                    None
+                };
+                // The first page has nothing to go back to: its edges are
+                // like the rest of it.
+                let at_edge = side.filter(|_| self.stack.len() > 1);
+                // A swipe in from an edge goes back over whatever the page is
+                // doing: a finger landing there leaves a gliding or springing
+                // page alone until it drags the page, and presses nothing.
+                if at_edge.is_some() && self.in_motion(now) {
+                    self.drag = Drag::Press { x, y, action: None, edge: at_edge };
                     return fx;
                 }
-                // So does one springing back from past its end, which the
-                // finger then holds out there.
-                if let Some(b) = self.bounce.take() {
-                    let (offset, done) = b.at(now);
-                    if !done {
-                        self.pull = motion::unrubber(offset, self.h as f32);
-                        self.drag = Drag::Scroll { last: y };
-                        return fx;
-                    }
+                // Anywhere else it stops such a page and holds it; the
+                // control under the finger is not pressed.
+                if self.catch(now) {
+                    self.drag = Drag::Scroll { last: y };
+                    return fx;
                 }
                 // The `<` stays put while the page scrolls; under the bar
                 // only it answers.
@@ -733,18 +740,7 @@ impl App {
                         self.trace(&t, x, y + scroll);
                         Drag::Pattern
                     }
-                    _ => {
-                        let side = if x < edge {
-                            Some(true)
-                        } else if x > m.w as f32 - edge {
-                            Some(false)
-                        } else {
-                            None
-                        };
-                        // The first page has nothing to go back to: its edges
-                        // are like the rest of it.
-                        Drag::Press { x, y, action, edge: side.filter(|_| self.stack.len() > 1) }
-                    }
+                    _ => Drag::Press { x, y, action, edge: at_edge },
                 };
             }
             Touch::Move(x, y) => match std::mem::replace(&mut self.drag, Drag::Idle) {
@@ -757,7 +753,12 @@ impl App {
                             Drag::Edge { start: x0, from_left, armed: false, x, cy: y0 - m.dp(CUE_LIFT_DP) }
                         }
                         _ if dy.abs() > slop => {
-                            self.drag_by(y0 - y);
+                            // A page still gliding or springing back is caught
+                            // where it has got to; one at rest follows the
+                            // finger from where it came down.
+                            if !self.catch(now) {
+                                self.drag_by(y0 - y);
+                            }
                             Drag::Scroll { last: y }
                         }
                         _ => Drag::Press { x: x0, y: y0, action, edge: at_edge },
@@ -876,6 +877,23 @@ impl App {
             top.1 = next;
             self.dirty = true;
         }
+    }
+
+    /// Whether the page is gliding or springing back at `now`.
+    fn in_motion(&self, now: u64) -> bool {
+        self.fling.is_some_and(|fl| !fl.at(now).1) || self.bounce.is_some_and(|b| !b.at(now).1)
+    }
+
+    /// Stop a page gliding or springing back where it has got to, for a
+    /// finger to hold: one past its end stays out there as the finger's
+    /// pull. Whether there was one.
+    fn catch(&mut self, now: u64) -> bool {
+        let glide = self.fling.take().is_some_and(|fl| !fl.at(now).1);
+        let spring = self.bounce.take().map(|b| b.at(now)).filter(|&(_, done)| !done);
+        if let Some((offset, _)) = spring {
+            self.pull = motion::unrubber(offset, self.h as f32);
+        }
+        glide || spring.is_some()
     }
 
     /// Move the page `d` pixels under a dragging finger (positive moves it
@@ -1264,6 +1282,40 @@ mod tests {
         app.touch(Touch::Up, &f, lift + 520);
         assert!(app.state.vibrate, "the switch was not flipped");
         assert!(app.fling.is_none());
+    }
+
+    #[test]
+    fn an_edge_swipe_goes_back_over_a_gliding_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Settings, &f, &i);
+        app.frame(&f, &i, DataState::Unmounted);
+        let lift = flick(&mut app, &f, 1000, 20.0);
+        app.tick(lift + 30);
+        app.touch(Touch::Down(10.0, 1600.0), &f, lift + 40);
+        app.touch(Touch::Move(90.0, 1605.0), &f, lift + 48);
+        let under = app.top().1;
+        app.tick(lift + 64);
+        assert!(app.top().1 > under, "the page glides on under the swipe");
+        app.touch(Touch::Move(400.0, 1610.0), &f, lift + 72);
+        app.touch(Touch::Up, &f, lift + 80);
+        assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn a_finger_dragging_from_the_edge_catches_a_gliding_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Settings, &f, &i);
+        app.frame(&f, &i, DataState::Unmounted);
+        let lift = flick(&mut app, &f, 1000, 20.0);
+        app.tick(lift + 30);
+        app.touch(Touch::Down(10.0, 1600.0), &f, lift + 40);
+        app.tick(lift + 48);
+        assert!(app.fling.is_some(), "landing at the edge leaves the glide going");
+        app.touch(Touch::Move(12.0, 1500.0), &f, lift + 56);
+        assert!(app.fling.is_none(), "dragging the page catches it");
+        let held = app.top().1;
+        app.touch(Touch::Move(12.0, 1450.0), &f, lift + 64);
+        assert_eq!(app.top().1, held + 50.0, "and it follows the finger from there");
     }
 
     #[test]
