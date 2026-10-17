@@ -8,3 +8,4 @@ license.workspace = true
 anyhow = { workspace = true }
 prost = "0.14.4"
 skyward-block = { path = "../skyward-block" }
+skyward-lp = { path = "../skyward-lp" }

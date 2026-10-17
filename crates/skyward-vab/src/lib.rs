@@ -4,6 +4,10 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
+mod partitions;
+
+pub use partitions::{mount_partitions, mount_point, mounted_partitions, unmount_partitions, Mounted, Mounts};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     A,
@@ -22,6 +26,14 @@ impl Slot {
         match self {
             Slot::A => "A",
             Slot::B => "B",
+        }
+    }
+
+    /// The slot's metadata copy in super.
+    pub fn number(self) -> u32 {
+        match self {
+            Slot::A => 0,
+            Slot::B => 1,
         }
     }
 
@@ -66,6 +78,7 @@ pub enum SnapshotState {
     Unknown,
 }
 
+const METADATA: &str = "/metadata";
 const OTA_DIR: &str = "/metadata/ota";
 
 /// libsnapshot's `SnapshotUpdateStatus` from snapshot.proto; only the state is
@@ -90,15 +103,13 @@ enum UpdateState {
 }
 
 pub fn snapshot_state() -> Result<SnapshotState> {
-    match fs::metadata(OTA_DIR) {
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(SnapshotState::Unknown),
-        Err(e) => return Err(e).with_context(|| format!("stat {OTA_DIR}")),
-        Ok(_) => {}
+    if !skyward_block::mount::is_mount_point(Path::new(METADATA))? {
+        return Ok(SnapshotState::Unknown);
     }
     let path = Path::new(OTA_DIR).join("state");
     match fs::read(&path) {
         Ok(bytes) => parse_state(&bytes),
-        // libsnapshot writes the file with the first update.
+        // libsnapshot writes the file, and /metadata/ota, with the first update.
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(SnapshotState::None),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
@@ -131,6 +142,7 @@ mod tests {
         assert_eq!(Slot::A.other(), Slot::B);
         assert_eq!(Slot::B.suffix(), "_b");
         assert_eq!(Slot::B.letter(), "B");
+        assert_eq!((Slot::A.number(), Slot::B.number()), (0, 1));
         assert_eq!(Slot::from_suffix("_c"), None);
     }
 

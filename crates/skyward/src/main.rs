@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use skyward_config::{ramdisk, DeviceConfig};
 use skyward_sys::{bcb, Power};
 use skyward_vab::SnapshotState;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "skyward", version, about = "Skyward recovery")]
@@ -33,6 +33,19 @@ enum Cmd {
     Reboot { target: String },
     /// Print the bootloader control block in misc.
     Bcb,
+    /// Print the logical partition metadata in super.
+    Lp {
+        /// The super partition, or an image of its start.
+        #[arg(long = "super", default_value = "/dev/block/by-name/super")]
+        super_dev: PathBuf,
+        /// Metadata slot: 0 for _a, 1 for _b. Defaults to the booted slot.
+        #[arg(long)]
+        slot: Option<u32>,
+    },
+    /// Map the booted slot's partitions from super and mount them read-only.
+    Mount,
+    /// Unmount what `mount` mounted and remove its device-mapper devices.
+    Umount,
 }
 
 fn main() -> Result<()> {
@@ -56,7 +69,67 @@ fn main() -> Result<()> {
             println!("args    = {:?}", b.args);
             Ok(())
         }
+        Cmd::Lp { super_dev, slot } => lp(&super_dev, slot),
+        Cmd::Mount => {
+            let mounts = skyward_vab::mount_partitions(booted_slot()?)?;
+            for d in &mounts.damaged {
+                println!("damaged: {d}");
+            }
+            for m in &mounts.partitions {
+                println!("{:<14} {:<16} {:<18} {}", m.partition, m.device.display(), m.mount_point.display(), m.filesystem);
+            }
+            Ok(())
+        }
+        Cmd::Umount => skyward_vab::unmount_partitions(booted_slot()?),
     }
+}
+
+fn booted_slot() -> Result<skyward_vab::Slot> {
+    skyward_vab::current_slot()?.context("not an A/B device")
+}
+
+fn lp(super_dev: &Path, slot: Option<u32>) -> Result<()> {
+    let slot = match slot {
+        Some(n) => n,
+        None => booted_slot()?.number(),
+    };
+    let md = skyward_lp::read(super_dev, slot)?;
+    let g = md.geometry;
+    println!("slot {slot}: version {}.{}, flags {:#x}", md.major_version, md.minor_version, md.header_flags);
+    println!(
+        "geometry: {} metadata slots of {} bytes, logical block {} bytes",
+        g.metadata_slot_count, g.metadata_max_size, g.logical_block_size
+    );
+    for d in &md.damaged {
+        println!("damaged: {d}");
+    }
+    for d in &md.block_devices {
+        println!(
+            "device {}: first sector {}, {} bytes, alignment {} offset {}",
+            d.partition_name, d.first_logical_sector, d.size, d.alignment, d.alignment_offset
+        );
+    }
+    for gr in &md.groups {
+        println!("group {}: max {} bytes", gr.name, gr.maximum_size);
+    }
+    for p in &md.partitions {
+        println!(
+            "partition {} group {} attributes {:#x}, {} bytes",
+            p.name, md.groups[p.group].name, p.attributes, p.bytes()
+        );
+        let mut start = 0;
+        for e in &p.extents {
+            let end = start + e.sectors() - 1;
+            match *e {
+                skyward_lp::Extent::Linear { device, sector, .. } => {
+                    println!("  {start} .. {end} linear {} {sector}", md.block_devices[device].partition_name)
+                }
+                skyward_lp::Extent::Zero { .. } => println!("  {start} .. {end} zero"),
+            }
+            start = end + 1;
+        }
+    }
+    Ok(())
 }
 
 /// The recovery service. adb comes up first so a failure later on can be
@@ -75,6 +148,25 @@ fn recovery() -> Result<()> {
             request.command,
             request.args
         ))?;
+        let slot = booted_slot()?;
+        // Recovery has to stay usable when super cannot be mounted, as after
+        // it is wiped, so the reason goes to the kernel log instead.
+        match skyward_vab::mount_partitions(slot) {
+            Ok(mounts) => {
+                for d in &mounts.damaged {
+                    skyward_sys::kmsg(&format!("super: {d}"))?;
+                }
+                for m in &mounts.partitions {
+                    skyward_sys::kmsg(&format!(
+                        "mounted {} on {} ({})",
+                        m.partition,
+                        m.mount_point.display(),
+                        m.filesystem
+                    ))?;
+                }
+            }
+            Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
+        }
         // init restarts a service that exits, so the service stays resident.
         loop {
             std::thread::park();
@@ -108,8 +200,10 @@ fn info(config: &str) -> Result<()> {
     }
     let snap = i.snapshot;
     println!("snapshot      = {snap:?}");
-    if snap != SnapshotState::None {
-        println!("  -> dynamic-partition writes are refused while a snapshot is outstanding");
+    match snap {
+        SnapshotState::None => {}
+        SnapshotState::Unknown => println!("  -> /metadata is not mounted; dynamic-partition writes stay refused"),
+        _ => println!("  -> dynamic-partition writes are refused while a snapshot is outstanding"),
     }
     let parts = skyward_block::list_by_name(skyward_block::BY_NAME)?;
     println!("partitions    = {} under {}", parts.len(), skyward_block::BY_NAME);
