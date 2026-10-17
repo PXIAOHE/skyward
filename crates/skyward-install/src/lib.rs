@@ -5,6 +5,7 @@
 pub mod adb;
 pub mod fuse;
 pub mod image;
+pub mod ota;
 pub mod package;
 
 pub use image::{ImageKind, Ramdisk};
