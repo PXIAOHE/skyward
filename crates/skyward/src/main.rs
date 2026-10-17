@@ -51,13 +51,13 @@ fn main() -> Result<()> {
     }
 }
 
-/// The recovery service. Failures go to the kernel log, the only log that
-/// exists this early, and still end the process.
+/// The recovery service. adb comes up first so a failure later on can be
+/// inspected; failures go to the kernel log and still end the process.
 fn recovery() -> Result<()> {
     let run = || -> Result<()> {
+        skyward_sys::set_prop("sys.usb.config", "adb")?;
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
         skyward_sys::kmsg(&format!("{} {} recovery up", cfg.device.codename, skyward_info::VERSION))?;
-        skyward_sys::set_prop("sys.usb.config", "adb")?;
         // init restarts a service that exits, so the service stays resident.
         loop {
             std::thread::park();
