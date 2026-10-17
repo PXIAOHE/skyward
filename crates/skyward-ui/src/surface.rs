@@ -202,6 +202,49 @@ pub mod kms {
         Ok(out)
     }
 
+    /// The panel connector's CRTC, from the encoder driving it.
+    fn panel_crtc(card: &Card) -> Result<drm::control::crtc::Handle> {
+        let res = card.resource_handles().context("read KMS resources")?;
+        for &h in res.connectors() {
+            let info = card.get_connector(h, false).context("read connector")?;
+            if is_panel(info.interface()) && info.state() == connector::State::Connected {
+                let encoder = info.current_encoder().ok_or_else(|| anyhow!("the panel has no encoder; is anything showing?"))?;
+                return card.get_encoder(encoder).context("read encoder")?.crtc().ok_or_else(|| anyhow!("the panel's encoder drives no CRTC"));
+            }
+        }
+        Err(anyhow!("no connected built-in panel"))
+    }
+
+    /// The framebuffer the panel scans out right now, as tightly packed RGBA
+    /// rows: what the display controller sends to the screen. Reading another
+    /// client's framebuffer needs root.
+    pub fn capture(path: &str) -> Result<Canvas> {
+        let card = open_card(path)?;
+        let crtc = panel_crtc(&card)?;
+        let fb = card.get_crtc(crtc).context("read CRTC")?.framebuffer().ok_or_else(|| anyhow!("nothing is scanned out"))?;
+        let info = card.get_framebuffer(fb).context("read framebuffer")?;
+        if info.bpp() != 32 {
+            return Err(anyhow!("framebuffer has {} bits per pixel, not 32", info.bpp()));
+        }
+        let handle = info.buffer().ok_or_else(|| anyhow!("no buffer handle for the framebuffer; capturing needs root"))?;
+        let (w, h) = info.size();
+        let pitch = info.pitch() as usize;
+        let map = drm_ffi::mode::dumbbuffer::map(card.as_fd(), handle.into(), 0, 0).context("map the framebuffer")?;
+        let len = pitch * h as usize;
+        let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, card.as_fd().as_raw_fd(), map.offset as libc::off_t) };
+        if ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error()).context("mmap the framebuffer");
+        }
+        let src = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+        let mut c = Canvas::new(w, h);
+        let row = w as usize * 4;
+        for y in 0..h as usize {
+            c.data[y * row..(y + 1) * row].copy_from_slice(&src[y * pitch..y * pitch + row]);
+        }
+        unsafe { libc::munmap(ptr, len) };
+        Ok(c)
+    }
+
     /// Direct scanout on the built-in panel: its preferred mode on the CRTC
     /// driving it, two dumb buffers swapped on one primary plane, and every
     /// other connector and plane taken off that CRTC.

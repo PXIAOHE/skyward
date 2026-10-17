@@ -12,4 +12,5 @@ skyward-vab = { path = "../skyward-vab" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 drm = "0.15.0"
+drm-ffi = "0.9.1"
 libc = { workspace = true }

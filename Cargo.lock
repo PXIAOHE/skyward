@@ -988,6 +988,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "drm",
+ "drm-ffi",
  "libc",
  "skyward-info",
  "skyward-vab",

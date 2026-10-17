@@ -72,6 +72,18 @@ enum Cmd {
         #[arg(long, default_value = "/dev/dri/card0")]
         card: String,
     },
+    /// Save what the panel shows, as raw RGBA files cap-000.rgba onwards.
+    #[cfg(target_os = "android")]
+    Capture {
+        out: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// Pause between captures, in milliseconds.
+        #[arg(long, default_value_t = 100)]
+        interval: u64,
+        #[arg(long, default_value = "/dev/dri/card0")]
+        card: String,
+    },
     /// Drive the panel and touchscreen with the recovery UI.
     #[cfg(target_os = "android")]
     Ui {
@@ -139,6 +151,19 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Kms { card } => {
             print!("{}", skyward_ui::surface::kms::report(&card)?);
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Capture { out, count, interval, card } => {
+            std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
+            for i in 0..count {
+                let t0 = std::time::Instant::now();
+                let c = skyward_ui::surface::kms::capture(&card)?;
+                let path = out.join(format!("cap-{i:03}.rgba"));
+                std::fs::write(&path, &c.data).with_context(|| format!("write {}", path.display()))?;
+                println!("{} {}x{} in {} ms", path.display(), c.w, c.h, t0.elapsed().as_millis());
+                std::thread::sleep(std::time::Duration::from_millis(interval));
+            }
             Ok(())
         }
         #[cfg(target_os = "android")]
