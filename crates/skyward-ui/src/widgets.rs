@@ -1,8 +1,15 @@
 use crate::canvas::Canvas;
 use crate::color::{mix, Rgba};
 use crate::font::{Face, Fonts};
+use crate::geom::Rect;
 use crate::theme::Theme;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
+
+/// Where a drawn card ends and where each of its rows lies, for hit testing.
+pub struct Block {
+    pub bottom: f32,
+    pub rows: Vec<Rect>,
+}
 
 #[derive(Clone, Copy)]
 pub enum Icon {
@@ -268,16 +275,52 @@ pub fn back_arrow(c: &mut Canvas, t: &Theme, color: Rgba) {
     c.line(tip, cy, end, cy + h / 2.0 - sw / 2.0, sw, color);
 }
 
-/// Status bar, optional `<`, and the large page title. Returns where the page
-/// content starts.
-pub fn header(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, title: &str, back: bool) -> f32 {
+/// The area that answers a tap on the `<` control.
+pub fn back_rect(t: &Theme) -> Rect {
     let m = &t.m;
-    status_bar(c, t, f, bar, t.pal.status);
+    Rect::new(0.0, m.back_cy - m.dp(28.0), m.back_x + m.back_w + m.dp(24.0), m.dp(56.0))
+}
+
+/// Optional `<` and the large page title; the status bar is laid over the
+/// page when it is shown. Returns where the page content starts.
+pub fn header(c: &mut Canvas, t: &Theme, f: &Fonts, title: &str, back: bool) -> f32 {
+    let m = &t.m;
     if back {
         back_arrow(c, t, t.pal.text);
     }
     c.text_top(&f.title, title, m.title_x, m.title_top, m.title_px, t.pal.text, None);
     m.content_top
+}
+
+/// Height of the bar that replaces the large title once a page scrolls.
+pub fn top_bar_height(t: &Theme) -> f32 {
+    t.m.back_cy + t.m.dp(32.0)
+}
+
+/// The bar shown over a scrolled page: the status bar area, the `<` inside a
+/// round chip, and the page title centred, on `bg`.
+#[allow(clippy::too_many_arguments)]
+pub fn top_bar(c: &mut Canvas, t: &Theme, f: &Fonts, title: &str, back: bool, bg: Rgba, chip: Rgba, ink: Rgba) {
+    let m = &t.m;
+    let h = top_bar_height(t);
+    c.shade_rows(0, h.ceil() as u32, |_, _| bg);
+    if back {
+        let r = m.dp(23.0);
+        c.fill_circle(m.back_x + m.back_w / 2.0 + m.dp(2.0), m.back_cy, r, chip);
+        back_arrow(c, t, ink);
+    }
+    c.text_center(&f.heading, title, m.w as f32 / 2.0, m.back_cy, m.account_title_px, ink);
+}
+
+/// A short message in a dark capsule above the bottom edge.
+pub fn toast(c: &mut Canvas, t: &Theme, f: &Fonts, text: &str) {
+    let m = &t.m;
+    let px = m.sub_px;
+    let w = c.text_width(&f.heading, text, px) + m.dp(40.0);
+    let h = m.dp(44.0);
+    let (x, y) = ((m.w as f32 - w) / 2.0, m.h as f32 - m.dp(120.0));
+    c.fill_round_rect(x, y, w, h, h / 2.0, Rgba::rgb(30, 30, 30).with_alpha(235));
+    c.text_center(&f.heading, text, m.w as f32 / 2.0, y + h / 2.0, px, Rgba::rgb(255, 255, 255));
 }
 
 pub fn search_bar(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, placeholder: &str) -> f32 {
@@ -459,27 +502,31 @@ fn draw_row(c: &mut Canvas, t: &Theme, f: &Fonts, r: &Row, lay: &Layout, top: f3
     }
 }
 
-/// A flat settings card holding `rows`. Returns the card's bottom.
-pub fn list(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row]) -> f32 {
+/// A flat settings card holding `rows`.
+pub fn list(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row]) -> Block {
     list_toned(c, t, f, top, rows, &Tone::page(t))
 }
 
 /// [`list`] in the given colours.
-pub fn list_toned(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row], tone: &Tone) -> f32 {
+pub fn list_toned(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row], tone: &Tone) -> Block {
     let m = &t.m;
     let lays: Vec<Layout> = rows.iter().map(|r| layout(c, t, f, r)).collect();
     let h: f32 = lays.iter().map(|l| l.h).sum();
-    c.fill_round_rect(m.margin, top, m.w as f32 - m.margin * 2.0, h, m.card_radius, tone.card);
+    let w = m.w as f32 - m.margin * 2.0;
+    c.fill_round_rect(m.margin, top, w, h, m.card_radius, tone.card);
     let mut y = top;
+    let mut rects = Vec::new();
     for (r, l) in rows.iter().zip(&lays) {
         draw_row(c, t, f, r, l, y, tone);
+        rects.push(Rect::new(m.margin, y, w, l.h));
         y += l.h;
     }
-    top + h
+    Block { bottom: top + h, rows: rects }
 }
 
 /// Account-style card: avatar, name and detail, then a strip of key
 /// readings (value over caption, spread edge to edge), then optional rows.
+/// The first rect returned covers the name row.
 #[allow(clippy::too_many_arguments)]
 pub fn device_card(
     c: &mut Canvas,
@@ -490,7 +537,7 @@ pub fn device_card(
     sub: &str,
     stats: &[(&str, &str)],
     rows: &[Row],
-) -> f32 {
+) -> Block {
     let m = &t.m;
     let lays: Vec<Layout> = rows.iter().map(|r| layout(c, t, f, r)).collect();
     let strip_h = if stats.is_empty() { 0.0 } else { m.dp(62.0) };
@@ -529,12 +576,14 @@ pub fn device_card(
     chevron(c, t, right - m.chevron_inset, cy, t.pal.chevron);
 
     let tone = Tone::page(t);
+    let mut rects = vec![Rect::new(card_x, top, right - card_x, m.account_row_h)];
     let mut y = strip_top + strip_h;
     for (r, l) in rows.iter().zip(&lays) {
         draw_row(c, t, f, r, l, y, &tone);
+        rects.push(Rect::new(card_x, y, right - card_x, l.h));
         y += l.h;
     }
-    top + h
+    Block { bottom: top + h, rows: rects }
 }
 
 pub fn switch(c: &mut Canvas, t: &Theme, right: f32, cy: f32, on: bool) {
@@ -557,8 +606,15 @@ pub fn slider(c: &mut Canvas, t: &Theme, x: f32, top: f32, w: f32, value: f32) {
     c.fill_circle(x + fw - h / 2.0, top + h / 2.0, m.slider_knob / 2.0, Rgba::rgb(255, 255, 255));
 }
 
+/// Where a slider card ends, its track, and the row under the slider.
+pub struct SliderBlock {
+    pub bottom: f32,
+    pub track: Rect,
+    pub below: Option<Rect>,
+}
+
 /// Card with a monochrome icon caption, a slider, and an optional row below.
-pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str, value: f32, below: Option<Row>) -> f32 {
+pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str, value: f32, below: Option<Row>) -> SliderBlock {
     let m = &t.m;
     let (card_x, right) = (m.margin, m.w as f32 - m.margin);
     let below_lay = below.as_ref().map(|r| layout(c, t, f, r));
@@ -581,29 +637,37 @@ pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str, 
     }
     // The caption is set like the account name, in the softer text colour.
     c.text_vc(&f.heading, label, card_x + m.dp(53.7), lcy, m.account_title_px, t.pal.info, None);
-    slider(c, t, card_x + m.inner, slider_top, right - card_x - m.inner * 2.0, value);
+    let track = Rect::new(card_x + m.inner, slider_top, right - card_x - m.inner * 2.0, m.slider_h);
+    slider(c, t, track.x, track.y, track.w, value);
+    let mut below_rect = None;
     if let (Some(r), Some(l)) = (below, below_lay) {
-        draw_row(c, t, f, &r, &l, slider_bottom + below_gap, &Tone::page(t));
+        let y = slider_bottom + below_gap;
+        draw_row(c, t, f, &r, &l, y, &Tone::page(t));
+        below_rect = Some(Rect::new(card_x, y, right - card_x, l.h));
     }
-    top + h
+    SliderBlock { bottom: top + h, track, below: below_rect }
 }
 
-/// Swipe-to-confirm control in the thick-slider style.
-pub fn confirm(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str, danger: bool) -> f32 {
+/// Swipe-to-confirm control in the thick-slider style; `progress` (0 to 1)
+/// is how far the knob has been dragged. Returns the track.
+pub fn confirm(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str, danger: bool, progress: f32) -> Rect {
     let m = &t.m;
     let accent = if danger { t.pal.danger } else { t.pal.accent };
     let (x, w, h) = (m.margin, m.w as f32 - m.margin * 2.0, m.dp(56.0));
     c.fill_round_rect(x, top, w, h, h / 2.0, if danger { t.pal.danger_soft } else { t.pal.badge });
     c.text_center(&f.heading, label, x + w / 2.0 + h / 4.0, top + h / 2.0, m.row_title_px, accent);
     let k = h - m.dp(8.0);
-    let kcx = x + h / 2.0;
+    let kcx = x + h / 2.0 + (w - h) * progress.clamp(0.0, 1.0);
     let kcy = top + h / 2.0;
+    if progress > 0.0 {
+        c.fill_round_rect(x, top, kcx + h / 2.0 - x, h, h / 2.0, accent.with_alpha(60));
+    }
     c.fill_circle(kcx, kcy, k / 2.0, accent);
     let s = k * 0.3;
     c.line(kcx - s * 0.5, kcy, kcx + s * 0.5, kcy, m.stroke, Rgba::rgb(255, 255, 255));
     c.line(kcx + s * 0.5, kcy, kcx + s * 0.05, kcy - s * 0.45, m.stroke, Rgba::rgb(255, 255, 255));
     c.line(kcx + s * 0.5, kcy, kcx + s * 0.05, kcy + s * 0.45, m.stroke, Rgba::rgb(255, 255, 255));
-    top + h
+    Rect::new(x, top, w, h)
 }
 
 pub fn progress_bar(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, value: f32) {
@@ -613,10 +677,16 @@ pub fn progress_bar(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, value: f3
     c.fill_round_rect(x, y, (w * value.clamp(0.0, 1.0)).max(h), h, h / 2.0, t.pal.accent);
 }
 
+/// Centres of the nine pattern dots, row by row.
+pub fn pattern_dots(cx: f32, cy: f32, span: f32) -> [(f32, f32); 9] {
+    let step = span / 2.0;
+    std::array::from_fn(|i| (cx - step + (i % 3) as f32 * step, cy - step + (i / 3) as f32 * step))
+}
+
 pub fn pattern_lock(c: &mut Canvas, t: &Theme, cx: f32, cy: f32, span: f32, path: &[usize]) {
     let m = &t.m;
-    let step = span / 2.0;
-    let pos = |idx: usize| -> (f32, f32) { (cx - step + (idx % 3) as f32 * step, cy - step + (idx / 3) as f32 * step) };
+    let dots = pattern_dots(cx, cy, span);
+    let pos = |idx: usize| dots[idx];
     for w in path.windows(2) {
         let (ax, ay) = pos(w[0]);
         let (bx, by) = pos(w[1]);
@@ -764,13 +834,15 @@ pub struct Fact<'a> {
 }
 
 /// The About summary card: rows a little shorter than settings rows.
-pub fn facts(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Fact], tone: &Tone) -> f32 {
+pub fn facts(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Fact], tone: &Tone) -> Block {
     let m = &t.m;
     let row_h = m.dp(51.0);
     let (card_x, right) = (m.margin, m.w as f32 - m.margin);
     let h = row_h * rows.len() as f32;
     c.fill_round_rect(card_x, top, right - card_x, h, m.card_radius, tone.card);
+    let mut rects = Vec::new();
     for (i, r) in rows.iter().enumerate() {
+        rects.push(Rect::new(card_x, top + row_h * i as f32, right - card_x, row_h));
         let cy = top + row_h * (i as f32 + 0.5);
         let tx = card_x + m.inner;
         let tw = c.text_vc(&f.heading, r.title, tx, cy, m.row_title_px, tone.text, None);
@@ -784,7 +856,7 @@ pub fn facts(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Fact], tone
         let w = c.text_width(&f.value, &r.value, m.sub_px).min(room);
         c.text_vc(&f.value, &r.value, value_right - w, cy, m.sub_px, tone.value, Some(room));
     }
-    top + h
+    Block { bottom: top + h, rows: rects }
 }
 
 /// The About page hardware card: the model in large type (`title` may hold
@@ -888,8 +960,8 @@ pub fn info_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, items: &[(&str,
 }
 
 /// Light and dark previews side by side; the active one carries an accent
-/// ring and an accent caption. Returns the bottom of the captions.
-pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32) -> f32 {
+/// ring and an accent caption. The rows are the light and the dark choice.
+pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32) -> Block {
     let m = &t.m;
     let gap = m.dp(4.0);
     let slot_w = (m.w as f32 - m.margin * 2.0 - gap) / 2.0;
@@ -898,6 +970,8 @@ pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32) -> f32 {
     let label_px = m.dp(15.9);
     let (ink_top, ink_bottom) = f.heading.ink(label_px);
     let caption_base = top + slot_w + m.dp(11.0) - ink_top;
+    let bottom = caption_base + ink_bottom;
+    let mut rects = Vec::new();
     for (i, (label, dark)) in [("浅色模式", false), ("深色模式", true)].into_iter().enumerate() {
         let sx = m.margin + (slot_w + gap) * i as f32;
         let on = t.dark == dark;
@@ -909,8 +983,9 @@ pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32) -> f32 {
         let w = c.text_width(&f.heading, label, label_px);
         let color = if on { t.pal.accent } else { t.pal.info };
         c.text(&f.heading, label, sx + (slot_w - w) / 2.0, caption_base, label_px, color, None);
+        rects.push(Rect::new(sx, top, slot_w, bottom - top));
     }
-    caption_base + ink_bottom
+    Block { bottom, rows: rects }
 }
 
 /// Miniature settings page: a blue backdrop with two cards of placeholder

@@ -1,12 +1,15 @@
+pub mod app;
 pub mod canvas;
 pub mod color;
 pub mod fmt;
 pub mod font;
+pub mod geom;
 pub mod pages;
 pub mod surface;
 pub mod theme;
 pub mod widgets;
 
+pub use app::App;
 pub use canvas::Canvas;
 pub use color::Rgba;
 pub use font::Fonts;

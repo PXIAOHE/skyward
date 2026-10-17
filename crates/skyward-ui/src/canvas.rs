@@ -40,6 +40,22 @@ impl Canvas {
         }
     }
 
+    /// Overwrite a pixel-aligned rectangle with `color`.
+    pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba) {
+        let x0 = (x.floor().max(0.0) as u32).min(self.w);
+        let y0 = (y.floor().max(0.0) as u32).min(self.h);
+        let x1 = ((x + w).ceil().max(0.0) as u32).min(self.w);
+        let y1 = ((y + h).ceil().max(0.0) as u32).min(self.h);
+        let px = [color.r, color.g, color.b, color.a];
+        for row in y0..y1 {
+            let start = ((row * self.w + x0) * 4) as usize;
+            let end = ((row * self.w + x1) * 4) as usize;
+            for p in self.data[start..end].as_chunks_mut::<4>().0 {
+                *p = px;
+            }
+        }
+    }
+
     /// Paint rows `y0..y1` with a colour computed per pixel centre.
     pub fn shade_rows(&mut self, y0: u32, y1: u32, paint: impl Fn(f32, f32) -> Rgba) {
         for y in y0..y1.min(self.h) {

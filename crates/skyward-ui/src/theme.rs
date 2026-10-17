@@ -56,7 +56,7 @@ pub struct Hero {
 }
 
 /// Layout metrics measured on a Xiaomi 17 Ultra's stock settings, in dp,
-/// converted at the panel's density (1200 px wide at 3.0 px/dp).
+/// converted at the panel's density.
 #[derive(Clone, Copy)]
 pub struct Metrics {
     pub w: u32,
@@ -130,17 +130,17 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub fn light(w: u32, h: u32) -> Self {
-        Theme { pal: LIGHT, hero: HERO, m: metrics(w, h), dark: false }
+    /// `px_per_dp` is the panel density over 160, e.g. 3.0 at 480 dpi.
+    pub fn light(w: u32, h: u32, px_per_dp: f32) -> Self {
+        Theme { pal: LIGHT, hero: HERO, m: metrics(w, h, px_per_dp), dark: false }
     }
 
-    pub fn dark(w: u32, h: u32) -> Self {
-        Theme { pal: DARK, hero: HERO, m: metrics(w, h), dark: true }
+    pub fn dark(w: u32, h: u32, px_per_dp: f32) -> Self {
+        Theme { pal: DARK, hero: HERO, m: metrics(w, h, px_per_dp), dark: true }
     }
 }
 
-fn metrics(w: u32, h: u32) -> Metrics {
-    let px_per_dp = 3.0 * w as f32 / 1200.0;
+fn metrics(w: u32, h: u32, px_per_dp: f32) -> Metrics {
     let dp = |v: f32| v * px_per_dp;
     Metrics {
         w,

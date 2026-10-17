@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
-use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
+use skyward_ui::app::{App, Screen};
+use skyward_ui::widgets::{self, Bar};
+use skyward_ui::{Canvas, Fonts, Theme};
 use skyward_vab::{Slot, SnapshotState};
 use std::fs::File;
 use std::io::BufWriter;
@@ -10,6 +12,9 @@ use std::path::{Path, PathBuf};
 mod matcher;
 
 const CLOCK: &str = "23:46";
+
+/// File name, page, dark theme, readings, userdata state, pattern drawn.
+type Shot<'a> = (&'a str, Screen, bool, &'a DeviceInfo, DataState, &'a [usize]);
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -26,8 +31,8 @@ fn main() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cfg = DeviceConfig::load(root.join("devices/nezha.toml"))?;
     let (w, h) = (cfg.display.width, cfg.display.height);
-    let light = Theme::light(w, h);
-    let dark = Theme::dark(w, h);
+    let ppd = cfg.display.density as f32 / 160.0;
+    let light = Theme::light(w, h, ppd);
 
     match args.get(2).map(String::as_str) {
         Some("--calibrate") => {
@@ -45,32 +50,41 @@ fn main() -> Result<()> {
 
     let info = nezha(&cfg);
     let pending = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info.clone() };
-    let f = &fonts;
     let open = DataState::Decrypted;
-    let shots: Vec<(&str, Canvas)> = vec![
-        ("01-decrypt-dark", pages::decrypt(&ctx(&dark, f, &info, DataState::Locked), &[0, 3, 4, 5, 8])),
-        ("02-home-light", pages::home(&ctx(&light, f, &info, open))),
-        ("03-home-dark-update-pending", pages::home(&ctx(&dark, f, &pending, open))),
-        ("04-settings-light", pages::settings(&ctx(&light, f, &info, open))),
-        ("05-settings-dark", pages::settings(&ctx(&dark, f, &info, open))),
-        ("06-reboot-dark", pages::reboot(&ctx(&dark, f, &info, open))),
-        ("07-wipe-light", pages::wipe(&ctx(&light, f, &info, open))),
-        ("08-install-dark", pages::install_progress(&ctx(&dark, f, &info, open))),
+    let shots: [Shot; 10] = [
+        ("01-decrypt-dark", Screen::Decrypt, true, &info, DataState::Locked, &[0, 3, 4, 5, 8]),
+        ("02-home-light", Screen::Home, false, &info, open, &[]),
+        ("03-home-dark-update-pending", Screen::Home, true, &pending, open, &[]),
+        ("04-settings-light", Screen::Settings, false, &info, open, &[]),
+        ("05-settings-dark", Screen::Settings, true, &info, open, &[]),
+        ("06-reboot-dark", Screen::Reboot, true, &info, open, &[]),
+        ("07-wipe-light", Screen::Wipe, false, &info, open, &[]),
         // The About backdrop is the same in both themes.
-        ("09-about", pages::about(&ctx(&light, f, &info, open))),
-        ("10-specs-light", pages::specs(&ctx(&light, f, &info, open))),
-        ("11-specs-dark", pages::specs(&ctx(&dark, f, &info, open))),
+        ("08-about", Screen::About, false, &info, open, &[]),
+        ("09-specs-light", Screen::Specs, false, &info, open, &[]),
+        ("10-specs-dark", Screen::Specs, true, &info, open, &[]),
     ];
-    for (name, canvas) in &shots {
+    for (name, screen, dark, info, data, pattern) in shots {
+        let mut app = App::new(screen, w, h, ppd);
+        app.state.dark = dark;
+        app.state.pattern = pattern.to_vec();
         let path = out.join(format!("{name}.png"));
-        write_png(&path, canvas)?;
+        write_png(&path, &whole_page(&mut app, &fonts, info, data))?;
         println!("wrote {}", path.display());
     }
     Ok(())
 }
 
-fn ctx<'a>(t: &'a Theme, f: &'a Fonts, info: &'a DeviceInfo, data: DataState) -> Ctx<'a> {
-    Ctx { t, f, info, data, clock: CLOCK }
+/// The full length of a page with the status bar over its top, the way a
+/// long screenshot shows it.
+fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo, data: DataState) -> Canvas {
+    let t = app.theme();
+    let frame = app.frame(f, info, data);
+    let mut c = Canvas { w: frame.canvas.w, h: frame.canvas.h, data: frame.canvas.data.clone() };
+    let ink = if frame.hero { t.hero.status } else { t.pal.status };
+    let battery = info.battery.as_ref().map(|b| (b.level, b.charge == Charge::Charging));
+    widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery }, ink);
+    c
 }
 
 /// Xiaomi 17 Ultra by Leica as `skyward info` read it on 2026-10-18 (the

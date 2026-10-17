@@ -1,9 +1,11 @@
+use crate::app::{Action, Confirm, Frame, Hit, Screen, State, Switch};
 use crate::canvas::Canvas;
 use crate::color::Rgba;
 use crate::fmt;
 use crate::font::Fonts;
+use crate::geom::Rect;
 use crate::theme::Theme;
-use crate::widgets::{self, Bar, Fact, Icon, Outline, Row, Spec, Tone, Trail};
+use crate::widgets::{self, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DataState, DeviceInfo, VERSION};
 
 // Tile colours sampled from the stock Settings, plus orange and red from the
@@ -16,21 +18,43 @@ const ORANGE: Rgba = Rgba::rgb(255, 146, 46);
 const RED: Rgba = Rgba::rgb(242, 83, 75);
 
 /// What every page draws from: style, typefaces, the device readings, where
-/// userdata stands, and the clock text for the status bar.
+/// userdata stands, and the choices made on the pages.
 pub struct Ctx<'a> {
     pub t: &'a Theme,
     pub f: &'a Fonts,
     pub info: &'a DeviceInfo,
     pub data: DataState,
-    pub clock: &'a str,
+    pub state: &'a State,
 }
 
-impl Ctx<'_> {
-    fn bar(&self) -> Bar<'_> {
-        let battery = self.info.battery.as_ref().map(|b| (b.level, b.charge == Charge::Charging));
-        Bar { clock: self.clock, battery }
+pub fn render(screen: Screen, cx: &Ctx) -> Frame {
+    match screen {
+        Screen::Decrypt => decrypt(cx),
+        Screen::Home => home(cx),
+        Screen::Settings => settings(cx),
+        Screen::Reboot => reboot(cx),
+        Screen::Wipe => wipe(cx),
+        Screen::About => about(cx),
+        Screen::Specs => specs(cx),
     }
 }
+
+/// Label and colour of each swipe-to-confirm control.
+pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
+    match which {
+        Confirm::Reboot => ("滑动以重启", false),
+        Confirm::Wipe => ("滑动以清除", true),
+    }
+}
+
+const REBOOT_TARGETS: [(&str, Option<&str>); 6] = [
+    ("系统", None),
+    ("恢复模式", None),
+    ("Fastboot", Some("用户空间 fastbootd")),
+    ("Bootloader", None),
+    ("EDL", Some("高通紧急下载模式")),
+    ("关机", None),
+];
 
 fn page(t: &Theme) -> Canvas {
     let mut c = Canvas::new(t.m.w, t.m.h);
@@ -52,13 +76,20 @@ fn fit(c: Canvas, t: &Theme, bottom: f32) -> Canvas {
     c.crop_height(h)
 }
 
+fn hits(rects: &[Rect], actions: &[Action]) -> Vec<Hit> {
+    rects.iter().zip(actions).map(|(&rect, &action)| Hit { rect, action }).collect()
+}
+
 /// Recovery home, laid out like the Settings root: title, search, a device
 /// card with the readings that matter before flashing, then grouped entries.
-pub fn home(cx: &Ctx) -> Canvas {
+pub fn home(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let mut c = page(t);
-    let mut y = widgets::header(&mut c, t, f, &cx.bar(), "Skyward", false);
+    let mut out = Vec::new();
+    let mut y = widgets::header(&mut c, t, f, "Skyward", false);
+    let search_top = y;
     y = widgets::search_bar(&mut c, t, f, y, "搜索功能与分区");
+    out.push(Hit { rect: Rect::new(t.m.margin, search_top, t.m.w as f32 - t.m.margin * 2.0, t.m.search_h), action: Action::Unavailable("搜索还没实现") });
 
     let sub = match &i.os_version {
         Some(v) => format!("{} · {v}", i.codename),
@@ -86,58 +117,85 @@ pub fn home(cx: &Ctx) -> Canvas {
     if let Some(note) = fmt::snapshot_note(&i.snapshot) {
         rows.push(Row::new(fmt::snapshot(&i.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::None));
     }
-    y = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &stats, &rows);
-    y += t.m.card_gap;
-    y = widgets::list(&mut c, t, f, y, &[
+    let card = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &stats, &rows);
+    out.push(Hit { rect: card.rows[0], action: Action::Open(Screen::About) });
+    y = card.bottom + t.m.card_gap;
+    let tools = widgets::list(&mut c, t, f, y, &[
         Row::new("安装").icon(GREEN, Icon::Install),
-        Row::new("备份").icon(BLUE, Icon::Backup).trail(Trail::Value("3 个")),
+        Row::new("备份").icon(BLUE, Icon::Backup),
         Row::new("恢复").icon(PURPLE, Icon::Restore),
         Row::new("挂载").icon(SLATE, Icon::Mount),
     ]);
-    y += t.m.card_gap;
-    widgets::list(&mut c, t, f, y, &[
+    out.extend(hits(&tools.rows, &[
+        Action::Unavailable("安装还没实现"),
+        Action::Unavailable("备份还没实现"),
+        Action::Unavailable("恢复还没实现"),
+        Action::Unavailable("挂载还没实现"),
+    ]));
+    y = tools.bottom + t.m.card_gap;
+    let target = REBOOT_TARGETS[cx.state.reboot].0;
+    let system = widgets::list(&mut c, t, f, y, &[
         Row::new("清除数据").icon(RED, Icon::Wipe),
         Row::new("高级").icon(SLATE, Icon::Sliders),
         Row::new("设置").icon(SLATE, Icon::Gear),
-        Row::new("重启").icon(ORANGE, Icon::Power).trail(Trail::Value("系统")),
+        Row::new("重启").icon(ORANGE, Icon::Power).trail(Trail::Value(target)),
     ]);
-    c
+    out.extend(hits(&system.rows, &[
+        Action::Open(Screen::Wipe),
+        Action::Unavailable("高级功能还没实现"),
+        Action::Open(Screen::Settings),
+        Action::Open(Screen::Reboot),
+    ]));
+    Frame { canvas: c, hits: out, title: "Skyward", back: false, hero: false, pattern: None }
 }
 
 /// Preferences, opening with the stock「显示与亮度」theme previews.
-pub fn settings(cx: &Ctx) -> Canvas {
-    let (t, f) = (cx.t, cx.f);
+pub fn settings(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = long_page(t);
-    let top = widgets::header(&mut c, t, f, &cx.bar(), "设置", true);
-    let mut y = widgets::theme_picker(&mut c, t, f, top + t.m.dp(8.9));
-    y = widgets::section(&mut c, t, f, y, "亮度");
-    y = widgets::slider_card(&mut c, t, f, y, "屏幕亮度", 0.62, Some(Row::new("息屏时间").trail(Trail::Value("2 分钟"))));
-    y = widgets::section(&mut c, t, f, y, "通用");
-    y = widgets::list(&mut c, t, f, y, &[
+    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
+    let top = widgets::header(&mut c, t, f, "设置", true);
+    let themes = widgets::theme_picker(&mut c, t, f, top + t.m.dp(8.9));
+    out.extend(hits(&themes.rows, &[Action::Theme { dark: false }, Action::Theme { dark: true }]));
+    let mut y = widgets::section(&mut c, t, f, themes.bottom, "亮度");
+    let slider = widgets::slider_card(&mut c, t, f, y, "屏幕亮度", s.brightness, Some(Row::new("息屏时间").trail(Trail::Value("2 分钟"))));
+    out.push(Hit { rect: slider.track, action: Action::Brightness });
+    if let Some(r) = slider.below {
+        out.push(Hit { rect: r, action: Action::Unavailable("息屏时间还不能修改") });
+    }
+    y = widgets::section(&mut c, t, f, slider.bottom, "通用");
+    let general = widgets::list(&mut c, t, f, y, &[
         Row::new("语言").icon(BLUE, Icon::Globe).trail(Trail::Value("简体中文")),
         Row::new("时区").icon(ORANGE, Icon::Clock).trail(Trail::Value("中国标准时间")),
-        Row::new("触摸振动").icon(PURPLE, Icon::Vibrate).trail(Trail::Switch(true)),
+        Row::new("触摸振动").icon(PURPLE, Icon::Vibrate).trail(Trail::Switch(s.vibrate)),
     ]);
-    y = widgets::section(&mut c, t, f, y, "调试");
-    y = widgets::list(&mut c, t, f, y, &[
-        Row::new("ADB Sideload").icon(GREEN, Icon::Usb).subtitle("通过电脑上的 adb 推送安装包").trail(Trail::Switch(false)),
+    out.extend(hits(&general.rows, &[
+        Action::Unavailable("语言还不能修改"),
+        Action::Unavailable("时区还不能修改"),
+        Action::Toggle(Switch::Vibrate),
+    ]));
+    y = widgets::section(&mut c, t, f, general.bottom, "调试");
+    let debug = widgets::list(&mut c, t, f, y, &[
+        Row::new("ADB Sideload").icon(GREEN, Icon::Usb).subtitle("通过电脑上的 adb 推送安装包").trail(Trail::Switch(s.sideload)),
         Row::new("终端").icon(SLATE, Icon::Terminal),
     ]);
-    y = widgets::section(&mut c, t, f, y, "关于");
-    y = widgets::list(&mut c, t, f, y, &[Row::new("关于本机").trail(Trail::Value(VERSION))]);
-    fit(c, t, y)
+    out.extend(hits(&debug.rows, &[Action::Toggle(Switch::Sideload), Action::Unavailable("终端还没实现")]));
+    y = widgets::section(&mut c, t, f, debug.bottom, "关于");
+    let about = widgets::list(&mut c, t, f, y, &[Row::new("关于本机").trail(Trail::Value(VERSION))]);
+    out.extend(hits(&about.rows, &[Action::Open(Screen::About)]));
+    Frame { canvas: fit(c, t, about.bottom), hits: out, title: "设置", back: true, hero: false, pattern: None }
 }
 
 /// About this device, modelled on the stock「我的设备」at rest: the wordmark
 /// over a deep blue backdrop, then translucent summary, hardware and link
 /// cards.
-pub fn about(cx: &Ctx) -> Canvas {
+pub fn about(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let m = &t.m;
     let tone = Tone::hero(t);
     let mut c = long_page(t);
+    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
     widgets::hero_backdrop(&mut c, t);
-    widgets::status_bar(&mut c, t, f, &cx.bar(), t.hero.status);
     widgets::back_arrow(&mut c, t, t.hero.title);
     widgets::wordmark(&mut c, t, f, "Skyward", m.dp(233.7), m.dp(37.8));
     let version_px = m.dp(13.3);
@@ -156,7 +214,8 @@ pub fn about(cx: &Ctx) -> Canvas {
     if let Some(r) = &i.android {
         facts.push(Fact { title: "Android 版本", value: r.clone(), link: false });
     }
-    let mut y = widgets::facts(&mut c, t, f, m.dp(490.7), &facts, &tone);
+    let summary = widgets::facts(&mut c, t, f, m.dp(490.7), &facts, &tone);
+    out.push(Hit { rect: summary.rows[1], action: Action::Open(Screen::Specs) });
 
     let mut specs = vec![("处理器", i.soc.clone().unwrap_or_else(|| fmt::cpu(&i.cpu))), ("运行内存", fmt::ram(i.ram_kib))];
     if let Some(design) = i.battery.as_ref().and_then(|b| b.design) {
@@ -168,17 +227,19 @@ pub fn about(cx: &Ctx) -> Canvas {
     if let Some(p) = i.panel {
         specs.push(("分辨率", fmt::panel(p)));
     }
-    y = widgets::spec_card(&mut c, t, f, y + m.card_gap, &fmt::model_lines(&i.model), &specs, &tone);
-    y = widgets::list_toned(&mut c, t, f, y + m.card_gap, &[Row::new("全部参数与信息"), Row::new("导出日志")], &tone);
-    fit(c, t, y)
+    let y = widgets::spec_card(&mut c, t, f, summary.bottom + m.card_gap, &fmt::model_lines(&i.model), &specs, &tone);
+    let links = widgets::list_toned(&mut c, t, f, y + m.card_gap, &[Row::new("全部参数与信息"), Row::new("导出日志")], &tone);
+    out.extend(hits(&links.rows, &[Action::Open(Screen::Specs), Action::Unavailable("导出日志还没实现")]));
+    Frame { canvas: fit(c, t, links.bottom), hits: out, title: "关于本机", back: true, hero: true, pattern: None }
 }
 
 /// Every reading the recovery has, modelled on the stock「全部参数与信息」.
-pub fn specs(cx: &Ctx) -> Canvas {
+pub fn specs(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let gap = t.m.card_gap;
     let mut c = long_page(t);
-    widgets::header(&mut c, t, f, &cx.bar(), "全部参数与信息", true);
+    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
+    widgets::header(&mut c, t, f, "全部参数与信息", true);
     // This page leaves more room under the title than the settings pages.
     let top = t.m.dp(188.0);
 
@@ -249,98 +310,89 @@ pub fn specs(cx: &Ctx) -> Canvas {
         None => format!("总存储 {} · 数据分区未挂载", fmt::capacity(i.storage.total)),
     };
     y = widgets::info_card(&mut c, t, f, y + gap, &[("机身存储", storage)]);
-    y = widgets::list(&mut c, t, f, y + gap, &[
+    let links = widgets::list(&mut c, t, f, y + gap, &[
         Row::new("开源许可").trail(Trail::Value("GPL-3.0")),
         Row::new("界面字体").trail(Trail::Value("MiSans")),
     ]);
-    fit(c, t, y)
+    out.extend(hits(&links.rows, &[Action::Unavailable("许可证全文还没放进来"), Action::Unavailable("字体许可还没放进来")]));
+    Frame { canvas: fit(c, t, links.bottom), hits: out, title: "全部参数与信息", back: true, hero: false, pattern: None }
 }
 
 /// File-based-encryption unlock.
-pub fn decrypt(cx: &Ctx, path: &[usize]) -> Canvas {
+pub fn decrypt(cx: &Ctx) -> Frame {
     let (t, f) = (cx.t, cx.f);
     let mut c = page(t);
     let m = &t.m;
-    widgets::status_bar(&mut c, t, f, &cx.bar(), t.pal.status);
     let x = m.w as f32 / 2.0;
     let lock_cy = m.dp(150.0);
     c.fill_circle(x, lock_cy, m.dp(30.0), t.pal.card);
     widgets::glyph(&mut c, Icon::Lock, x, lock_cy, m.dp(40.0), t.pal.accent, t.pal.card);
     c.text_center(&f.heading, "输入锁屏图案", x, lock_cy + m.dp(64.0), m.dp(24.0), t.pal.text);
     c.text_center(&f.body, "解锁后才能读取「数据」分区", x, lock_cy + m.dp(98.0), m.sub_px, t.pal.subtitle);
-    widgets::pattern_lock(&mut c, t, x, m.h as f32 * 0.6, m.dp(190.0), path);
-    c.text_center(&f.heading, "暂不解密", x, m.h as f32 - m.dp(64.0), m.row_title_px, t.pal.accent);
-    c
+    let (pcx, pcy, span) = (x, m.h as f32 * 0.6, m.dp(190.0));
+    widgets::pattern_lock(&mut c, t, pcx, pcy, span, &cx.state.pattern);
+    let skip_cy = m.h as f32 - m.dp(64.0);
+    c.text_center(&f.heading, "暂不解密", x, skip_cy, m.row_title_px, t.pal.accent);
+    let reach = span / 2.0 + m.dp(40.0);
+    let out = vec![
+        Hit { rect: Rect::new(pcx - reach, pcy - reach, reach * 2.0, reach * 2.0), action: Action::Pattern },
+        Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip },
+    ];
+    Frame { canvas: c, hits: out, title: "解密", back: false, hero: false, pattern: Some((pcx, pcy, span)) }
 }
 
 /// Reboot target picker with a swipe-to-confirm control.
-pub fn reboot(cx: &Ctx) -> Canvas {
-    let (t, f) = (cx.t, cx.f);
+pub fn reboot(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = page(t);
-    let top = widgets::header(&mut c, t, f, &cx.bar(), "重启", true);
+    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
+    let top = widgets::header(&mut c, t, f, "重启", true);
     let mut y = widgets::section_first(&mut c, t, f, top, "重启到");
-    y = widgets::list(&mut c, t, f, y, &[
-        Row::new("系统").trail(Trail::Check(true)),
-        Row::new("恢复模式").trail(Trail::Check(false)),
-        Row::new("Fastboot").subtitle("用户空间 fastbootd").trail(Trail::Check(false)),
-        Row::new("Bootloader").trail(Trail::Check(false)),
-        Row::new("EDL").subtitle("高通紧急下载模式").trail(Trail::Check(false)),
-        Row::new("关机").trail(Trail::Check(false)),
-    ]);
-    if let Some(s) = cx.info.slot {
-        let next = format!("{}（当前）", s.letter());
+    let rows: Vec<Row> = REBOOT_TARGETS
+        .iter()
+        .enumerate()
+        .map(|(k, &(title, sub))| {
+            let r = Row::new(title).trail(Trail::Check(s.reboot == k));
+            match sub {
+                Some(text) => r.subtitle(text),
+                None => r,
+            }
+        })
+        .collect();
+    let targets = widgets::list(&mut c, t, f, y, &rows);
+    let picks: Vec<Action> = (0..rows.len()).map(Action::RebootTarget).collect();
+    out.extend(hits(&targets.rows, &picks));
+    y = targets.bottom;
+    if let Some(slot) = cx.info.slot {
+        let next = format!("{}（当前）", slot.letter());
         y = widgets::section(&mut c, t, f, y, "槽位");
-        y = widgets::list(&mut c, t, f, y, &[Row::new("下次启动").trail(Trail::Value(&next))]);
+        let slots = widgets::list(&mut c, t, f, y, &[Row::new("下次启动").trail(Trail::Value(&next))]);
+        out.extend(hits(&slots.rows, &[Action::Unavailable("切换槽位还没实现")]));
+        y = slots.bottom;
     }
-    y += t.m.dp(28.0);
-    widgets::confirm(&mut c, t, f, y, "滑动以重启", false);
-    c
+    let (label, danger) = confirm_label(Confirm::Reboot);
+    let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
+    out.push(Hit { rect: track, action: Action::Confirm(Confirm::Reboot) });
+    Frame { canvas: c, hits: out, title: "重启", back: true, hero: false, pattern: None }
 }
 
 /// Destructive wipe with the partitions to clear.
-pub fn wipe(cx: &Ctx) -> Canvas {
-    let (t, f) = (cx.t, cx.f);
+pub fn wipe(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = page(t);
-    let top = widgets::header(&mut c, t, f, &cx.bar(), "清除数据", true);
-    let mut y = widgets::section_first(&mut c, t, f, top, "选择要清除的内容");
-    y = widgets::list(&mut c, t, f, y, &[
-        Row::new("用户数据").subtitle("应用、账户与设置 · 12.4 GB").trail(Trail::Check(true)),
-        Row::new("内部存储").subtitle("照片、视频与下载的文件 · 378 GB").trail(Trail::Check(false)),
-        Row::new("ART 缓存").subtitle("2.1 GB").trail(Trail::Check(true)),
-        Row::new("Metadata").subtitle("加密元数据，清除后「数据」分区将无法解密").trail(Trail::Check(false)),
+    let mut out = vec![Hit { rect: widgets::back_rect(t), action: Action::Back }];
+    let top = widgets::header(&mut c, t, f, "清除数据", true);
+    let y = widgets::section_first(&mut c, t, f, top, "选择要清除的内容");
+    let items = widgets::list(&mut c, t, f, y, &[
+        Row::new("用户数据").subtitle("应用、账户与设置").trail(Trail::Check(s.wipe[0])),
+        Row::new("内部存储").subtitle("照片、视频与下载的文件").trail(Trail::Check(s.wipe[1])),
+        Row::new("ART 缓存").subtitle("应用的预编译代码，开机时重新生成").trail(Trail::Check(s.wipe[2])),
+        Row::new("Metadata").subtitle("加密元数据，清除后「数据」分区将无法解密").trail(Trail::Check(s.wipe[3])),
     ]);
-    y = widgets::footnote(&mut c, t, f, y, "清除后无法恢复。内部存储里的照片和文件不会一起删除，除非你勾选了它。");
-    y += t.m.dp(24.0);
-    widgets::confirm(&mut c, t, f, y, "滑动以清除", true);
-    c
-}
-
-/// Flashing progress.
-pub fn install_progress(cx: &Ctx) -> Canvas {
-    let (t, f) = (cx.t, cx.f);
-    let mut c = page(t);
-    let m = &t.m;
-    let top = widgets::header(&mut c, t, f, &cx.bar(), "安装", true);
-    let (card_x, right) = (m.margin, m.w as f32 - m.margin);
-    let h = m.dp(118.0);
-    c.fill_round_rect(card_x, top, right - card_x, h, m.card_radius, t.pal.card);
-    let row_cy = top + m.row_h / 2.0 + m.dp(4.0);
-    widgets::tile(&mut c, t, card_x + m.inner, row_cy - m.icon / 2.0, GREEN, Icon::Install);
-    let tx = card_x + m.inner + m.icon + m.icon_gap;
-    c.text_vc(&f.heading, "kernelsu_patched.img", tx, row_cy - m.dp(10.0), m.row_title_px, t.pal.text, Some(right - tx - m.inner));
-    c.text_vc(&f.body, "正在写入 init_boot_b", tx, row_cy + m.dp(12.0), m.sub_px, t.pal.subtitle, None);
-    let bar_y = top + h - m.dp(30.0);
-    widgets::progress_bar(&mut c, t, card_x + m.inner, bar_y, right - card_x - m.inner * 2.0 - m.dp(46.0), 0.68);
-    let pct = "68%";
-    let pw = c.text_width(&f.heading, pct, m.sub_px);
-    c.text_vc(&f.heading, pct, right - m.inner - pw, bar_y + m.dp(3.0), m.sub_px, t.pal.accent, None);
-
-    let y = widgets::section(&mut c, t, f, top + h, "日志");
-    widgets::list(&mut c, t, f, y, &[
-        Row::new("修补 ramdisk").trail(Trail::Text("完成")),
-        Row::new("写入 init_boot_a").trail(Trail::Text("完成")),
-        Row::new("写入 init_boot_b").trail(Trail::Text("进行中")),
-        Row::new("校验镜像").trail(Trail::Text("等待")),
-    ]);
-    c
+    out.extend(hits(&items.rows, &[Action::WipeItem(0), Action::WipeItem(1), Action::WipeItem(2), Action::WipeItem(3)]));
+    let y = widgets::footnote(&mut c, t, f, items.bottom, "清除后无法恢复。内部存储里的照片和文件不会一起删除，除非你勾选了它。");
+    let (label, danger) = confirm_label(Confirm::Wipe);
+    let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+    out.push(Hit { rect: track, action: Action::Confirm(Confirm::Wipe) });
+    Frame { canvas: c, hits: out, title: "清除数据", back: true, hero: false, pattern: None }
 }
