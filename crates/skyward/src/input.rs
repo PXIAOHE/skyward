@@ -1,0 +1,228 @@
+use anyhow::{anyhow, Context, Result};
+use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode, PropType, SynchronizationCode};
+use skyward_ui::app::{Key, Touch};
+use std::collections::HashSet;
+use std::ffi::CString;
+use std::io::{self, ErrorKind};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
+
+pub enum Event {
+    Touch(Touch),
+    Key(Key),
+}
+
+const KEYS: [KeyCode; 4] = [KeyCode::KEY_POWER, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_BACK];
+
+fn key_of(code: KeyCode) -> Option<Key> {
+    match code {
+        KeyCode::KEY_POWER => Some(Key::Power),
+        KeyCode::KEY_VOLUMEUP => Some(Key::VolumeUp),
+        KeyCode::KEY_VOLUMEDOWN => Some(Key::VolumeDown),
+        KeyCode::KEY_BACK => Some(Key::Back),
+        _ => None,
+    }
+}
+
+/// A device read failed because it was unplugged.
+fn gone(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ENODEV)
+}
+
+/// The direct-touch panel. Only the first finger is followed (multitouch
+/// protocol B, slot 0).
+struct Panel {
+    dev: Device,
+    path: PathBuf,
+    x_range: (i32, i32),
+    y_range: (i32, i32),
+    slot: i32,
+    down: bool,
+    was_down: bool,
+    raw: (i32, i32),
+    moved: bool,
+}
+
+impl Panel {
+    fn new(path: PathBuf, dev: Device) -> Result<Self> {
+        let mut x_range = None;
+        let mut y_range = None;
+        for (axis, info) in dev.get_absinfo().context("read touch axis ranges")? {
+            match axis {
+                AbsoluteAxisCode::ABS_MT_POSITION_X => x_range = Some((info.minimum(), info.maximum())),
+                AbsoluteAxisCode::ABS_MT_POSITION_Y => y_range = Some((info.minimum(), info.maximum())),
+                _ => {}
+            }
+        }
+        let x_range = x_range.ok_or_else(|| anyhow!("touch panel reports no X range"))?;
+        let y_range = y_range.ok_or_else(|| anyhow!("touch panel reports no Y range"))?;
+        eprintln!("touch {:?}: x {:?} y {:?}", dev.name().unwrap_or("?"), x_range, y_range);
+        dev.set_nonblocking(true).context("make touch non-blocking")?;
+        Ok(Panel { dev, path, x_range, y_range, slot: 0, down: false, was_down: false, raw: (0, 0), moved: false })
+    }
+
+    fn read(&mut self, w: f32, h: f32, out: &mut Vec<Event>) -> io::Result<()> {
+        let summaries: Vec<EventSummary> = match self.dev.fetch_events() {
+            Ok(events) => events.map(|e| e.destructure()).collect(),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        for s in summaries {
+            match s {
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, v) => self.slot = v,
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, v) if self.slot == 0 => self.down = v >= 0,
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_X, v) if self.slot == 0 => {
+                    self.raw.0 = v;
+                    self.moved = true;
+                }
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, v) if self.slot == 0 => {
+                    self.raw.1 = v;
+                    self.moved = true;
+                }
+                EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
+                    let span = |r: (i32, i32)| (r.1 - r.0).max(1) as f32;
+                    let x = (self.raw.0 - self.x_range.0) as f32 / span(self.x_range) * w;
+                    let y = (self.raw.1 - self.y_range.0) as f32 / span(self.y_range) * h;
+                    match (self.was_down, self.down) {
+                        (false, true) => out.push(Event::Touch(Touch::Down(x, y))),
+                        (true, true) if self.moved => out.push(Event::Touch(Touch::Move(x, y))),
+                        (true, false) => out.push(Event::Touch(Touch::Up)),
+                        _ => {}
+                    }
+                    self.was_down = self.down;
+                    self.moved = false;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The touchscreen and the hardware buttons. /dev/input is watched, so a
+/// device that shows up later, such as a touch panel whose driver module
+/// loads after the UI starts, is picked up when it appears.
+pub struct Inputs {
+    watch: OwnedFd,
+    panel: Option<Panel>,
+    buttons: Vec<(PathBuf, Device)>,
+    seen: HashSet<PathBuf>,
+    w: f32,
+    h: f32,
+}
+
+impl Inputs {
+    pub fn open(w: u32, h: u32) -> Result<Self> {
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error()).context("create inotify instance");
+        }
+        let watch = unsafe { OwnedFd::from_raw_fd(fd) };
+        let dir = CString::new("/dev/input")?;
+        // IN_ATTRIB too: ueventd sets a node's owner and mode right after
+        // creating it, and the node may only open once that is done.
+        if unsafe { libc::inotify_add_watch(fd, dir.as_ptr(), libc::IN_CREATE | libc::IN_ATTRIB) } < 0 {
+            return Err(io::Error::last_os_error()).context("watch /dev/input");
+        }
+        let mut inputs = Inputs { watch, panel: None, buttons: Vec::new(), seen: HashSet::new(), w: w as f32, h: h as f32 };
+        inputs.scan()?;
+        if inputs.panel.is_none() {
+            eprintln!("no touch panel yet; waiting for one to appear under /dev/input");
+        }
+        Ok(inputs)
+    }
+
+    /// Take in the devices under /dev/input not seen before: the first
+    /// direct multitouch device as the panel, and every device with a
+    /// power, volume or back key as buttons.
+    fn scan(&mut self) -> Result<()> {
+        for (path, dev) in evdev::enumerate() {
+            if !self.seen.insert(path.clone()) {
+                continue;
+            }
+            let direct = dev.properties().contains(PropType::DIRECT);
+            let mt = dev
+                .supported_absolute_axes()
+                .is_some_and(|a| a.contains(AbsoluteAxisCode::ABS_MT_POSITION_X) && a.contains(AbsoluteAxisCode::ABS_MT_POSITION_Y));
+            let keys = dev.supported_keys().is_some_and(|k| KEYS.iter().any(|c| k.contains(*c)));
+            eprintln!("input {}: {:?} direct={direct} multitouch={mt} keys={keys}", path.display(), dev.name().unwrap_or("?"));
+            if direct && mt && self.panel.is_none() {
+                self.panel = Some(Panel::new(path, dev)?);
+            } else if keys {
+                dev.set_nonblocking(true).context("make buttons non-blocking")?;
+                self.buttons.push((path, dev));
+            }
+        }
+        Ok(())
+    }
+
+    /// Empty the watch's queue; true when /dev/input changed.
+    fn changed(&self) -> Result<bool> {
+        let mut buf = [0u8; 4096];
+        let mut any = false;
+        loop {
+            let n = unsafe { libc::read(self.watch.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if n >= 0 {
+                any = true;
+                continue;
+            }
+            let err = io::Error::last_os_error();
+            match err.kind() {
+                ErrorKind::WouldBlock => return Ok(any),
+                ErrorKind::Interrupted => continue,
+                _ => return Err(err).context("read /dev/input changes"),
+            }
+        }
+    }
+
+    pub fn fds(&self) -> Vec<RawFd> {
+        let mut fds = vec![self.watch.as_raw_fd()];
+        fds.extend(self.panel.iter().map(|p| p.dev.as_raw_fd()));
+        fds.extend(self.buttons.iter().map(|(_, b)| b.as_raw_fd()));
+        fds
+    }
+
+    /// Everything the devices have queued, as touches and key presses.
+    pub fn read(&mut self) -> Result<Vec<Event>> {
+        if self.changed()? {
+            self.scan()?;
+        }
+        let mut out = Vec::new();
+        if let Some(panel) = &mut self.panel {
+            match panel.read(self.w, self.h, &mut out) {
+                Ok(()) => {}
+                Err(e) if gone(&e) => {
+                    eprintln!("input {}: removed", panel.path.display());
+                    self.seen.remove(&panel.path);
+                    self.panel = None;
+                }
+                Err(e) => return Err(e).context("read touch events"),
+            }
+        }
+        let mut removed = Vec::new();
+        for (i, (path, b)) in self.buttons.iter_mut().enumerate() {
+            match b.fetch_events() {
+                Ok(events) => {
+                    for e in events {
+                        if let EventSummary::Key(_, code, 1) = e.destructure() {
+                            if let Some(k) = key_of(code) {
+                                out.push(Event::Key(k));
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) if gone(&e) => {
+                    eprintln!("input {}: removed", path.display());
+                    removed.push(i);
+                }
+                Err(e) => return Err(e).context("read button events"),
+            }
+        }
+        for i in removed.into_iter().rev() {
+            let (path, _) = self.buttons.remove(i);
+            self.seen.remove(&path);
+        }
+        Ok(out)
+    }
+}

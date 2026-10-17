@@ -5,6 +5,11 @@ use skyward_sys::{bcb, Power};
 use skyward_vab::SnapshotState;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "android")]
+mod input;
+#[cfg(target_os = "android")]
+mod ui;
+
 #[derive(Parser)]
 #[command(name = "skyward", version, about = "Skyward recovery")]
 struct Cli {
@@ -46,6 +51,26 @@ enum Cmd {
     Mount,
     /// Unmount what `mount` mounted and remove its device-mapper devices.
     Umount,
+    /// List the display connectors, their modes, CRTCs and planes.
+    #[cfg(target_os = "android")]
+    Kms {
+        #[arg(long, default_value = "/dev/dri/card0")]
+        card: String,
+    },
+    /// Drive the panel and touchscreen with the recovery UI.
+    #[cfg(target_os = "android")]
+    Ui {
+        #[arg(long, default_value = "/skyward/device.toml")]
+        config: std::path::PathBuf,
+        #[arg(long, default_value = "/skyward/MiSansVF.ttf")]
+        font: std::path::PathBuf,
+        /// Open on the unlock page instead of the home page.
+        #[arg(long)]
+        unlock: bool,
+        /// After each frame, also write it as raw RGBA to this file.
+        #[arg(long)]
+        dump: Option<std::path::PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -81,6 +106,16 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Umount => skyward_vab::unmount_partitions(booted_slot()?),
+        #[cfg(target_os = "android")]
+        Cmd::Kms { card } => {
+            print!("{}", skyward_ui::surface::kms::report(&card)?);
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Ui { config, font, unlock, dump } => {
+            let start = if unlock { skyward_ui::app::Screen::Decrypt } else { skyward_ui::app::Screen::Home };
+            ui::run(&config, &font, start, dump.as_deref())
+        }
     }
 }
 

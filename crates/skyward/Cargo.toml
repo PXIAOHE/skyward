@@ -18,3 +18,8 @@ skyward-modules = { path = "../skyward-modules" }
 skyward-info = { path = "../skyward-info" }
 skyward-sys = { path = "../skyward-sys" }
 skyward-lp = { path = "../skyward-lp" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+evdev = "0.13.2"
+libc = { workspace = true }
+skyward-ui = { path = "../skyward-ui" }
