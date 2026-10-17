@@ -15,6 +15,11 @@ pub mod ramdisk {
     pub const ADB_KEYS: &str = "adb_keys";
     /// The first property file init loads in recovery mode.
     pub const PROP_DEFAULT: &str = "prop.default";
+
+    /// Whether the running root is Skyward's recovery ramdisk.
+    pub fn in_recovery() -> bool {
+        std::path::Path::new("/").join(CONFIG).exists()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

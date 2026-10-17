@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use skyward_config::DeviceConfig;
 use skyward_sys::prop;
 use skyward_vab::{Slot, SnapshotState};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::ErrorKind;
@@ -133,19 +134,20 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         Some("unlocked") => Some(true),
         Some(other) => bail!("androidboot.vbmeta.device_state {other:?}"),
     };
+    let system = SystemProps::current()?;
     Ok(DeviceInfo {
-        // The system names the exact edition; the configured model covers
-        // recovery environments that do not carry the property.
-        model: prop("ro.product.marketname").unwrap_or_else(|| cfg.device.model.clone()),
+        // The system names the exact edition; the configured model covers a
+        // system whose partitions are not mounted.
+        model: system.get("ro.product.marketname").unwrap_or_else(|| cfg.device.model.clone()),
         codename: cfg.device.codename.clone(),
         soc: cfg.device.soc.clone(),
         cpu: cpu(Path::new(CPU))?,
         ram_kib: mem_total(&read("/proc/meminfo")?)?,
         panel: (d.width > 0 && d.height > 0).then_some((d.width, d.height)),
         screen: d.diagonal,
-        os_version: prop(&cfg.device.os_version_prop),
-        android: prop("ro.build.version.release"),
-        security_patch: prop("ro.build.version.security_patch").map(|s| s.parse()).transpose()?,
+        os_version: system.get(&cfg.device.os_version_prop),
+        android: system.get("ro.build.version.release"),
+        security_patch: system.get("ro.build.version.security_patch").map(|s| s.parse()).transpose()?,
         kernel: kernel_release()?,
         storage: storage()?,
         battery: battery(Path::new(POWER_SUPPLY))?,
@@ -153,6 +155,69 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         snapshot: skyward_vab::snapshot_state()?,
         boot: Boot { unlocked, verified: skyward_block::boot_param("androidboot.verifiedbootstate")? },
     })
+}
+
+/// Build properties of the system the About page describes.
+enum SystemProps {
+    /// Android is running and keeps them in its property area.
+    Running,
+    /// Recovery is running; they come from the build.prop files of the
+    /// installed system's mounted partitions, none when nothing is mounted.
+    Installed(HashMap<String, String>),
+}
+
+impl SystemProps {
+    fn current() -> Result<SystemProps> {
+        if !skyward_config::ramdisk::in_recovery() {
+            return Ok(SystemProps::Running);
+        }
+        let props = match skyward_vab::current_slot()? {
+            Some(slot) => installed_props(slot)?,
+            None => HashMap::new(),
+        };
+        Ok(SystemProps::Installed(props))
+    }
+
+    fn get(&self, name: &str) -> Option<String> {
+        match self {
+            SystemProps::Running => prop(name),
+            SystemProps::Installed(props) => props.get(name).cloned(),
+        }
+    }
+}
+
+/// The order init reads build.prop files in at boot; later files override
+/// earlier ones.
+const PROP_ORDER: [&str; 8] = ["system", "system_ext", "system_dlkm", "vendor", "vendor_dlkm", "odm_dlkm", "odm", "product"];
+
+/// The installed system's build properties from its mounted partitions, in
+/// init's order. Partitions init does not list, such as Xiaomi's mi_ext,
+/// come after the ones it does.
+pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
+    let base = |m: &skyward_vab::Mounted| -> String {
+        m.partition.strip_suffix(slot.suffix()).expect("mounted partitions carry the slot suffix").to_string()
+    };
+    let mut parts = skyward_vab::mounted_partitions(slot)?;
+    parts.sort_by_key(|m| PROP_ORDER.iter().position(|b| *b == base(m)).unwrap_or(PROP_ORDER.len()));
+    let mut props = HashMap::new();
+    for m in &parts {
+        let files: &[&str] = match base(m).as_str() {
+            "system" => &["system/build.prop"],
+            "vendor" => &["default.prop", "build.prop"],
+            _ => &["etc/build.prop"],
+        };
+        for f in files {
+            let path = m.mount_point.join(f);
+            match fs::metadata(&path) {
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
+                Ok(_) => {}
+            }
+            rsproperties::load_properties_from_file(&path, None, "u:r:init:s0", &mut props)
+                .with_context(|| format!("read {}", path.display()))?;
+        }
+    }
+    Ok(props)
 }
 
 fn read(path: impl AsRef<Path>) -> Result<String> {
