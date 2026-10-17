@@ -27,3 +27,9 @@ path = "/odm/bin/touch_report"
 [[service]]
 path = "/odm/bin/touchsensor"
 libraries = ["/odm/lib64", "/system/lib64"]
+
+# qcom-hv-haptics. Waveform 0 is the click: 8 pattern samples at 6667 µs
+# each (its debugfs entry, haptics/effect0).
+[haptics]
+click = 0
+click_ms = 53

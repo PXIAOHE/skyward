@@ -281,6 +281,59 @@ pub fn back_rect(t: &Theme) -> Rect {
     Rect::new(0.0, m.back_cy - m.dp(28.0), m.back_x + m.back_w + m.dp(24.0), m.dp(56.0))
 }
 
+/// How deep the back cue bulges for a finger `travel` pixels in from the
+/// edge: about 0.31 of the travel at first, flattening out at 42 dp.
+pub fn back_cue_depth(t: &Theme, travel: f32) -> f32 {
+    let d = (travel / t.m.px_per_dp).clamp(0.0, 272.6);
+    t.m.dp(0.3096 * d - 5.679e-4 * d * d)
+}
+
+/// The back cue swelling from a screen edge while a finger swipes in from
+/// it: a dark wave `depth` pixels deep at its crest around `cy`, edged in
+/// light blue, holding a white `<` once lifting there would go back. The
+/// `<` points back on either edge.
+pub fn back_cue(c: &mut Canvas, t: &Theme, from_left: bool, cy: f32, depth: f32, arrow: bool) {
+    const FILL: Rgba = Rgba::rgb(48, 48, 48);
+    const RIM: Rgba = Rgba::rgb(117, 170, 246);
+    let m = &t.m;
+    if depth <= 0.0 {
+        return;
+    }
+    // A Gaussian bell narrowed to nothing past 93 dp from its crest; the
+    // rim hugs it and runs on along the edge as a thin line a little
+    // further.
+    let sigma = m.dp(60.7);
+    let rim = m.dp(0.77);
+    let taper = |dy: f32, from: f32| {
+        let k = ((dy.abs() - from) / m.dp(24.0)).clamp(0.0, 1.0);
+        1.0 - k * k * (3.0 - 2.0 * k)
+    };
+    let (fill_from, rim_from) = (m.dp(93.0), m.dp(111.0));
+    let reach = rim_from + m.dp(24.0);
+    let span = |c: &mut Canvas, y: i32, w: f32, color: Rgba| {
+        let full = w.floor() as i32;
+        for i in 0..=full {
+            let cov = if i < full { 1.0 } else { w - full as f32 };
+            let x = if from_left { i } else { m.w as i32 - 1 - i };
+            c.blend(x, y, color, cov);
+        }
+    };
+    for y in (cy - reach).floor() as i32..(cy + reach).ceil() as i32 {
+        let dy = y as f32 + 0.5 - cy;
+        let fill = depth * (-(dy / sigma).powi(2)).exp() * taper(dy, fill_from);
+        span(c, y, fill + rim * taper(dy, rim_from), RIM);
+        span(c, y, fill, FILL);
+    }
+    if arrow {
+        let (w, h, sw) = (m.dp(6.0), m.dp(12.7), m.dp(2.1));
+        let cx = if from_left { 0.53 * depth } else { m.w as f32 - 0.53 * depth };
+        let (tip, end) = (cx - w / 2.0 + sw / 2.0, cx + w / 2.0 - sw / 2.0);
+        let white = Rgba::rgb(255, 255, 255);
+        c.line(tip, cy, end, cy - h / 2.0 + sw / 2.0, sw, white);
+        c.line(tip, cy, end, cy + h / 2.0 - sw / 2.0, sw, white);
+    }
+}
+
 /// Optional `<` and the large page title; the status bar is laid over the
 /// page when it is shown. Returns where the page content starts.
 pub fn header(c: &mut Canvas, t: &Theme, f: &Fonts, title: &str, back: bool) -> f32 {

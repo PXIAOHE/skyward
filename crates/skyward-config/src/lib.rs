@@ -31,6 +31,20 @@ pub struct DeviceConfig {
     pub services: Vec<Service>,
     #[serde(default)]
     pub decrypt: Decrypt,
+    /// The vibration motor's click, on phones that have one.
+    #[serde(default)]
+    pub haptics: Option<Haptics>,
+}
+
+/// A waveform the vibration motor's driver keeps, played through the
+/// kernel's force-feedback events. The driver plays it until told to stop
+/// and does not say how long it is, so its length is given here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct Haptics {
+    /// The driver's number for its click waveform.
+    pub click: i16,
+    /// How long the click plays, in milliseconds.
+    pub click_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

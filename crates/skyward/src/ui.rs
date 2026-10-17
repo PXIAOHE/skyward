@@ -1,3 +1,4 @@
+use crate::haptics::Haptics;
 use crate::input::{monotonic_ms, Event, Inputs};
 use anyhow::{anyhow, Context, Result};
 use skyward_config::DeviceConfig;
@@ -106,6 +107,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h)?;
+    let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
     let backlight = Backlight::open()?;
     let mut app = App::new(start, w, h, cfg.display.density as f32 / 160.0);
     // Keep the level the boot splash had, so the panel does not jump; a
@@ -158,6 +160,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
                     Effect::Display(true) => backlight.set(app.state.brightness)?,
                     Effect::Display(false) => backlight.off()?,
                     Effect::Reboot(target) => power(target)?,
+                    Effect::Haptic => {
+                        if let Some(h) = &mut haptics {
+                            h.click()?;
+                        }
+                    }
                 }
             }
         }

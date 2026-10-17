@@ -6,6 +6,8 @@ use skyward_vab::SnapshotState;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "android")]
+mod haptics;
+#[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
 mod services;
@@ -71,6 +73,17 @@ enum Cmd {
     Kms {
         #[arg(long, default_value = "/dev/dri/card0")]
         card: String,
+    },
+    /// Play a waveform of the vibration motor once, saying what its driver
+    /// reports of it.
+    #[cfg(target_os = "android")]
+    Haptic {
+        /// The driver's waveform number; 0 is the click.
+        #[arg(default_value_t = 0)]
+        effect: i16,
+        /// Stop it after this many milliseconds.
+        #[arg(long, default_value_t = 60)]
+        stop: u64,
     },
     /// Save what the panel shows, as raw RGBA files cap-000.rgba onwards.
     #[cfg(target_os = "android")]
@@ -153,6 +166,8 @@ fn main() -> Result<()> {
             print!("{}", skyward_ui::surface::kms::report(&card)?);
             Ok(())
         }
+        #[cfg(target_os = "android")]
+        Cmd::Haptic { effect, stop } => haptics::probe(effect, stop),
         #[cfg(target_os = "android")]
         Cmd::Capture { out, count, interval, card } => {
             std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;

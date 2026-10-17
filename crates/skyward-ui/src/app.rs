@@ -144,6 +144,8 @@ pub enum Effect {
     /// Turn the panel off or back on.
     Display(bool),
     Reboot(Target),
+    /// A short tap of the vibration motor.
+    Haptic,
 }
 
 enum Drag {
@@ -152,8 +154,10 @@ enum Drag {
     /// press began at a screen edge (true for the left one).
     Press { x: f32, y: f32, action: Option<Action>, edge: Option<bool> },
     Scroll { last: f32 },
-    /// Swiping in from a screen edge; past the threshold, lifting goes back.
-    Edge { start: f32, from_left: bool, armed: bool },
+    /// Swiping in from a screen edge, the finger now `x` across; the cue
+    /// keeps to height `cy`, set by where the swipe began. Past the
+    /// threshold, lifting goes back.
+    Edge { start: f32, from_left: bool, armed: bool, x: f32, cy: f32 },
     Slider(Rect),
     Confirm { which: Confirm, track: Rect, grab: f32 },
     Pattern,
@@ -168,6 +172,11 @@ const MAX_FLING_DP: f32 = 8000.0;
 /// A glide running into a page's end faster than this, in dp per second,
 /// swings out on the slower spring.
 const HARD_BOUNCE_DP: f32 = 1667.0;
+/// How far, in dp, a swipe from an edge has to come in to go back.
+const BACK_SWIPE_DP: f32 = 56.0;
+/// The back cue sits this far, in dp, above where the finger came down,
+/// and stays at that height however the finger then wanders.
+const CUE_LIFT_DP: f32 = 9.0;
 
 pub struct App {
     pub state: State,
@@ -186,6 +195,9 @@ pub struct App {
     pull: f32,
     /// The page springing back after being pulled or thrown past an end.
     bounce: Option<Spring>,
+    /// The back cue shrinking away after a swipe that did not go back:
+    /// its edge, where it sits, and its depth.
+    cue: Option<(bool, f32, Spring)>,
     display_on: bool,
     dirty: bool,
     w: u32,
@@ -206,6 +218,7 @@ impl App {
             fling: None,
             pull: 0.0,
             bounce: None,
+            cue: None,
             display_on: true,
             dirty: true,
             w,
@@ -239,11 +252,11 @@ impl App {
         std::mem::take(&mut self.dirty)
     }
 
-    /// When time next has to pass through [`App::tick`]: at once while the
-    /// page glides or springs back, else when a shown message should
+    /// When time next has to pass through [`App::tick`]: at once while
+    /// something moves on its own, else when a shown message should
     /// disappear.
     pub fn deadline(&self) -> Option<u64> {
-        if self.fling.is_some() || self.bounce.is_some() {
+        if self.fling.is_some() || self.bounce.is_some() || self.cue.is_some() {
             return Some(0);
         }
         self.toast.as_ref().map(|t| t.1)
@@ -279,6 +292,12 @@ impl App {
             self.dirty = true;
             if b.at(now).1 {
                 self.bounce = None;
+            }
+        }
+        if let Some((_, _, s)) = self.cue {
+            self.dirty = true;
+            if s.at(now).1 {
+                self.cue = None;
             }
         }
     }
@@ -337,8 +356,9 @@ impl App {
     }
 
     /// Draw what the panel shows now: the visible part of the page, pulled
-    /// past an end if it is, the bar over a scrolled page, the status bar
-    /// and any message.
+    /// past an end if it is, the bar over a scrolled page, the status bar,
+    /// any message, and the back cue while a swipe from an edge is under
+    /// way.
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, data: DataState, clock: &str, now: u64) {
         self.frame(f, info, data);
         let t = self.theme();
@@ -379,6 +399,17 @@ impl App {
         widgets::status_bar(out, &t, f, &Bar { clock, battery }, status);
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
+        }
+        match self.drag {
+            Drag::Edge { start, from_left, armed, x, cy } => {
+                let travel = if from_left { x - start } else { start - x };
+                widgets::back_cue(out, &t, from_left, cy, widgets::back_cue_depth(&t, travel), armed);
+            }
+            _ => {
+                if let Some((from_left, cy, s)) = self.cue {
+                    widgets::back_cue(out, &t, from_left, cy, s.at(now).0.max(0.0), false);
+                }
+            }
         }
     }
 
@@ -503,14 +534,16 @@ impl App {
                         Drag::Pattern
                     }
                     _ => {
-                        let at_edge = if x < edge {
+                        let side = if x < edge {
                             Some(true)
                         } else if x > m.w as f32 - edge {
                             Some(false)
                         } else {
                             None
                         };
-                        Drag::Press { x, y, action, edge: at_edge }
+                        // The first page has nothing to go back to: its edges
+                        // are like the rest of it.
+                        Drag::Press { x, y, action, edge: side.filter(|_| self.stack.len() > 1) }
                     }
                 };
             }
@@ -519,7 +552,10 @@ impl App {
                     self.tracker.add(now, y);
                     let (dx, dy) = (x - x0, y - y0);
                     self.drag = match at_edge {
-                        Some(from_left) if dx.abs() > slop && dx.abs() > dy.abs() => Drag::Edge { start: x0, from_left, armed: false },
+                        Some(from_left) if dx.abs() > slop && dx.abs() > dy.abs() => {
+                            self.dirty = true;
+                            Drag::Edge { start: x0, from_left, armed: false, x, cy: y0 - m.dp(CUE_LIFT_DP) }
+                        }
                         _ if dy.abs() > slop => {
                             self.drag_by(y0 - y);
                             Drag::Scroll { last: y }
@@ -532,9 +568,16 @@ impl App {
                     self.drag_by(last - y);
                     self.drag = Drag::Scroll { last: y };
                 }
-                Drag::Edge { start, from_left, .. } => {
+                Drag::Edge { start, from_left, armed, cy, .. } => {
                     let travel = if from_left { x - start } else { start - x };
-                    self.drag = Drag::Edge { start, from_left, armed: travel > m.dp(56.0) };
+                    let ready = travel > m.dp(BACK_SWIPE_DP);
+                    // A tap of the motor as the `<` appears, as the system
+                    // gives.
+                    if ready && !armed && self.state.vibrate {
+                        fx.push(Effect::Haptic);
+                    }
+                    self.drag = Drag::Edge { start, from_left, armed: ready, x, cy };
+                    self.dirty = true;
                 }
                 Drag::Slider(track) => {
                     fx.push(self.set_brightness(&t, track, x));
@@ -569,6 +612,13 @@ impl App {
                     }
                 }
                 Drag::Edge { armed: true, .. } => self.back(),
+                Drag::Edge { start, from_left, x, cy, .. } => {
+                    // Short of going back, the cue sinks back into the edge.
+                    let travel = if from_left { x - start } else { start - x };
+                    let depth = widgets::back_cue_depth(&t, travel);
+                    self.cue = Some((from_left, cy, Spring::new(now, depth, 0.0, 0.15)));
+                    self.dirty = true;
+                }
                 Drag::Confirm { which, track, .. } => {
                     let done = self.state.confirm > 0.9;
                     self.state.confirm = 0.0;
@@ -760,11 +810,18 @@ mod tests {
         assert_eq!(app.screen(), Screen::Home, "back on the first page stays there");
     }
 
+    /// `screen` opened from the home page, so there is a page to go back
+    /// to.
+    fn opened(screen: Screen, f: &Fonts, i: &DeviceInfo) -> App {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        tap(&mut app, f, i, Action::Open(screen));
+        app
+    }
+
     #[test]
     fn swipe_from_the_left_edge_goes_back() {
         let (f, i) = (fonts(), info());
-        let mut app = App::new(Screen::Home, W, H, PPD);
-        tap(&mut app, &f, &i, Action::Open(Screen::Reboot));
+        let mut app = opened(Screen::Reboot, &f, &i);
         app.touch(Touch::Down(10.0, 1600.0), &f, 0);
         app.touch(Touch::Move(90.0, 1605.0), &f, 0);
         app.touch(Touch::Move(320.0, 1610.0), &f, 0);
@@ -774,12 +831,68 @@ mod tests {
 
     #[test]
     fn a_short_edge_swipe_does_not_go_back() {
-        let f = fonts();
-        let mut app = App::new(Screen::Reboot, W, H, PPD);
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
         app.touch(Touch::Down(10.0, 1600.0), &f, 0);
         app.touch(Touch::Move(80.0, 1600.0), &f, 0);
         app.touch(Touch::Up, &f, 0);
         assert_eq!(app.screen(), Screen::Reboot);
+    }
+
+    #[test]
+    fn the_first_page_has_no_edge_swipe_back() {
+        let f = fonts();
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 8);
+        assert!(app.touch(Touch::Move(400.0, 1600.0), &f, 16).is_empty(), "no tap of the motor");
+        assert!(!matches!(app.drag, Drag::Edge { .. }), "no cue");
+        app.touch(Touch::Up, &f, 24);
+        assert_eq!(app.screen(), Screen::Home);
+        assert_eq!(app.deadline(), None, "nothing left on screen to settle");
+    }
+
+    #[test]
+    fn the_back_cue_taps_once_as_it_arms_and_sinks_when_let_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        let ready = app.theme().m.dp(BACK_SWIPE_DP);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        assert!(app.touch(Touch::Move(80.0, 1600.0), &f, 8).is_empty());
+        assert_eq!(app.touch(Touch::Move(20.0 + ready, 1600.0), &f, 16), vec![Effect::Haptic]);
+        assert!(app.touch(Touch::Move(60.0 + ready, 1600.0), &f, 24).is_empty(), "one tap while armed");
+        app.touch(Touch::Move(40.0, 1600.0), &f, 32);
+        app.touch(Touch::Up, &f, 40);
+        assert_eq!(app.screen(), Screen::Reboot, "pulled back in, it does not go back");
+        assert_eq!(app.deadline(), Some(0), "the cue is sinking back");
+        app.tick(1000);
+        assert_eq!(app.deadline(), None);
+    }
+
+    #[test]
+    fn the_back_cue_stays_quiet_with_touch_vibration_off() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        app.state.vibrate = false;
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 8);
+        assert!(app.touch(Touch::Move(400.0, 1600.0), &f, 16).is_empty());
+    }
+
+    #[test]
+    fn the_back_cue_keeps_to_the_height_the_swipe_began_at() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        let at = 1600.0 - app.theme().m.dp(CUE_LIFT_DP);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(80.0, 1610.0), &f, 8);
+        app.touch(Touch::Move(200.0, 1300.0), &f, 16);
+        app.touch(Touch::Move(150.0, 1900.0), &f, 24);
+        let Drag::Edge { cy, .. } = app.drag else { panic!("still swiping in from the edge") };
+        assert_eq!(cy, at, "the finger wandered up and down");
+        app.touch(Touch::Move(40.0, 2100.0), &f, 32);
+        app.touch(Touch::Up, &f, 40);
+        assert_eq!(app.cue.as_ref().map(|c| c.1), Some(at), "it sinks back where it was");
     }
 
     #[test]
