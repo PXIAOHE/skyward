@@ -6,7 +6,9 @@ use std::path::Path;
 
 mod partitions;
 
-pub use partitions::{mount_partitions, mount_point, mounted_partitions, unmount_partitions, Mounted, Mounts};
+pub use partitions::{
+    mount_partitions, mount_point, mounted_partitions, release_partitions, unmount_partitions, Mounted, Mounts,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {

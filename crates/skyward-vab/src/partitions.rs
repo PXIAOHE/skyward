@@ -121,6 +121,23 @@ pub fn mounted_partitions(slot: Slot) -> Result<Vec<Mounted>> {
     Ok(found.into_iter().map(|(_, m)| m).collect())
 }
 
+/// Take the slot's mounted partitions away before an update writes over
+/// them: unmount them and remove their device-mapper devices. A partition
+/// whose mount point is in `busy` still has files in use; it only leaves
+/// the tree, and those files and its device stay until let go. /metadata
+/// stays mounted for the update.
+pub fn release_partitions(slot: Slot, busy: &[PathBuf]) -> Result<()> {
+    for m in mounted_partitions(slot)?.into_iter().rev() {
+        if busy.contains(&m.mount_point) {
+            mount::umount_detach_over(&m.mount_point)?;
+        } else {
+            mount::umount_over(&m.mount_point)?;
+            dm::remove(&m.partition)?;
+        }
+    }
+    Ok(())
+}
+
 /// Undo `mount_partitions`: unmount the slot's partitions where their own
 /// device is what shows, remove their device-mapper devices, and unmount
 /// /metadata.
