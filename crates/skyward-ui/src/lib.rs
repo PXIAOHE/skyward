@@ -5,6 +5,7 @@ pub mod fling;
 pub mod fmt;
 pub mod font;
 pub mod geom;
+pub mod motion;
 pub mod pages;
 pub mod surface;
 pub mod theme;

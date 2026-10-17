@@ -96,6 +96,12 @@ impl Fling {
         let t = (now.saturating_sub(self.start) as f32 / self.duration).min(1.0);
         (self.from + self.distance * ease(t), t >= 1.0)
     }
+
+    /// How fast the glide moves at `now`, in pixels per second, signed
+    /// like its distance.
+    pub fn velocity(&self, now: u64) -> f32 {
+        (self.at(now + 1).0 - self.at(now).0) * 1000.0
+    }
 }
 
 /// The share of the glide's distance covered at share `t` of its time: a

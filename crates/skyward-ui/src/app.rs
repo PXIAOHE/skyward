@@ -2,6 +2,7 @@ use crate::canvas::Canvas;
 use crate::fling::{Fling, Tracker};
 use crate::font::Fonts;
 use crate::geom::Rect;
+use crate::motion::{self, Spring};
 use crate::pages::{self, Ctx};
 use crate::theme::Theme;
 use crate::widgets::{self, Bar};
@@ -164,6 +165,9 @@ const TOAST_MS: u64 = 2000;
 const MIN_FLING_DP: f32 = 50.0;
 /// The fastest a page starts gliding, in dp per second.
 const MAX_FLING_DP: f32 = 8000.0;
+/// A glide running into a page's end faster than this, in dp per second,
+/// swings out on the slower spring.
+const HARD_BOUNCE_DP: f32 = 1667.0;
 
 pub struct App {
     pub state: State,
@@ -177,6 +181,11 @@ pub struct App {
     tracker: Tracker,
     /// The page gliding on after a flick.
     fling: Option<Fling>,
+    /// How far a dragging finger has pulled the page past an end:
+    /// negative past the top, positive past the bottom.
+    pull: f32,
+    /// The page springing back after being pulled or thrown past an end.
+    bounce: Option<Spring>,
     display_on: bool,
     dirty: bool,
     w: u32,
@@ -195,6 +204,8 @@ impl App {
             drag: Drag::Idle,
             tracker: Tracker::default(),
             fling: None,
+            pull: 0.0,
+            bounce: None,
             display_on: true,
             dirty: true,
             w,
@@ -229,16 +240,17 @@ impl App {
     }
 
     /// When time next has to pass through [`App::tick`]: at once while the
-    /// page glides, else when a shown message should disappear.
+    /// page glides or springs back, else when a shown message should
+    /// disappear.
     pub fn deadline(&self) -> Option<u64> {
-        if self.fling.is_some() {
+        if self.fling.is_some() || self.bounce.is_some() {
             return Some(0);
         }
         self.toast.as_ref().map(|t| t.1)
     }
 
-    /// Let time pass: a gliding page moves on, and a message past its
-    /// deadline goes away.
+    /// Let time pass: a gliding page moves on, a page past its end springs
+    /// back, and a message past its deadline goes away.
     pub fn tick(&mut self, now: u64) {
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
@@ -252,10 +264,32 @@ impl App {
                 top.1 = next;
                 self.dirty = true;
             }
-            // A glide stops at its end or where the page ends.
-            if done || next != y {
+            if next != y {
+                // The glide ran into an end: the speed it had left throws
+                // the page past it, and it springs back.
+                let speed = fling.velocity(now);
+                let period = if speed.abs() <= self.theme().m.dp(HARD_BOUNCE_DP) { 0.4 } else { 0.55 };
+                self.bounce = Some(Spring::new(now, 0.0, speed, period));
+                self.fling = None;
+            } else if done {
                 self.fling = None;
             }
+        }
+        if let Some(b) = self.bounce {
+            self.dirty = true;
+            if b.at(now).1 {
+                self.bounce = None;
+            }
+        }
+    }
+
+    /// How far past its end the page shows at `now`: negative past the
+    /// top, positive past the bottom.
+    fn overscroll(&self, now: u64) -> f32 {
+        if self.pull != 0.0 {
+            motion::rubber(self.pull, self.h as f32)
+        } else {
+            self.bounce.map_or(0.0, |b| b.at(now).0)
         }
     }
 
@@ -302,24 +336,29 @@ impl App {
         self.top().1 > t.m.dp(60.0)
     }
 
-    /// Draw what the panel shows now: the visible part of the page, the bar
-    /// over a scrolled page, the status bar and any message.
+    /// Draw what the panel shows now: the visible part of the page, pulled
+    /// past an end if it is, the bar over a scrolled page, the status bar
+    /// and any message.
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, data: DataState, clock: &str, now: u64) {
         self.frame(f, info, data);
         let t = self.theme();
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
         }
-        let scroll = self.top().1.round() as usize;
+        let offset = (self.top().1 + self.overscroll(now)).round();
         let bar_shown = self.bar_shown(&t);
         let frame = self.frame.as_ref().expect("rendered above");
+        // The page rows on screen, and the page colour past its ends.
         let row = out.w as usize * 4;
-        let shown = (frame.canvas.h as usize).saturating_sub(scroll).min(out.h as usize);
-        out.data[..shown * row].copy_from_slice(&frame.canvas.data[scroll * row..(scroll + shown) * row]);
-        if shown < out.h as usize {
-            let bg = if frame.hero { t.hero.bottom } else { t.pal.bg };
-            out.fill_rect(0.0, shown as f32, out.w as f32, (out.h as usize - shown) as f32, bg);
+        let first = (-offset).clamp(0.0, out.h as f32) as usize;
+        let last = (frame.canvas.h as f32 - offset).clamp(first as f32, out.h as f32) as usize;
+        if first < last {
+            let from = (offset as isize + first as isize) as usize * row;
+            out.data[first * row..last * row].copy_from_slice(&frame.canvas.data[from..from + (last - first) * row]);
         }
+        let (above, below) = if frame.hero { (t.hero.top, t.hero.bottom) } else { (t.pal.bg, t.pal.bg) };
+        out.fill_rect(0.0, 0.0, out.w as f32, first as f32, above);
+        out.fill_rect(0.0, last as f32, out.w as f32, (out.h as usize - last) as f32, below);
         let (title, back, hero) = (frame.title, frame.back, frame.hero);
         let (bg, chip, ink, status) = if hero {
             (t.hero.top, t.hero.card, t.hero.title, t.hero.status)
@@ -343,6 +382,14 @@ impl App {
         }
     }
 
+    /// Put the page back where it rests, for a page just opened or
+    /// returned to.
+    fn settle_page(&mut self) {
+        self.fling = None;
+        self.pull = 0.0;
+        self.bounce = None;
+    }
+
     fn say(&mut self, text: &str, now: u64) {
         self.toast = Some((text.to_string(), now + TOAST_MS));
         self.dirty = true;
@@ -350,6 +397,7 @@ impl App {
 
     fn open(&mut self, screen: Screen) {
         self.stack.push((screen, 0.0));
+        self.settle_page();
         self.refresh();
     }
 
@@ -357,6 +405,7 @@ impl App {
         if self.stack.len() > 1 {
             self.stack.pop();
             self.state.confirm = 0.0;
+            self.settle_page();
             self.refresh();
         }
     }
@@ -367,6 +416,7 @@ impl App {
             Action::Open(s) => self.open(s),
             Action::Skip => {
                 *self.top_mut() = (Screen::Home, 0.0);
+                self.settle_page();
                 self.refresh();
             }
             Action::Back => self.back(),
@@ -418,6 +468,16 @@ impl App {
                     self.drag = Drag::Scroll { last: y };
                     return fx;
                 }
+                // So does one springing back from past its end, which the
+                // finger then holds out there.
+                if let Some(b) = self.bounce.take() {
+                    let (offset, done) = b.at(now);
+                    if !done {
+                        self.pull = motion::unrubber(offset, self.h as f32);
+                        self.drag = Drag::Scroll { last: y };
+                        return fx;
+                    }
+                }
                 // Over a scrolled page the compact bar covers the top; only
                 // its `<` answers there.
                 let hit = if self.bar_shown(&t) && y < widgets::top_bar_height(&t) {
@@ -461,7 +521,7 @@ impl App {
                     self.drag = match at_edge {
                         Some(from_left) if dx.abs() > slop && dx.abs() > dy.abs() => Drag::Edge { start: x0, from_left, armed: false },
                         _ if dy.abs() > slop => {
-                            self.scroll_by(y0 - y);
+                            self.drag_by(y0 - y);
                             Drag::Scroll { last: y }
                         }
                         _ => Drag::Press { x: x0, y: y0, action, edge: at_edge },
@@ -469,7 +529,7 @@ impl App {
                 }
                 Drag::Scroll { last } => {
                     self.tracker.add(now, y);
-                    self.scroll_by(last - y);
+                    self.drag_by(last - y);
                     self.drag = Drag::Scroll { last: y };
                 }
                 Drag::Edge { start, from_left, .. } => {
@@ -494,6 +554,12 @@ impl App {
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {
                 Drag::Press { action: Some(a), .. } => fx.extend(self.act(a, now)),
+                Drag::Scroll { .. } if self.pull != 0.0 => {
+                    // A page let go past its end springs back.
+                    self.bounce = Some(Spring::new(now, motion::rubber(self.pull, self.h as f32), 0.0, 0.4));
+                    self.pull = 0.0;
+                    self.dirty = true;
+                }
                 Drag::Scroll { .. } => {
                     // A finger lifted while still moving sends the page gliding on.
                     let speed = -self.tracker.velocity(now);
@@ -560,6 +626,29 @@ impl App {
             top.1 = next;
             self.dirty = true;
         }
+    }
+
+    /// Move the page `d` pixels under a dragging finger (positive moves it
+    /// up). Past an end the finger's travel goes into the pull, which the
+    /// page follows with growing resistance; coming back undoes the pull
+    /// before the page scrolls again.
+    fn drag_by(&mut self, d: f32) {
+        self.dirty = true;
+        let mut d = d;
+        if self.pull != 0.0 {
+            let pull = self.pull + d;
+            if pull * self.pull > 0.0 {
+                self.pull = pull;
+                return;
+            }
+            self.pull = 0.0;
+            d = pull;
+        }
+        let max = self.max_scroll();
+        let top = self.top_mut();
+        let next = top.1 + d;
+        top.1 = next.clamp(0.0, max);
+        self.pull = next - top.1;
     }
 
     fn on_knob(&self, track: Rect, x: f32) -> bool {
@@ -694,6 +783,59 @@ mod tests {
     }
 
     #[test]
+    fn pulling_past_the_top_resists_and_springs_back() {
+        let f = fonts();
+        let mut app = App::new(Screen::Reboot, W, H, PPD);
+        app.touch(Touch::Down(700.0, 1000.0), &f, 0);
+        app.touch(Touch::Move(700.0, 1300.0), &f, 100);
+        app.touch(Touch::Move(700.0, 1800.0), &f, 600);
+        let shown = app.overscroll(600);
+        assert!(shown < 0.0 && shown > -700.0, "the page follows less than the finger: {shown}");
+        assert_eq!(app.top().1, 0.0);
+        // Dragging back first undoes the pull.
+        app.touch(Touch::Move(700.0, 1400.0), &f, 1000);
+        assert!(app.overscroll(1000) > shown);
+        app.touch(Touch::Up, &f, 1400);
+        assert!(app.overscroll(1400) < 0.0);
+        assert_eq!(app.deadline(), Some(0));
+        app.tick(1500);
+        assert!(app.overscroll(1500) > app.overscroll(1400), "on its way back");
+        app.tick(3000);
+        assert_eq!(app.overscroll(3000), 0.0);
+        assert_eq!(app.deadline(), None);
+    }
+
+    #[test]
+    fn a_page_pulled_past_its_end_can_be_caught() {
+        let f = fonts();
+        let mut app = App::new(Screen::Reboot, W, H, PPD);
+        app.touch(Touch::Down(700.0, 1000.0), &f, 0);
+        app.touch(Touch::Move(700.0, 1500.0), &f, 500);
+        app.touch(Touch::Up, &f, 1000);
+        app.tick(1050);
+        let held = app.overscroll(1050);
+        app.touch(Touch::Down(700.0, 1200.0), &f, 1050);
+        app.tick(1500);
+        assert!((app.overscroll(1500) - held).abs() < 1.0, "the finger holds it where it was");
+        app.touch(Touch::Up, &f, 1600);
+        app.tick(4000);
+        assert_eq!(app.overscroll(4000), 0.0);
+    }
+
+    #[test]
+    fn scrolling_back_down_past_the_top_pulls_from_the_top() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        app.touch(Touch::Down(700.0, 2000.0), &f, 0);
+        app.touch(Touch::Move(700.0, 1700.0), &f, 100);
+        assert_eq!(app.top().1, 300.0);
+        app.touch(Touch::Move(700.0, 2100.0), &f, 500);
+        assert_eq!(app.top().1, 0.0);
+        assert!(app.overscroll(500) < 0.0, "the last 100 px pull the page down");
+    }
+
+    #[test]
     fn dragging_scrolls_and_does_not_tap() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
@@ -738,13 +880,19 @@ mod tests {
     }
 
     #[test]
-    fn a_glide_stops_at_the_end_of_the_page() {
+    fn a_glide_into_the_end_swings_past_it_and_back() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
         app.frame(&f, &i, DataState::Unmounted);
         let lift = flick(&mut app, &f, 1000, 80.0);
-        app.tick(lift + 100);
+        let mut furthest: f32 = 0.0;
+        for ms in (8..2000).step_by(8) {
+            app.tick(lift + ms);
+            furthest = furthest.max(app.overscroll(lift + ms));
+        }
         assert_eq!(app.top().1, app.max_scroll());
+        assert!(furthest > app.theme().m.dp(8.0), "it ran on past the end: {furthest}");
+        assert_eq!(app.overscroll(lift + 2000), 0.0);
         assert_eq!(app.deadline(), None);
     }
 
