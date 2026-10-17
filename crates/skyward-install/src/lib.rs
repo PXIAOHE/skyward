@@ -8,7 +8,14 @@ pub mod image;
 pub mod ota;
 pub mod package;
 
+#[cfg(target_os = "android")]
+mod ffs;
+#[cfg(target_os = "android")]
+mod run;
+
 pub use image::{ImageKind, Ramdisk};
+#[cfg(target_os = "android")]
+pub use run::{Detach, Installer};
 use skyward_vab::{Slot, SnapshotState};
 
 /// What the installer tells the screen, in the order it happens.

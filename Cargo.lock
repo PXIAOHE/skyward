@@ -1031,6 +1031,8 @@ dependencies = [
  "polyfuse-kernel",
  "sha2",
  "skyward-block",
+ "skyward-info",
+ "skyward-sys",
  "skyward-vab",
  "tempfile",
  "zerocopy",

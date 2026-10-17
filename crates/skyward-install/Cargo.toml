@@ -18,5 +18,9 @@ skyward-vab = { path = "../skyward-vab" }
 zerocopy = { version = "0.8.63", features = ["derive"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+skyward-info = { path = "../skyward-info" }
+skyward-sys = { path = "../skyward-sys" }
+
 [dev-dependencies]
 tempfile = "3.27.0"
