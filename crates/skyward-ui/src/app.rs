@@ -163,6 +163,9 @@ pub struct App {
     pub state: State,
     stack: Vec<(Screen, f32)>,
     frame: Option<Frame>,
+    /// The bar over a scrolled page, drawn once per page and theme since
+    /// it does not move with the page.
+    bar: Option<((Screen, bool), Canvas)>,
     toast: Option<(String, u64)>,
     drag: Drag,
     display_on: bool,
@@ -178,6 +181,7 @@ impl App {
             state: State::default(),
             stack: vec![(start, 0.0)],
             frame: None,
+            bar: None,
             toast: None,
             drag: Drag::Idle,
             display_on: true,
@@ -287,13 +291,21 @@ impl App {
             let bg = if frame.hero { t.hero.bottom } else { t.pal.bg };
             out.fill_rect(0.0, shown as f32, out.w as f32, (out.h as usize - shown) as f32, bg);
         }
-        let (bg, chip, ink, status) = if frame.hero {
+        let (title, back, hero) = (frame.title, frame.back, frame.hero);
+        let (bg, chip, ink, status) = if hero {
             (t.hero.top, t.hero.card, t.hero.title, t.hero.status)
         } else {
             (t.pal.bg, t.pal.card, t.pal.text, t.pal.status)
         };
         if bar_shown {
-            widgets::top_bar(out, &t, f, frame.title, frame.back, bg, chip, ink);
+            let key = (self.screen(), self.state.dark);
+            if self.bar.as_ref().is_none_or(|(k, _)| *k != key) {
+                let mut c = Canvas::new(out.w, widgets::top_bar_height(&t).ceil() as u32);
+                widgets::top_bar(&mut c, &t, f, title, back, bg, chip, ink);
+                self.bar = Some((key, c));
+            }
+            let (_, c) = self.bar.as_ref().expect("drawn above");
+            out.data[..c.data.len()].copy_from_slice(&c.data);
         }
         let battery = info.battery.as_ref().map(|b| (b.level, b.charge == Charge::Charging));
         widgets::status_bar(out, &t, f, &Bar { clock, battery }, status);

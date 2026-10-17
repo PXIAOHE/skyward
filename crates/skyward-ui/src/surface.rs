@@ -133,6 +133,10 @@ pub mod kms {
     struct Buf {
         db: DumbBuffer,
         fb: framebuffer::Handle,
+        /// The buffer mapped for writing for as long as the surface lives;
+        /// mapping it per frame costs a page fault per page on every frame.
+        map: *mut u8,
+        len: usize,
     }
 
     /// A KMS object's properties by name, with their current values.
@@ -444,7 +448,14 @@ pub mod kms {
             let make = || -> Result<Buf> {
                 let db = card.create_dumb_buffer((w, h), fourcc, 32).context("create dumb buffer")?;
                 let fb = card.add_planar_framebuffer(&Planar(&db), FbCmd2Flags::empty()).context("add framebuffer")?;
-                Ok(Buf { db, fb })
+                let len = buffer::Buffer::pitch(&db) as usize * h as usize;
+                let offset = drm_ffi::mode::dumbbuffer::map(card.as_fd(), buffer::Buffer::handle(&db).into(), 0, 0).context("map dumb buffer")?.offset;
+                let fd = card.as_fd().as_raw_fd();
+                let map = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, offset as libc::off_t) };
+                if map == libc::MAP_FAILED {
+                    return Err(std::io::Error::last_os_error()).context("mmap dumb buffer");
+                }
+                Ok(Buf { db, fb, map: map.cast(), len })
             };
             let bufs = [make()?, make()?];
 
@@ -515,6 +526,14 @@ pub mod kms {
         }
     }
 
+    impl Drop for KmsSurface {
+        fn drop(&mut self) {
+            for buf in &self.bufs {
+                unsafe { libc::munmap(buf.map.cast(), buf.len) };
+            }
+        }
+    }
+
     impl Surface for KmsSurface {
         fn size(&self) -> (u32, u32) {
             (self.w, self.h)
@@ -525,21 +544,18 @@ pub mod kms {
                 return Err(anyhow!("canvas {}x{} does not match the display {}x{}", canvas.w, canvas.h, self.w, self.h));
             }
             let order = self.order;
-            let buf = &mut self.bufs[self.back];
+            let buf = &self.bufs[self.back];
             let pitch = buffer::Buffer::pitch(&buf.db) as usize;
             let row = self.w as usize * 4;
-            {
-                let mut map = self.card.map_dumb_buffer(&mut buf.db).context("map dumb buffer")?;
-                let dst = map.as_mut();
-                for y in 0..self.h as usize {
-                    let src = &canvas.data[y * row..(y + 1) * row];
-                    let out = &mut dst[y * pitch..y * pitch + row];
-                    match order {
-                        Order::Rgba => out.copy_from_slice(src),
-                        Order::Bgra => {
-                            for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
-                                *o = [s[2], s[1], s[0], s[3]];
-                            }
+            let dst = unsafe { std::slice::from_raw_parts_mut(buf.map, buf.len) };
+            for y in 0..self.h as usize {
+                let src = &canvas.data[y * row..(y + 1) * row];
+                let out = &mut dst[y * pitch..y * pitch + row];
+                match order {
+                    Order::Rgba => out.copy_from_slice(src),
+                    Order::Bgra => {
+                        for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                            *o = [s[2], s[1], s[0], s[3]];
                         }
                     }
                 }
