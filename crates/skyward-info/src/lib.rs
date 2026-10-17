@@ -330,6 +330,11 @@ fn free_bytes(path: &str) -> Result<u64> {
     Ok(blocks * s.f_frsize)
 }
 
+/// The battery as it is now.
+pub fn battery_now() -> Result<Option<Battery>> {
+    battery(Path::new(POWER_SUPPLY))
+}
+
 /// The first power supply whose type is `Battery`; `None` while no fuel-gauge
 /// driver is loaded.
 fn battery(root: &Path) -> Result<Option<Battery>> {
