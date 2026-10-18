@@ -846,6 +846,30 @@ pub fn progress_bar(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, value: f3
     c.fill_round_rect(x, y, (w * value.clamp(0.0, 1.0)).max(h), h, h / 2.0, t.pal.accent);
 }
 
+/// A card for a long job: what is under way, a line on where it stands,
+/// and a bar when the share done is known. Returns the card's bottom.
+pub fn progress_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, title: &str, detail: &str, done: Option<f32>) -> f32 {
+    let m = &t.m;
+    let (card_x, right) = (m.margin, m.w as f32 - m.margin);
+    let x = card_x + m.inner;
+    let width = right - m.inner - x;
+    let (ink_top, _) = f.heading.ink(m.row_title_px);
+    let title_base = top + m.dp(23.5) - ink_top;
+    let detail_base = title_base + m.dp(20.2);
+    let bar_top = detail_base + m.dp(18.0);
+    let bottom = match done {
+        Some(_) => bar_top + m.dp(6.0) + m.dp(22.0),
+        None => detail_base + m.dp(24.0),
+    };
+    c.fill_round_rect(card_x, top, right - card_x, bottom - top, m.card_radius, t.pal.card);
+    c.text(&f.heading, title, x, title_base, m.row_title_px, t.pal.text, Some(width));
+    c.text(&f.body, detail, x, detail_base, m.sub_px, t.pal.subtitle, Some(width));
+    if let Some(v) = done {
+        progress_bar(c, t, x, bar_top, width, v);
+    }
+    bottom
+}
+
 /// Centres of the nine pattern dots, row by row.
 pub fn pattern_dots(cx: f32, cy: f32, span: f32) -> [(f32, f32); 9] {
     let step = span / 2.0;

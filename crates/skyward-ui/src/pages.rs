@@ -1,4 +1,4 @@
-use crate::app::{Action, Confirm, Frame, HeroArt, Hit, Screen, State, Switch, Target, TARGETS};
+use crate::app::{Action, Confirm, Damage, Frame, HeroArt, Hit, Install, Pick, Screen, State, Switch, Target, TARGETS};
 use crate::canvas::Canvas;
 use crate::color::Rgba;
 use crate::fmt;
@@ -7,6 +7,8 @@ use crate::geom::Rect;
 use crate::theme::Theme;
 use crate::widgets::{self, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DataState, DeviceInfo, VERSION};
+use skyward_install::{Outcome, Stage};
+use skyward_vab::Slot;
 
 // Tile colours sampled from the stock Settings, plus orange and red from the
 // same family for the destructive and reboot entries.
@@ -34,6 +36,8 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Settings => settings(cx),
         Screen::Reboot => reboot(cx),
         Screen::Wipe => wipe(cx),
+        Screen::Install => install(cx),
+        Screen::Sideload => sideload(cx),
         Screen::About => about(cx),
         Screen::Specs => specs(cx),
     }
@@ -44,6 +48,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
     match which {
         Confirm::Reboot => ("滑动以重启", false),
         Confirm::Wipe => ("滑动以清除", true),
+        Confirm::Flash => ("滑动以刷入", true),
     }
 }
 
@@ -127,7 +132,7 @@ pub fn home(cx: &Ctx) -> Frame {
         Row::new("挂载").icon(SLATE, Icon::Mount),
     ]);
     out.extend(hits(&tools.rows, &[
-        Action::Unavailable("安装还没实现"),
+        Action::Open(Screen::Install),
         Action::Unavailable("备份还没实现"),
         Action::Unavailable("恢复还没实现"),
         Action::Unavailable("挂载还没实现"),
@@ -175,11 +180,8 @@ pub fn settings(cx: &Ctx) -> Frame {
         Action::Toggle(Switch::Vibrate),
     ]));
     y = widgets::section(&mut c, t, f, general.bottom, "调试");
-    let debug = widgets::list(&mut c, t, f, y, &[
-        Row::new("ADB Sideload").icon(GREEN, Icon::Usb).subtitle("通过电脑上的 adb 推送安装包").trail(Trail::Switch(s.sideload)),
-        Row::new("终端").icon(SLATE, Icon::Terminal),
-    ]);
-    out.extend(hits(&debug.rows, &[Action::Toggle(Switch::Sideload), Action::Unavailable("终端还没实现")]));
+    let debug = widgets::list(&mut c, t, f, y, &[Row::new("终端").icon(SLATE, Icon::Terminal)]);
+    out.extend(hits(&debug.rows, &[Action::Unavailable("终端还没实现")]));
     y = widgets::section(&mut c, t, f, debug.bottom, "关于");
     let about = widgets::list(&mut c, t, f, y, &[Row::new("关于本机").trail(Trail::Value(VERSION))]);
     out.extend(hits(&about.rows, &[Action::Open(Screen::About)]));
@@ -380,6 +382,234 @@ pub fn reboot(cx: &Ctx) -> Frame {
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Reboot) });
     Frame { canvas: c, hits: out, title: "重启", back: true, header: true, content_top: top, hero: None, pattern: None }
+}
+
+/// Installing, opened from the home page: the system on the phone now, and
+/// where a package can come from.
+pub fn install(cx: &Ctx) -> Frame {
+    let (t, f, i) = (cx.t, cx.f, cx.info);
+    let mut c = page(t);
+    let top = t.m.content_top;
+    let mut facts = Vec::new();
+    if let Some(v) = &i.os_version {
+        facts.push(("当前系统", v.clone()));
+    }
+    if let Some(p) = &i.security_patch {
+        facts.push(("安全补丁", fmt::patch(p)));
+    }
+    if let Some(s) = i.slot {
+        facts.push(("当前槽位", format!("{}，系统更新会安装到 {}", s.letter(), s.other().letter())));
+    }
+    let y = if facts.is_empty() {
+        widgets::section_first(&mut c, t, f, top, "安装方式")
+    } else {
+        let y = widgets::section_first(&mut c, t, f, top, "这台手机");
+        let y = widgets::info_card(&mut c, t, f, y, &facts);
+        widgets::section(&mut c, t, f, y, "安装方式")
+    };
+    let mut rows = Vec::new();
+    if let Some(note) = fmt::snapshot_note(&i.snapshot) {
+        rows.push(Row::new(fmt::snapshot(&i.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::None));
+    }
+    rows.push(Row::new("通过电脑安装").icon(GREEN, Icon::Usb).subtitle("在电脑上使用 adb sideload 发送安装包"));
+    let methods = widgets::list(&mut c, t, f, y, &rows);
+    let out = vec![Hit { rect: *methods.rows.last().expect("the list holds the sideload row"), action: Action::Sideload }];
+    widgets::footnote(
+        &mut c,
+        t,
+        f,
+        methods.bottom,
+        "能安装完整的 A/B 系统更新包，以及 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新会安装到另一个槽位，安装完成后从那个槽位启动。",
+    );
+    Frame { canvas: c, hits: out, title: "安装", back: true, header: true, content_top: top, hero: None, pattern: None }
+}
+
+/// A one-line card on how things stand.
+fn standing<'a>(title: &'a str, color: Rgba, icon: Icon, detail: &'a str) -> Row<'a> {
+    Row::new(title).icon(color, icon).subtitle(detail).trail(Trail::None)
+}
+
+fn share(done: u64, total: u64) -> f32 {
+    if total == 0 {
+        0.0
+    } else {
+        (done as f64 / total as f64) as f32
+    }
+}
+
+fn percent(share: f32) -> u32 {
+    (share * 100.0).floor() as u32
+}
+
+/// Where an update stands, and the share of its step done when known.
+fn update_stage(stage: Option<&Stage>) -> (String, Option<f32>) {
+    match stage {
+        Some(Stage::Writing { done, total }) => {
+            let s = share(*done, *total);
+            (format!("第 1 步，共 3 步：写入新系统，{}%", percent(s)), Some(s))
+        }
+        Some(Stage::Verifying { index, count, partition }) => {
+            (format!("第 2 步，共 3 步：校验 {partition}（{}/{count}）", index + 1), Some(*index as f32 / *count as f32))
+        }
+        Some(Stage::Finishing) => ("第 3 步，共 3 步：收尾".into(), None),
+        Some(Stage::Flashing { .. }) | None => ("正在准备".into(), None),
+    }
+}
+
+fn pick_title(pick: Pick, current: Option<Slot>) -> String {
+    let letter = |s: Option<Slot>| s.map(|s| format!(" {}", s.letter())).unwrap_or_default();
+    match pick {
+        Pick::Current => format!("当前槽位{}", letter(current)),
+        Pick::Other => format!("另一个槽位{}", letter(current.map(Slot::other))),
+        Pick::Both => "两个槽位".into(),
+    }
+}
+
+/// Receiving what the computer sends with `adb sideload`, and installing
+/// it, step by step.
+pub fn sideload(cx: &Ctx) -> Frame {
+    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
+    let mut c = long_page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let bottom = match &s.install {
+        Install::Idle | Install::Starting | Install::Ending => {
+            let row = standing("正在准备 USB", GREEN, Icon::Usb, "USB 正在从 adb 调试切换到 sideload 模式");
+            widgets::list(&mut c, t, f, top, &[row]).bottom
+        }
+        Install::Waiting => {
+            let row = standing("等待电脑发送", GREEN, Icon::Usb, "用数据线把手机连接到电脑，再在电脑上运行下面的命令");
+            let y = widgets::list(&mut c, t, f, top, &[row]).bottom;
+            let y = widgets::section(&mut c, t, f, y, "在电脑上运行");
+            let y = widgets::info_card(&mut c, t, f, y, &[(
+                "adb sideload 文件名",
+                "文件名替换成需要安装的系统更新包或分区镜像，比如 boot.img".into(),
+            )]);
+            widgets::footnote(&mut c, t, f, y, "电脑上需要安装 Android SDK Platform-Tools。返回会停止等待，USB 切换回 adb 调试。")
+        }
+        Install::Checking { size } => {
+            let detail = format!("{}，正在识别和检查", fmt::bytes(*size));
+            let y = widgets::list(&mut c, t, f, top, &[standing("正在读取安装包", GREEN, Icon::Install, &detail)]).bottom;
+            widgets::footnote(&mut c, t, f, y, "读取时不要断开数据线。")
+        }
+        Install::Choosing(choice) => {
+            let (name, holds) = fmt::image_kind(choice.kind);
+            let detail = format!("{}，{holds}", fmt::bytes(choice.size));
+            let y = widgets::list(&mut c, t, f, top, &[standing(name, GREEN, Icon::Install, &detail)]).bottom;
+            let y = widgets::section(&mut c, t, f, y, "写入分区");
+            let rows: Vec<Row> = choice
+                .partitions
+                .iter()
+                .enumerate()
+                .map(|(k, p)| Row::new(p).subtitle(fmt::partition_role(p)).trail(Trail::Check(k == choice.partition)))
+                .collect();
+            let parts = widgets::list(&mut c, t, f, y, &rows);
+            let choose: Vec<Action> = (0..choice.partitions.len()).map(Action::FlashPartition).collect();
+            out.extend(hits(&parts.rows, &choose));
+            let y = widgets::section(&mut c, t, f, parts.bottom, "槽位");
+            let titles = Pick::ALL.map(|p| pick_title(p, i.slot));
+            let rows: Vec<Row> =
+                Pick::ALL.iter().zip(&titles).map(|(p, title)| Row::new(title).trail(Trail::Check(*p == choice.pick))).collect();
+            let picks = widgets::list(&mut c, t, f, y, &rows);
+            out.extend(hits(&picks.rows, &Pick::ALL.map(Action::FlashSlots)));
+            let (label, danger) = confirm_label(Confirm::Flash);
+            let track = widgets::confirm(&mut c, t, f, picks.bottom + t.m.dp(28.0), label, danger, s.confirm);
+            out.push(Hit { rect: track, action: Action::Confirm(Confirm::Flash) });
+            widgets::footnote(&mut c, t, f, track.y + track.h, "刷入会覆盖分区里原来的内容。返回会取消，电脑上的 adb sideload 随之结束。")
+        }
+        Install::Updating { version, stage, overwriting } => {
+            let title = match version {
+                Some(v) => format!("正在安装 {v}"),
+                None => "正在安装系统更新".into(),
+            };
+            let (detail, done) = update_stage(stage.as_ref());
+            let y = widgets::progress_card(&mut c, t, f, top, &title, &detail, done);
+            let target = i.slot.map(|s| format!("新系统安装到槽位 {}。", s.other().letter())).unwrap_or_default();
+            let y = widgets::footnote(&mut c, t, f, y, &format!("安装完成前不要断开数据线，也不要关机。{target}"));
+            if *overwriting {
+                widgets::footnote(&mut c, t, f, y, "super 分区放不下两套系统，当前系统正在被覆盖，安装完成前重启会无法进入系统。")
+            } else {
+                y
+            }
+        }
+        Install::Flashing { partition, stage } => {
+            let (detail, done) = match stage {
+                Some(Stage::Flashing { done, total }) => {
+                    let s = share(*done, *total);
+                    let what = if done * 2 < *total { "正在写入" } else { "正在核对写入的内容" };
+                    (format!("{what}，{}%", percent(s)), Some(s))
+                }
+                _ => ("正在准备".into(), None),
+            };
+            let y = widgets::progress_card(&mut c, t, f, top, &format!("正在刷入 {partition}"), &detail, done);
+            widgets::footnote(&mut c, t, f, y, "刷入完成前不要断开数据线。")
+        }
+        Install::Finished { outcome, damage } => finished(&mut c, cx, top, outcome, *damage, &mut out),
+    };
+    Frame { canvas: fit(c, t, bottom), hits: out, title: "通过电脑安装", back: true, header: true, content_top: top, hero: None, pattern: None }
+}
+
+/// How an install ended, and where to go from there.
+fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Option<Damage>, out: &mut Vec<Hit>) -> f32 {
+    let (t, f) = (cx.t, cx.f);
+    let gap = t.m.card_gap;
+    let again = Row::new("再发送一个").icon(GREEN, Icon::Usb);
+    let restart = Row::new("重启到系统").icon(ORANGE, Icon::Power);
+    match outcome {
+        Outcome::Installed { slot } => {
+            let detail = format!("新系统安装在槽位 {}，重启后从这个槽位启动。", slot.letter());
+            let y = widgets::list(c, t, f, top, &[standing("安装完成", GREEN, Icon::Install, &detail)]).bottom;
+            let next = widgets::list(c, t, f, y + gap, &[restart]);
+            out.extend(hits(&next.rows, &[Action::RebootTo(Target::System)]));
+            next.bottom
+        }
+        Outcome::Flashed { partition, slots } => {
+            let detail = format!("{partition} 已写入{}。", fmt::slots(slots));
+            let y = widgets::list(c, t, f, top, &[standing("刷入完成", GREEN, Icon::Install, &detail)]).bottom;
+            let mut rows = vec![restart];
+            let mut acts = vec![Action::RebootTo(Target::System)];
+            if *partition == "recovery" {
+                rows.push(Row::new("重启到恢复模式").icon(ORANGE, Icon::Power));
+                acts.push(Action::RebootTo(Target::Recovery));
+            }
+            rows.push(again);
+            acts.push(Action::Sideload);
+            let next = widgets::list(c, t, f, y + gap, &rows);
+            out.extend(hits(&next.rows, &acts));
+            next.bottom
+        }
+        Outcome::Cancelled => {
+            let y = widgets::list(c, t, f, top, &[standing("已取消", SLATE, Icon::Install, "没有写入任何内容。")]).bottom;
+            let next = widgets::list(c, t, f, y + gap, &[again]);
+            out.extend(hits(&next.rows, &[Action::Sideload]));
+            next.bottom
+        }
+        Outcome::Refused(r) => {
+            let reason = fmt::refusal(r, &cx.info.codename);
+            let y = widgets::list(c, t, f, top, &[standing("无法安装", ORANGE, Icon::Install, &reason)]).bottom;
+            let next = widgets::list(c, t, f, y + gap, &[again]);
+            out.extend(hits(&next.rows, &[Action::Sideload]));
+            widgets::footnote(c, t, f, next.bottom, "没有写入任何内容。")
+        }
+        Outcome::Failed(failure) => {
+            let (what, detail) = fmt::failure(failure);
+            let y = widgets::list(c, t, f, top, &[standing("安装失败", RED, Icon::Install, &what)]).bottom;
+            let next = widgets::list(c, t, f, y + gap, &[again, restart]);
+            out.extend(hits(&next.rows, &[Action::Sideload, Action::RebootTo(Target::System)]));
+            let warning = match damage {
+                Some(Damage::System) => {
+                    "当前系统已经开始被覆盖，现在重启会无法进入系统。请再发送一次完整的更新包，安装完成后再重启。".to_string()
+                }
+                Some(Damage::Partition(p)) => format!("{p} 只写入了一部分，现在重启可能出问题。请再发送一次镜像，刷入完成后再重启。"),
+                None => "当前系统没有受到影响。".into(),
+            };
+            let mut y = widgets::footnote(c, t, f, next.bottom, &warning);
+            if let Some(d) = detail {
+                y = widgets::footnote(c, t, f, y, &d);
+            }
+            y
+        }
+    }
 }
 
 /// Destructive wipe with the partitions to clear.

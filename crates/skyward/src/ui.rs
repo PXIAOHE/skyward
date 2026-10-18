@@ -1,8 +1,10 @@
 use crate::haptics::Haptics;
 use crate::input::{monotonic_ms, Event, Inputs};
-use anyhow::{anyhow, Context, Result};
-use skyward_config::DeviceConfig;
+use crate::services;
+use anyhow::{anyhow, ensure, Context, Result};
+use skyward_config::{DeviceConfig, Service};
 use skyward_info::DataState;
+use skyward_install::{Detach, Installer};
 use skyward_sys::Power;
 use skyward_ui::app::{App, Effect, Screen, Target};
 use skyward_ui::surface::kms::KmsSurface;
@@ -84,7 +86,20 @@ fn data_state() -> Result<DataState> {
     Ok(if here.dev() != up.dev() { DataState::Decrypted } else { DataState::Unmounted })
 }
 
-/// Wait until a device has input or `timeout_ms` passes.
+/// What has to happen before an update writes over the installed system's
+/// partitions: the files the phone's own programs run from stay in memory,
+/// and the booted slot's partitions come off.
+fn detach(services: Vec<Service>) -> Detach {
+    Box::new(move || {
+        let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+        let mounted = skyward_vab::mounted_partitions(slot)?;
+        let busy = services::pin(&services, &mounted)?;
+        skyward_vab::release_partitions(slot, &busy)
+    })
+}
+
+/// Wait until a device or the installer has something, or `timeout_ms`
+/// passes.
 fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
     let mut polls: Vec<libc::pollfd> = fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
     let n = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, timeout_ms) };
@@ -122,6 +137,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
     let mut screen = Canvas::new(w, h);
     let mut shown_clock = String::new();
     let mut read_at = Instant::now();
+    let mut installer: Option<Installer> = None;
     loop {
         let now = monotonic_ms();
         app.tick(now);
@@ -151,7 +167,23 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
         let floor = if shown { 0 } else { 1 };
         let until_due = app.deadline(now).map(|d| d.saturating_sub(now) as i32);
         let timeout = until_due.map_or(1000, |t| t.clamp(floor, 1000));
-        wait(&inputs.fds(), timeout)?;
+        let mut fds = inputs.fds();
+        if let Some(i) = &installer {
+            fds.push(i.fd());
+        }
+        wait(&fds, timeout)?;
+        // What the installer told comes first, so a touch acts on the page
+        // as it now stands.
+        if let Some(i) = &installer {
+            for ev in i.events() {
+                let finished = matches!(ev, skyward_install::Event::Finished(_));
+                eprintln!("install {ev:?}");
+                app.install(ev);
+                if finished {
+                    installer = None;
+                }
+            }
+        }
         let now = monotonic_ms();
         for ev in inputs.read()? {
             let effects = match ev {
@@ -170,6 +202,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
                             h.click()?;
                         }
                     }
+                    Effect::Sideload => {
+                        ensure!(installer.is_none(), "an installer is running already");
+                        installer = Some(Installer::start(detach(cfg.services.clone()))?);
+                    }
+                    Effect::Flash { partition, pick } => {
+                        let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+                        installer.as_ref().context("no installer holds an image")?.flash(partition, pick.slots(slot));
+                    }
+                    Effect::Cancel => installer.as_ref().context("no installer to cancel")?.cancel()?,
                 }
             }
         }

@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
-use skyward_ui::app::{Action, App, Screen, Touch};
+use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
+use skyward_ui::app::{Action, App, Choice, Damage, Install, Pick, Screen, Touch};
 use skyward_ui::widgets::{self, Bar};
 use skyward_ui::{Canvas, Fonts, Theme};
 use skyward_vab::{Slot, SnapshotState};
@@ -53,7 +54,7 @@ fn main() -> Result<()> {
     let open = DataState::Decrypted;
     // Whole pages, the way a long screenshot shows them. The About page's
     // field is drawn only on screen, so it appears among the moments below.
-    let shots: [Shot; 9] = [
+    let shots: [Shot; 11] = [
         ("01-decrypt-dark", Screen::Decrypt, true, &info, DataState::Locked, &[0, 3, 4, 5, 8]),
         ("02-home-light", Screen::Home, false, &info, open, &[]),
         ("03-home-dark-update-pending", Screen::Home, true, &pending, open, &[]),
@@ -63,6 +64,8 @@ fn main() -> Result<()> {
         ("07-wipe-light", Screen::Wipe, false, &info, open, &[]),
         ("09-specs-light", Screen::Specs, false, &info, open, &[]),
         ("10-specs-dark", Screen::Specs, true, &info, open, &[]),
+        ("11-install-light", Screen::Install, false, &info, open, &[]),
+        ("12-install-dark-update-pending", Screen::Install, true, &pending, open, &[]),
     ];
     for (name, screen, dark, info, data, pattern) in shots {
         let mut app = App::new(screen, w, h, ppd);
@@ -70,6 +73,69 @@ fn main() -> Result<()> {
         app.state.pattern = pattern.to_vec();
         let path = out.join(format!("{name}.png"));
         write_png(&path, &whole_page(&mut app, &fonts, info, data))?;
+        println!("wrote {}", path.display());
+    }
+
+    // The sideload page through an install, as the installer tells it.
+    let recovery = ImageKind::Boot { kernel: false, ramdisk: Ramdisk::Recovery };
+    let installing: [(&str, bool, Install); 11] = [
+        ("30-sideload-waiting", false, Install::Waiting),
+        ("31-sideload-checking", false, Install::Checking { size: 7_103_043_868 }),
+        (
+            "32-sideload-choosing",
+            false,
+            Install::Choosing(Choice { kind: recovery, size: 43_257_856, partitions: vec!["recovery"], partition: 0, pick: Pick::Current }),
+        ),
+        (
+            "33-sideload-writing-dark",
+            true,
+            Install::Updating {
+                version: Some("OS4.0.5.0.XPACNXM".into()),
+                stage: Some(Stage::Writing { done: 2_934_000_000, total: 7_103_041_280 }),
+                overwriting: true,
+            },
+        ),
+        (
+            "34-sideload-verifying",
+            false,
+            Install::Updating {
+                version: Some("OS4.0.5.0.XPACNXM".into()),
+                stage: Some(Stage::Verifying { index: 6, count: 21, partition: "system".into() }),
+                overwriting: false,
+            },
+        ),
+        ("35-sideload-flashing", false, Install::Flashing { partition: "boot", stage: Some(Stage::Flashing { done: 300, total: 800 }) }),
+        ("36-sideload-installed", false, Install::Finished { outcome: Outcome::Installed { slot: Slot::A }, damage: None }),
+        (
+            "37-sideload-flashed-recovery-dark",
+            true,
+            Install::Finished { outcome: Outcome::Flashed { partition: "recovery", slots: vec![Slot::A, Slot::B] }, damage: None },
+        ),
+        (
+            "38-sideload-refused",
+            false,
+            Install::Finished { outcome: Outcome::Refused(Refusal::OtherDevice("ishtar".into())), damage: None },
+        ),
+        (
+            "39-sideload-failed",
+            false,
+            Install::Finished { outcome: Outcome::Failed(Failure::Engine(9)), damage: Some(Damage::System) },
+        ),
+        (
+            "40-sideload-error-dark",
+            true,
+            Install::Finished {
+                outcome: Outcome::Failed(Failure::Error("set USB up for sideload: open ep0: Device or resource busy (os error 16)".into())),
+                damage: None,
+            },
+        ),
+    ];
+    for (name, dark, install) in installing {
+        let mut app = App::new(Screen::Sideload, w, h, ppd);
+        app.state.dark = dark;
+        app.state.install = install;
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &whole_page(&mut app, &fonts, &info, open))?;
         println!("wrote {}", path.display());
     }
 

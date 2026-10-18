@@ -10,6 +10,8 @@ use crate::sprite::{Blurs, Sprite};
 use crate::theme::Theme;
 use crate::widgets::{self, Bar};
 use skyward_info::{Charge, DataState, DeviceInfo};
+use skyward_install::{Event, ImageKind, Outcome, Stage};
+use skyward_vab::Slot;
 
 /// The pages of the recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +21,10 @@ pub enum Screen {
     Settings,
     Reboot,
     Wipe,
+    Install,
+    /// Receiving what the computer sends with `adb sideload`, and
+    /// installing it.
+    Sideload,
     About,
     Specs,
 }
@@ -26,13 +32,77 @@ pub enum Screen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Vibrate,
-    Sideload,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Confirm {
     Reboot,
     Wipe,
+    Flash,
+}
+
+/// Which slots an image goes to, by the slot the phone runs from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    Current,
+    Other,
+    Both,
+}
+
+impl Pick {
+    pub const ALL: [Pick; 3] = [Pick::Current, Pick::Other, Pick::Both];
+
+    /// The slots this means on a phone running from `current`.
+    pub fn slots(self, current: Slot) -> Vec<Slot> {
+        match self {
+            Pick::Current => vec![current],
+            Pick::Other => vec![current.other()],
+            Pick::Both => vec![Slot::A, Slot::B],
+        }
+    }
+}
+
+/// Where installing stands, as the installer last told.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Install {
+    /// No installer runs.
+    #[default]
+    Idle,
+    /// USB is being set up for sideload.
+    Starting,
+    Waiting,
+    Checking { size: u64 },
+    /// An image waits to be told where it goes.
+    Choosing(Choice),
+    /// `overwriting` says whether the update writes over the running
+    /// system.
+    Updating { version: Option<String>, stage: Option<Stage>, overwriting: bool },
+    Flashing { partition: &'static str, stage: Option<Stage> },
+    /// `damage` is what a failure may have left broken.
+    Finished { outcome: Outcome, damage: Option<Damage> },
+    /// The page was left and the installer is handing USB back.
+    Ending,
+}
+
+/// What a failed install may have left broken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Damage {
+    /// The update had begun writing over the running system.
+    System,
+    /// The image had begun going into this partition.
+    Partition(&'static str),
+}
+
+/// An image, and where it goes so far.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub kind: ImageKind,
+    pub size: u64,
+    /// The partitions it fits, the likeliest first.
+    pub partitions: Vec<&'static str>,
+    /// Which of them is chosen.
+    pub partition: usize,
+    pub pick: Pick,
 }
 
 /// Where the reboot page sends the device, in the order it lists them.
@@ -65,6 +135,14 @@ pub enum Action {
     Confirm(Confirm),
     /// The pattern grid on the unlock page.
     Pattern,
+    /// Start receiving a package over USB.
+    Sideload,
+    /// Send the image to one of the partitions it fits.
+    FlashPartition(usize),
+    /// Send the image to these slots.
+    FlashSlots(Pick),
+    /// Leave the recovery for this target at once.
+    RebootTo(Target),
     /// A control whose work is not wired up yet; touching it says so.
     Unavailable(&'static str),
 }
@@ -108,18 +186,19 @@ impl Frame {
     }
 }
 
-/// Choices the pages show and the user changes.
+/// Choices the pages show and the user changes, and where installing
+/// stands.
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
     pub dark: bool,
     pub brightness: f32,
     pub vibrate: bool,
-    pub sideload: bool,
     pub reboot: usize,
     pub wipe: [bool; 4],
     pub pattern: Vec<usize>,
     /// How far the swipe-to-confirm knob is dragged, 0 to 1.
     pub confirm: f32,
+    pub install: Install,
 }
 
 impl Default for State {
@@ -128,11 +207,11 @@ impl Default for State {
             dark: false,
             brightness: 0.5,
             vibrate: true,
-            sideload: false,
             reboot: 0,
             wipe: [true, false, true, false],
             pattern: Vec::new(),
             confirm: 0.0,
+            install: Install::Idle,
         }
     }
 }
@@ -163,6 +242,13 @@ pub enum Effect {
     Reboot(Target),
     /// A short tap of the vibration motor.
     Haptic,
+    /// Start receiving a package over USB.
+    Sideload,
+    /// Write the image the installer holds to `partition` in the slots
+    /// `pick` means.
+    Flash { partition: &'static str, pick: Pick },
+    /// Stop waiting for the computer, or for where an image goes.
+    Cancel,
 }
 
 enum Drag {
@@ -631,11 +717,76 @@ impl App {
         self.refresh();
     }
 
-    fn back(&mut self) {
-        if self.stack.len() > 1 {
-            self.stack.pop();
-            self.state.confirm = 0.0;
-            self.settle_page();
+    /// Go back a page. Leaving the sideload page stops what can be stopped;
+    /// while a package is being read or written, the page stays.
+    fn back(&mut self, now: u64) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        if self.stack.len() <= 1 {
+            return fx;
+        }
+        if self.screen() == Screen::Sideload {
+            match self.state.install {
+                Install::Checking { .. } => {
+                    self.say("正在读取安装包，读取完成后才能返回", now);
+                    return fx;
+                }
+                Install::Updating { .. } | Install::Flashing { .. } => {
+                    self.say("正在安装，安装完成后才能返回", now);
+                    return fx;
+                }
+                Install::Starting | Install::Waiting | Install::Choosing(_) => {
+                    self.state.install = Install::Ending;
+                    fx.push(Effect::Cancel);
+                }
+                Install::Finished { .. } => self.state.install = Install::Idle,
+                Install::Idle | Install::Ending => {}
+            }
+        }
+        self.stack.pop();
+        self.state.confirm = 0.0;
+        self.settle_page();
+        self.refresh();
+        fx
+    }
+
+    /// Hear from the installer. Once the sideload page is left, only its
+    /// end matters.
+    pub fn install(&mut self, ev: Event) {
+        let install = &mut self.state.install;
+        if *install == Install::Ending {
+            if matches!(ev, Event::Finished(_)) {
+                *install = Install::Idle;
+            }
+            return;
+        }
+        match ev {
+            Event::Waiting => *install = Install::Waiting,
+            Event::Checking { size } => *install = Install::Checking { size },
+            Event::Installing { version } => *install = Install::Updating { version, stage: None, overwriting: false },
+            Event::Overwriting => {
+                if let Install::Updating { overwriting, .. } = install {
+                    *overwriting = true;
+                }
+            }
+            Event::Image { kind, size, partitions } => {
+                *install = Install::Choosing(Choice { kind, size, partitions, partition: 0, pick: Pick::Current })
+            }
+            Event::Progress(stage) => match install {
+                Install::Updating { stage: shown, .. } | Install::Flashing { stage: shown, .. } => *shown = Some(stage),
+                _ => {}
+            },
+            Event::Finished(outcome) => {
+                let damage = match (&outcome, &*install) {
+                    (Outcome::Failed(_), Install::Updating { overwriting: true, .. }) => Some(Damage::System),
+                    (Outcome::Failed(_), Install::Flashing { partition, stage: Some(Stage::Flashing { done, .. }) }) if *done > 0 => {
+                        Some(Damage::Partition(partition))
+                    }
+                    _ => None,
+                };
+                *install = Install::Finished { outcome, damage };
+            }
+        }
+        if self.screen() == Screen::Sideload {
             self.refresh();
         }
     }
@@ -649,7 +800,7 @@ impl App {
                 self.settle_page();
                 self.refresh();
             }
-            Action::Back => self.back(),
+            Action::Back => return self.back(now),
             Action::Theme { dark } => {
                 if self.state.dark != dark {
                     self.state.dark = dark;
@@ -658,10 +809,6 @@ impl App {
             }
             Action::Toggle(Switch::Vibrate) => {
                 self.state.vibrate = !self.state.vibrate;
-                self.refresh();
-            }
-            Action::Toggle(Switch::Sideload) => {
-                self.state.sideload = !self.state.sideload;
                 self.refresh();
             }
             Action::RebootTarget(i) => {
@@ -674,6 +821,31 @@ impl App {
             }
             Action::Confirm(_) => self.say("按住圆形按钮向右滑动", now),
             Action::Brightness | Action::Pattern => {}
+            Action::Sideload => match self.state.install {
+                Install::Idle | Install::Finished { .. } => {
+                    self.state.install = Install::Starting;
+                    if self.screen() == Screen::Sideload {
+                        self.refresh();
+                    } else {
+                        self.open(Screen::Sideload);
+                    }
+                    return vec![Effect::Sideload];
+                }
+                _ => self.say("上一次安装还在收尾，请稍后再尝试", now),
+            },
+            Action::FlashPartition(k) => {
+                if let Install::Choosing(choice) = &mut self.state.install {
+                    choice.partition = k;
+                    self.refresh();
+                }
+            }
+            Action::FlashSlots(pick) => {
+                if let Install::Choosing(choice) = &mut self.state.install {
+                    choice.pick = pick;
+                    self.refresh();
+                }
+            }
+            Action::RebootTo(target) => return vec![Effect::Reboot(target)],
             Action::Unavailable(text) => self.say(text, now),
         }
         Vec::new()
@@ -812,7 +984,7 @@ impl App {
                         self.fling = Some(Fling::new(now, scroll, speed, self.px_per_dp * 160.0));
                     }
                 }
-                Drag::Edge { armed: true, .. } => self.back(),
+                Drag::Edge { armed: true, .. } => fx.extend(self.back(now)),
                 Drag::Edge { start, from_left, x, cy, .. } => {
                     // Short of going back, the cue sinks back into the edge.
                     let travel = if from_left { x - start } else { start - x };
@@ -828,6 +1000,14 @@ impl App {
                         match which {
                             Confirm::Reboot => fx.push(Effect::Reboot(TARGETS[self.state.reboot])),
                             Confirm::Wipe => self.say("清除功能还没实现", now),
+                            Confirm::Flash => {
+                                if let Install::Choosing(choice) = &self.state.install {
+                                    let partition = choice.partitions[choice.partition];
+                                    fx.push(Effect::Flash { partition, pick: choice.pick });
+                                    self.state.install = Install::Flashing { partition, stage: None };
+                                    self.refresh();
+                                }
+                            }
                         }
                     }
                 }
@@ -971,6 +1151,7 @@ impl App {
 mod tests {
     use super::*;
     use skyward_info::{Boot, Cpu, Storage};
+    use skyward_install::{Failure, Refusal};
     use skyward_vab::SnapshotState;
 
     // A Xiaomi 13 Ultra panel: 1440 × 3200 at 560 dpi.
@@ -1043,10 +1224,10 @@ mod tests {
         tap(&mut app, &f, &i, Action::Open(Screen::Settings));
         app.frame(&f, &i, DataState::Unmounted);
         app.touch(Touch::Down(700.0, 2400.0), &f, 0);
-        app.touch(Touch::Move(700.0, 2000.0), &f, 0);
-        app.touch(Touch::Move(700.0, 1800.0), &f, 0);
+        app.touch(Touch::Move(700.0, 2200.0), &f, 0);
+        app.touch(Touch::Move(700.0, 2100.0), &f, 0);
         app.touch(Touch::Up, &f, 0);
-        assert_eq!(app.top().1, 600.0);
+        assert_eq!(app.top().1, 300.0);
         tap_back(&mut app, &f, &i, 0);
         assert_eq!(app.screen(), Screen::Home);
     }
@@ -1197,10 +1378,10 @@ mod tests {
         assert!(y < H as f32, "the switch is on the first screen");
         app.touch(Touch::Down(x, y), &f, 0);
         app.touch(Touch::Move(x, y - 100.0), &f, 0);
-        app.touch(Touch::Move(x, y - 600.0), &f, 0);
+        app.touch(Touch::Move(x, y - 300.0), &f, 0);
         app.touch(Touch::Up, &f, 0);
         assert!(app.state.vibrate, "the switch was not flipped");
-        assert_eq!(app.top().1, 600.0);
+        assert_eq!(app.top().1, 300.0);
     }
 
     /// Flick the page up from `start`: the finger travels `step` px every
@@ -1218,8 +1399,25 @@ mod tests {
 
     #[test]
     fn a_flick_glides_on_and_comes_to_rest() {
-        let (f, i) = (fonts(), info());
-        let mut app = App::new(Screen::Settings, W, H, PPD);
+        let f = fonts();
+        // Every reading there is, for a page long enough to glide on.
+        let battery = skyward_info::Battery {
+            level: 80,
+            charge: Charge::Discharging,
+            temp: Some(300),
+            health: Some("Good".into()),
+            cycles: Some(169),
+            design: Some(5_500_000),
+            full: Some(5_095_000),
+            voltage: Some(4_200_000),
+        };
+        let i = DeviceInfo {
+            os_version: Some("OS3.0.305.0.WMACNXM".into()),
+            android: Some("16".into()),
+            battery: Some(battery),
+            ..info()
+        };
+        let mut app = App::new(Screen::Specs, W, H, PPD);
         app.frame(&f, &i, DataState::Unmounted);
         let lift = flick(&mut app, &f, 1000, 20.0);
         let lifted = app.top().1;
@@ -1433,10 +1631,116 @@ mod tests {
     fn unfinished_features_explain_themselves() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
-        tap(&mut app, &f, &i, Action::Unavailable("安装还没实现"));
+        tap(&mut app, &f, &i, Action::Unavailable("备份还没实现"));
         assert_eq!(app.deadline(0), Some(TOAST_MS));
         app.tick(TOAST_MS);
         assert_eq!(app.deadline(TOAST_MS), None);
+    }
+
+    /// The sideload page, opened from the installing page, with the
+    /// installer started and waiting for the computer.
+    fn sideloading(f: &Fonts, i: &DeviceInfo) -> App {
+        let mut app = opened(Screen::Install, f, i);
+        assert_eq!(tap(&mut app, f, i, Action::Sideload), vec![Effect::Sideload]);
+        assert_eq!(app.screen(), Screen::Sideload);
+        assert_eq!(app.state.install, Install::Starting);
+        app.install(Event::Waiting);
+        app
+    }
+
+    #[test]
+    fn leaving_while_waiting_cancels_and_the_end_clears_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        assert_eq!(app.state.install, Install::Waiting);
+        app.frame(&f, &i, DataState::Unmounted);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(90.0, 1600.0), &f, 8);
+        app.touch(Touch::Move(400.0, 1600.0), &f, 16);
+        assert_eq!(app.touch(Touch::Up, &f, 24), vec![Effect::Cancel]);
+        assert_eq!(app.screen(), Screen::Install);
+        assert_eq!(app.state.install, Install::Ending);
+        // Whatever the installer was in the middle of, only its end counts.
+        app.install(Event::Checking { size: 4096 });
+        assert_eq!(app.state.install, Install::Ending);
+        tap(&mut app, &f, &i, Action::Sideload);
+        assert_eq!(app.screen(), Screen::Install, "no second installer while the first is ending");
+        app.install(Event::Finished(Outcome::Cancelled));
+        assert_eq!(app.state.install, Install::Idle);
+    }
+
+    #[test]
+    fn an_image_goes_where_it_is_sent_once_swiped() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Checking { size: 201_326_592 });
+        let kind = ImageKind::Boot { kernel: true, ramdisk: skyward_install::Ramdisk::Recovery };
+        app.install(Event::Image { kind, size: 201_326_592, partitions: vec!["recovery", "boot"] });
+        tap(&mut app, &f, &i, Action::FlashPartition(1));
+        tap(&mut app, &f, &i, Action::FlashSlots(Pick::Both));
+        let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Flash)).unwrap().rect;
+        let y = track.centre().1 - app.top().1;
+        app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
+        app.touch(Touch::Move(track.x + track.w, y), &f, 0);
+        assert_eq!(app.touch(Touch::Up, &f, 0), vec![Effect::Flash { partition: "boot", pick: Pick::Both }]);
+        assert_eq!(app.state.install, Install::Flashing { partition: "boot", stage: None });
+        app.install(Event::Progress(Stage::Flashing { done: 10, total: 40 }));
+        assert_eq!(app.state.install, Install::Flashing { partition: "boot", stage: Some(Stage::Flashing { done: 10, total: 40 }) });
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Sideload, "a partition being written keeps the page");
+        app.install(Event::Finished(Outcome::Flashed { partition: "boot", slots: vec![Slot::A, Slot::B] }));
+        assert!(matches!(app.state.install, Install::Finished { damage: None, .. }), "a flash that worked broke nothing");
+        assert_eq!(tap(&mut app, &f, &i, Action::RebootTo(Target::System)), vec![Effect::Reboot(Target::System)]);
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Install);
+        assert_eq!(app.state.install, Install::Idle);
+    }
+
+    #[test]
+    fn an_update_shows_its_steps_and_cannot_be_left() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Checking { size: 7_103_043_868 });
+        app.install(Event::Installing { version: Some("OS3.0.306.0.WMACNXM".into()) });
+        app.install(Event::Overwriting);
+        app.install(Event::Progress(Stage::Writing { done: 1 << 30, total: 7 << 30 }));
+        assert!(matches!(app.state.install, Install::Updating { overwriting: true, stage: Some(_), .. }));
+        let shown = app.frame(&f, &i, DataState::Unmounted).hits.len();
+        assert_eq!(shown, 0, "nothing on the page to tap while installing");
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Sideload);
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says why");
+        app.install(Event::Finished(Outcome::Failed(Failure::Engine(9))));
+        assert!(matches!(app.state.install, Install::Finished { damage: Some(Damage::System), .. }));
+        // Sending again starts over on the same page.
+        assert_eq!(tap(&mut app, &f, &i, Action::Sideload), vec![Effect::Sideload]);
+        assert_eq!(app.state.install, Install::Starting);
+        assert_eq!(app.screen(), Screen::Sideload);
+    }
+
+    #[test]
+    fn a_refused_package_or_an_update_that_kept_the_system_broke_nothing() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Checking { size: 10 });
+        app.install(Event::Finished(Outcome::Refused(Refusal::Unknown)));
+        assert_eq!(app.state.install, Install::Finished { outcome: Outcome::Refused(Refusal::Unknown), damage: None });
+        tap(&mut app, &f, &i, Action::Sideload);
+        app.install(Event::Waiting);
+        app.install(Event::Installing { version: None });
+        app.install(Event::Finished(Outcome::Failed(Failure::Engine(21))));
+        assert!(matches!(app.state.install, Install::Finished { damage: None, .. }));
+    }
+
+    #[test]
+    fn an_image_that_failed_part_way_names_its_partition() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Image { kind: ImageKind::Dtbo, size: 1 << 20, partitions: vec!["dtbo"] });
+        app.state.install = Install::Flashing { partition: "dtbo", stage: None };
+        app.install(Event::Progress(Stage::Flashing { done: 1 << 20, total: 4 << 20 }));
+        app.install(Event::Finished(Outcome::Failed(Failure::Disconnected)));
+        assert!(matches!(app.state.install, Install::Finished { damage: Some(Damage::Partition("dtbo")), .. }));
     }
 
     #[test]
