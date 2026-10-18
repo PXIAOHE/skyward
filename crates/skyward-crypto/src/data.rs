@@ -134,6 +134,66 @@ pub fn open_users(service: &KeyMint) -> Result<Vec<u32>> {
     Ok(users)
 }
 
+/// Where a phone keeps what it needs to recover a user's own secret.
+const PROTECTORS: &str = "/data/system_de";
+
+/// Read what a user's secret is kept behind. A user has one of these at a
+/// time; a phone part way through changing a credential may have left
+/// another, and which is current is its own business, so this refuses to
+/// guess.
+pub fn protector(user: u32) -> Result<crate::user::Protector> {
+    let dir = Path::new(PROTECTORS).join(user.to_string()).join("spblob");
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+        let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
+        if path.extension().is_some_and(|e| e == "spblob") {
+            if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    let [id] = &ids[..] else {
+        anyhow::bail!("{} holds {} of the user's blobs, and one is expected", dir.display(), ids.len());
+    };
+    Ok(crate::user::Protector {
+        blob: std::fs::read(dir.join(format!("{id}.spblob"))).with_context(|| format!("read the blob in {}", dir.display()))?,
+        secdiscardable: std::fs::read(dir.join(format!("{id}.secdis")))
+            .with_context(|| format!("read what the blob in {} is bound to", dir.display()))?,
+        id: id.clone(),
+    })
+}
+
+/// Let in the key for a user's own files. `credential` is what the user
+/// knows, already stretched; a user who has set none has a fixed stand-in
+/// for it.
+pub fn open_user_files(service: &KeyMint, user: u32, stretched: &[u8]) -> Result<()> {
+    let protector = protector(user)?;
+    let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &protector.key_alias())?;
+    let content = crate::user::content(&protector.blob)?;
+    if content.len() < 12 {
+        anyhow::bail!("the user's blob is too short to hold anything");
+    }
+    let (nonce, body) = content.split_at(12);
+    let inner = service
+        .gcm_decrypt(&held, &[], nonce, body)
+        .context("open what the secure world holds the user's blob closed with")?;
+    let secret = crate::user::protector_secret(stretched, &protector.secdiscardable);
+    let synthetic_password = crate::user::open_inner(&secret, &inner)?;
+    let file_secret = crate::user::file_secret(&synthetic_password);
+
+    let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
+    let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
+    let dir = Path::new(USER_KEYS).join("ce").join(user.to_string()).join("current");
+    let stored = StoredKey::load(&dir).with_context(|| format!("read the key in {}", dir.display()))?;
+    let raw = stored.unwrap(Unwrap::<KeyMint>::Secret(&file_secret)).with_context(|| format!("unwrap the key in {}", dir.display()))?;
+    let raw = match wrapped {
+        true => service.ephemeral_storage_key(&raw).with_context(|| format!("make the key in {} usable now", dir.display()))?,
+        false => raw,
+    };
+    crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
+    Ok(())
+}
+
 /// Build the device-mapper target that reads the partition through the
 /// storage hardware's decryption.
 pub fn target(device: &str, sectors: u64, key: &[u8], encryption: &Encryption) -> Target {

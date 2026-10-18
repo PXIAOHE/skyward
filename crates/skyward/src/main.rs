@@ -254,6 +254,13 @@ fn main() -> Result<()> {
             println!("the files that belong to no one user can be read");
             let users = skyward_crypto::data::open_users(&service)?;
             println!("users whose own keys are in: {users:?}");
+            let stretched = skyward_crypto::user::stretched_without_credential();
+            for user in users {
+                match skyward_crypto::data::open_user_files(&service, user, &stretched) {
+                    Ok(()) => println!("user {user}'s own files can be read"),
+                    Err(e) => println!("user {user}'s own files stay closed: {e:#}"),
+                }
+            }
             Ok(())
         }
         #[cfg(target_os = "android")]
