@@ -10,7 +10,7 @@ use crate::sprite::{Blurs, Sprite};
 use crate::search;
 use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer};
-use skyward_info::{Charge, DataState, DeviceInfo};
+use skyward_info::{DataState, DeviceInfo};
 use skyward_install::{Event, ImageKind, Outcome, Stage};
 use skyward_vab::Slot;
 
@@ -1183,7 +1183,7 @@ impl App {
         let blur = if frame.hero.is_some() { 0.0 } else { (1.0 - level) * m.dp(TITLE_BLUR_DP) };
         draw_faded(out, small, 0.0, 0.0, t.pal.text, level, blur);
 
-        let battery = info.battery.as_ref().map(|b| (b.level, b.charge == Charge::Charging));
+        let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
         widgets::status_bar(out, &t, f, &Bar { clock, battery }, t.pal.status);
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
@@ -1846,7 +1846,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skyward_info::{Boot, Cpu, Storage};
+    use skyward_info::{Boot, Charge, Cpu, Storage};
     use skyward_install::{Failure, Refusal};
     use skyward_vab::SnapshotState;
 

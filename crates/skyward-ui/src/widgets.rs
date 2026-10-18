@@ -1,5 +1,5 @@
 use crate::canvas::Canvas;
-use crate::color::{mix, Rgba};
+use crate::color::{blend_over, mix, Rgba};
 use crate::font::{Face, Fonts};
 use crate::geom::Rect;
 use crate::sprite::Sprite;
@@ -281,35 +281,103 @@ pub(crate) fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> 
 }
 
 /// Status-bar contents: the clock and, when a fuel gauge is present, the
-/// battery level and whether it is charging.
+/// battery level and whether the cable is in, charging or full.
 pub struct Bar<'a> {
     pub clock: &'a str,
     pub battery: Option<(u8, bool)>,
 }
 
-/// Clock on the left; on the right the battery capsule with its level, a
-/// grey cap, and a bolt while charging. `ink` colours the clock and bolt.
+/// Below this level the battery fills red while the cable is out.
+pub const LOW_BATTERY: u8 = 20;
+
+/// Clock on the left; on the right the battery as the stock status bar draws
+/// it, with a bolt past it while the cable is in. `ink` colours the clock.
 pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) {
     let m = &t.m;
     let cy = m.status_cy;
     // Digits carry no descender, so centre on half their height (≈0.72 em).
     c.text(&f.status, bar.clock, m.status_x, cy + m.status_px * 0.36, m.status_px, ink, None);
-    let Some((batt, charging)) = bar.battery else { return };
-
+    let Some((level, plugged)) = bar.battery else { return };
     let mut right = m.w as f32 - m.status_right;
-    if charging {
-        let (bw, bh) = (m.dp(5.0), m.dp(11.3));
-        let x = right - bw;
-        c.fill_convex(&[(x + bw * 0.7, cy - bh / 2.0), (x, cy + bh * 0.1), (x + bw * 0.52, cy + bh * 0.1)], ink);
-        c.fill_convex(&[(x + bw * 0.3, cy + bh / 2.0), (x + bw, cy - bh * 0.1), (x + bw * 0.48, cy - bh * 0.1)], ink);
-        right = x - m.dp(3.0);
+    if plugged {
+        let x = m.w as f32 - m.status_bolt_right - m.dp(BOLT_W_DP);
+        let (art, ox, oy) = bolt(t, x, cy);
+        c.lay(&art, ox, oy, 1.0);
+        right = x - m.dp(2.75);
     }
-    let (cap_w, cap_h) = (m.dp(1.0), m.dp(4.2));
-    c.fill_round_rect(right - cap_w, cy - cap_h / 2.0, cap_w, cap_h, cap_w / 2.0, t.pal.battery_cap);
-    let (bw, bh) = (m.dp(21.3), m.dp(12.3));
-    let bx = right - cap_w - m.dp(0.7) - bw;
-    c.fill_round_rect(bx, cy - bh / 2.0, bw, bh, m.dp(4.0), t.pal.battery);
-    c.text_center(&f.strong, &batt.to_string(), bx + bw / 2.0, cy, m.dp(9.7), Rgba::rgb(255, 255, 255));
+    let (art, ox, oy) = battery(t, f, level, plugged, right, cy);
+    c.lay(&art, ox, oy, 1.0);
+}
+
+const BOLT_W_DP: f32 = 5.67;
+
+/// The bolt from `x`, centred on `cy`, as its own canvas and where it goes.
+fn bolt(t: &Theme, x: f32, cy: f32) -> (Canvas, i32, i32) {
+    let m = &t.m;
+    let (bw, bh) = (m.dp(BOLT_W_DP), m.dp(11.3));
+    let (ox, oy) = ((x - 1.0).floor(), (cy - bh / 2.0 - 1.0).floor());
+    let (x, cy) = (x - ox, cy - oy);
+    let mut art = Canvas::new((x + bw + 1.0).ceil() as u32, (cy + bh / 2.0 + 1.0).ceil() as u32);
+    // Two strokes meeting in the middle, drawn as coverage first so their
+    // overlap is not inked twice.
+    let white = Rgba::rgb(255, 255, 255);
+    art.fill_convex(&[(x + bw * 0.7, cy - bh / 2.0), (x, cy + bh * 0.1), (x + bw * 0.52, cy + bh * 0.1)], white);
+    art.fill_convex(&[(x + bw * 0.3, cy + bh / 2.0), (x + bw, cy - bh * 0.1), (x + bw * 0.48, cy - bh * 0.1)], white);
+    let ink = t.pal.battery.bolt;
+    for px in art.data.as_chunks_mut::<4>().0 {
+        let a = (px[3] as u32 * ink.a as u32 + 127) / 255;
+        *px = [ink.r, ink.g, ink.b, a as u8];
+    }
+    (art, ox as i32, oy as i32)
+}
+
+/// The battery ending at `right`, centred on `cy`, as its own canvas and
+/// where it goes: body and cap, the level's share filled from the left, the
+/// digits in white over a charging or low fill and cut out of any other.
+fn battery(t: &Theme, f: &Fonts, level: u8, plugged: bool, right: f32, cy: f32) -> (Canvas, i32, i32) {
+    let m = &t.m;
+    let ink = t.pal.battery;
+    let (bw, bh, cap_w, cap_h) = (m.dp(21.75), m.dp(12.1), m.dp(1.3), m.dp(4.25));
+    let left = right - bw - cap_w;
+    let (ox, oy) = ((left - 1.0).floor(), (cy - bh / 2.0 - 1.0).floor());
+    let (w, h) = ((right - ox + 1.0).ceil() as u32, (cy + bh / 2.0 - oy + 1.0).ceil() as u32);
+    let (x, top, mid) = (left - ox, cy - bh / 2.0 - oy, cy - oy);
+    // Coverage of the body with its cap, and of the digits.
+    let white = Rgba::rgb(255, 255, 255);
+    let mut shape = Canvas::new(w, h);
+    shape.fill_round_rect(x, top, bw, bh, m.dp(3.7), white);
+    shape.fill_round_rect(x + bw - cap_w, mid - cap_h / 2.0, cap_w * 2.0, cap_h, cap_w, white);
+    let mut digits = Canvas::new(w, h);
+    digits.text_center(&f.strong, &level.to_string(), x + bw / 2.0, mid, m.dp(9.7), white);
+    // The level fills its share of the whole width, the cap's included, so
+    // a full battery fills the cap too.
+    let edge = x + (bw + cap_w) * level as f32 / 100.0;
+    let low = !plugged && level < LOW_BATTERY;
+    let fill = if plugged {
+        ink.charging
+    } else if low {
+        ink.low
+    } else {
+        ink.level
+    };
+    let mut art = Canvas::new(w, h);
+    for (i, px) in art.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let a = shape.data[i * 4 + 3] as f32 / 255.0;
+        if a == 0.0 {
+            continue;
+        }
+        let k = (edge - (i as u32 % w) as f32).clamp(0.0, 1.0);
+        let base = mix(ink.empty, fill, k);
+        *px = [base.r, base.g, base.b, base.a];
+        let d = digits.data[i * 4 + 3] as f32 / 255.0;
+        if plugged || low {
+            blend_over(px, white, d);
+        } else {
+            px[3] = (px[3] as f32 * (1.0 - d)).round() as u8;
+        }
+        px[3] = (px[3] as f32 * a).round() as u8;
+    }
+    (art, ox as i32, oy as i32)
 }
 
 /// The `<` back control.
@@ -1566,6 +1634,56 @@ fn theme_tile(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, h: f32, dark: b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The battery's pixel at (`x`, `y`) on screen.
+    fn pixel(art: &(Canvas, i32, i32), x: f32, y: f32) -> [u8; 4] {
+        let (c, ox, oy) = art;
+        let i = ((y as i32 - oy) as usize * c.w as usize + (x as i32 - ox) as usize) * 4;
+        c.data[i..i + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn the_battery_fills_its_level_in_the_colour_of_its_state() {
+        let f = crate::font::bundled();
+        let t = Theme::light(1200, 2608, 3.0);
+        let ink = t.pal.battery;
+        let (right, cy) = (1000.0, 77.0);
+        // 69 px wide from 930.85; the row 15 px above the middle is clear
+        // of the digits.
+        let rgba = |c: Rgba| [c.r, c.g, c.b, c.a];
+        let half = battery(&t, &f, 50, false, right, cy);
+        assert_eq!(pixel(&half, 948.0, cy - 15.0), rgba(ink.level), "a quarter in is filled");
+        assert_eq!(pixel(&half, 983.0, cy - 15.0), rgba(ink.empty), "three quarters in is empty");
+        let charging = battery(&t, &f, 50, true, right, cy);
+        assert_eq!(pixel(&charging, 948.0, cy - 15.0), rgba(ink.charging), "the cable in fills green");
+        let low = battery(&t, &f, 15, false, right, cy);
+        assert_eq!(pixel(&low, 935.0, cy), rgba(ink.low), "low and unplugged fills red");
+        assert_eq!(pixel(&low, 948.0, cy - 15.0), rgba(ink.empty), "past 15% it is empty");
+        let low_charging = battery(&t, &f, 15, true, right, cy);
+        assert_eq!(pixel(&low_charging, 935.0, cy), rgba(ink.charging), "low but charging stays green");
+        let full = battery(&t, &f, 100, false, right, cy);
+        assert_eq!(pixel(&full, right - 1.5, cy), rgba(ink.level), "a full battery fills its cap");
+    }
+
+    #[test]
+    fn digits_are_cut_out_of_a_plain_fill_and_white_over_a_coloured_one() {
+        let f = crate::font::bundled();
+        let t = Theme::dark(1200, 2608, 3.0);
+        let (right, cy) = (1000.0, 77.0);
+        // Inside the body, clear of its rounded ends and edges.
+        let holes = |art: &(Canvas, i32, i32)| -> usize {
+            let mut n = 0;
+            for y in (cy - 15.0) as i32..(cy + 15.0) as i32 {
+                for x in 945..985 {
+                    n += usize::from(pixel(art, x as f32, y as f32)[3] < 40);
+                }
+            }
+            n
+        };
+        assert!(holes(&battery(&t, &f, 100, false, right, cy)) > 60, "the digits show the page through");
+        assert_eq!(holes(&battery(&t, &f, 100, true, right, cy)), 0, "white digits over green");
+        assert_eq!(holes(&battery(&t, &f, 15, false, right, cy)), 0, "white digits over red");
+    }
 
     #[test]
     fn wrapping_keeps_brackets_punctuation_and_words_with_their_text() {

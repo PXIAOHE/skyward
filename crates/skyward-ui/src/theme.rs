@@ -20,8 +20,7 @@ pub struct Palette {
     pub avatar: Rgba,
     pub avatar_glyph: Rgba,
     pub status: Rgba,
-    pub battery: Rgba,
-    pub battery_cap: Rgba,
+    pub battery: BatteryInk,
     pub mono_icon: Rgba,
     pub danger: Rgba,
     pub danger_soft: Rgba,
@@ -32,6 +31,21 @@ pub struct Palette {
     pub outline: Rgba,
     /// Captions under the About page's spec values.
     pub spec_label: Rgba,
+}
+
+/// The status bar battery's inks, partly see-through as the stock status
+/// bar's are, so they sit on whatever page is under them.
+#[derive(Clone, Copy)]
+pub struct BatteryInk {
+    /// What the level fills while the cable is in, charging or full.
+    pub charging: Rgba,
+    /// What a low level fills with the cable out.
+    pub low: Rgba,
+    /// What any other level fills; the digits are cut out of it.
+    pub level: Rgba,
+    /// The empty part, cap included.
+    pub empty: Rgba,
+    pub bolt: Rgba,
 }
 
 /// The About page in a theme: the moving field behind it, the version
@@ -102,7 +116,10 @@ pub struct Metrics {
     pub slider_h: f32,
     pub slider_knob: f32,
     pub status_x: f32,
+    /// Where the battery ends, from the right edge; with the cable in, the
+    /// bolt ends at `status_bolt_right` instead and the battery moves left.
     pub status_right: f32,
+    pub status_bolt_right: f32,
     pub status_cy: f32,
     pub status_px: f32,
 }
@@ -186,6 +203,7 @@ fn metrics(w: u32, h: u32, px_per_dp: f32) -> Metrics {
         slider_knob: dp(18.7),
         status_x: dp(37.0),
         status_right: dp(40.0),
+        status_bolt_right: dp(38.0),
         status_cy: dp(25.7),
         status_px: dp(14.1),
     }
@@ -210,8 +228,14 @@ const LIGHT: Palette = Palette {
     avatar: Rgba::rgb(221, 223, 226),
     avatar_glyph: Rgba::rgb(255, 255, 255),
     status: Rgba::rgb(61, 61, 61),
-    battery: Rgba::rgb(29, 205, 58),
-    battery_cap: Rgba::rgb(171, 171, 171),
+    // The stock status bar's dark icons, sampled over light pages.
+    battery: BatteryInk {
+        charging: Rgba::rgb(29, 205, 58),
+        low: Rgba::rgb(250, 56, 46),
+        level: Rgba::rgb(0, 0, 0).with_alpha(196),
+        empty: Rgba::rgb(0, 0, 0).with_alpha(77),
+        bolt: Rgba::rgb(0, 0, 0).with_alpha(172),
+    },
     mono_icon: Rgba::rgb(179, 179, 179),
     danger: Rgba::rgb(230, 66, 60),
     danger_soft: Rgba::rgb(253, 236, 235),
@@ -238,8 +262,15 @@ const DARK: Palette = Palette {
     avatar: Rgba::rgb(51, 51, 51),
     avatar_glyph: Rgba::rgb(140, 140, 140),
     status: Rgba::rgb(224, 224, 224),
-    battery: Rgba::rgb(29, 205, 58),
-    battery_cap: Rgba::rgb(110, 110, 110),
+    // The stock status bar's light icons, sampled over black and over the
+    // lock screen's wallpaper.
+    battery: BatteryInk {
+        charging: Rgba::rgb(97, 202, 81),
+        low: Rgba::rgb(230, 75, 59),
+        level: Rgba::rgb(255, 255, 255).with_alpha(232),
+        empty: Rgba::rgb(255, 255, 255).with_alpha(94),
+        bolt: Rgba::rgb(255, 255, 255).with_alpha(230),
+    },
     mono_icon: Rgba::rgb(110, 110, 110),
     danger: Rgba::rgb(255, 92, 84),
     danger_soft: Rgba::rgb(52, 24, 24),

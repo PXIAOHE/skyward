@@ -251,7 +251,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
 
     let mut screen = Canvas::new(w, h);
     let mut shown_clock = String::new();
+    // The readings are taken again every 30 seconds, the battery every
+    // second, so plugging the cable in or pulling it shows at once.
     let mut read_at = Instant::now();
+    let mut battery_at = read_at;
     let mut installer: Option<Installer> = None;
     // Whether the panel's frame memory has been blacked out for an off
     // panel; cleared once a real frame is shown again.
@@ -267,7 +270,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
         if read_at.elapsed().as_secs() >= 30 {
             info = skyward_info::collect(cfg)?;
             read_at = Instant::now();
+            battery_at = read_at;
             app.refresh();
+        } else if battery_at.elapsed().as_secs() >= 1 {
+            let battery = skyward_info::battery_now()?;
+            battery_at = Instant::now();
+            if battery != info.battery {
+                info.battery = battery;
+                app.refresh();
+            }
         }
         let panel = app.panel(now);
         let mut shown = false;

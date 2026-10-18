@@ -109,6 +109,13 @@ pub struct Battery {
     pub voltage: Option<u64>,
 }
 
+impl Battery {
+    /// Whether the cable is in: charging, or full and topped up.
+    pub fn plugged(&self) -> bool {
+        matches!(self.charge, Charge::Charging | Charge::Full)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boot {
     /// From `androidboot.vbmeta.device_state`.

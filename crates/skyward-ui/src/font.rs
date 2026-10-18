@@ -75,7 +75,7 @@ pub const STOCK_WEIGHTS: Weights = Weights {
     value: 320.0,
     badge: 505.0,
     status: 485.0,
-    strong: 700.0,
+    strong: 545.0,
     display: 480.0,
 };
 

@@ -270,7 +270,29 @@ fn main() -> Result<()> {
         write_png(&path, &c)?;
         println!("wrote {}", path.display());
     }
+
+    // The status bar's battery in each state, light and dark, one bar a row.
+    for (name, theme) in [("66-battery-light", light), ("67-battery-dark", Theme::dark(w, h, ppd))] {
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &battery_states(&fonts, &theme))?;
+        println!("wrote {}", path.display());
+    }
     Ok(())
+}
+
+/// Status bars over the page colour, one for each state the battery shows:
+/// charging, plain levels with the cable out, low ones, full.
+fn battery_states(f: &Fonts, t: &Theme) -> Canvas {
+    let states: [(u8, bool); 8] = [(50, true), (15, true), (100, true), (100, false), (50, false), (30, false), (15, false), (5, false)];
+    let row = t.m.dp(52.0).round() as u32;
+    let mut sheet = Canvas::new(t.m.w, row * states.len() as u32);
+    for (k, &battery) in states.iter().enumerate() {
+        let mut bar = Canvas::new(t.m.w, row);
+        bar.clear(t.pal.bg);
+        widgets::status_bar(&mut bar, t, f, &Bar { clock: CLOCK, battery: Some(battery) }, t.pal.status);
+        sheet.put(&bar, (row as usize * k) as i32);
+    }
+    sheet
 }
 
 /// File name, page, dark theme, and the touches leading up to the moment,
@@ -452,7 +474,7 @@ fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo, data: DataState) -> C
     if let Some(p) = &frame.pinned {
         c.put(&p.canvas, p.top.round() as i32);
     }
-    let battery = info.battery.as_ref().map(|b| (b.level, b.charge == Charge::Charging));
+    let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
     widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery }, t.pal.status);
     c
 }
