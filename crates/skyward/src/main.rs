@@ -99,6 +99,10 @@ enum Cmd {
         #[arg(long, default_value = "/dev/dri/card0")]
         card: String,
     },
+    /// Set the system clock from the RTC and the offset Android keeps on
+    /// persist, as the recovery does when it starts, and print the time.
+    #[cfg(target_os = "android")]
+    Clock,
     /// Drive the panel and touchscreen with the recovery UI.
     #[cfg(target_os = "android")]
     Ui {
@@ -185,6 +189,12 @@ fn main() -> Result<()> {
                 println!("{} {}x{} in {} ms", path.display(), c.w, c.h, t0.elapsed().as_millis());
                 std::thread::sleep(std::time::Duration::from_millis(interval));
             }
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Clock => {
+            let ms = skyward_sys::clock::set_from_rtc()?;
+            println!("{}", skyward_ui::fmt::datetime((ms / 1000) as i64));
             Ok(())
         }
         #[cfg(target_os = "android")]
@@ -277,6 +287,14 @@ fn recovery() -> Result<()> {
             request.command,
             request.args
         ))?;
+        // The kernel starts the clock from the RTC, days after 1970 on these
+        // phones; the screen and the files written still work without the
+        // real time, so a failure goes to the kernel log.
+        #[cfg(target_os = "android")]
+        match skyward_sys::clock::set_from_rtc() {
+            Ok(ms) => skyward_sys::kmsg(&format!("clock set to {} ms from the RTC and persist", ms))?,
+            Err(e) => skyward_sys::kmsg(&format!("clock not set: {e:#}"))?,
+        }
         let slot = booted_slot()?;
         // Recovery has to stay usable when super cannot be mounted, as after
         // it is wiped, so the reason goes to the kernel log instead.

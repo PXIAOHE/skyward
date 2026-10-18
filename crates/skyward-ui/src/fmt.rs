@@ -240,8 +240,7 @@ pub fn file_time(unix: i64, folder: bool, now: i64) -> String {
     let (year, month, day) = day_in_china(unix);
     let today = day_in_china(now);
     if (year, month, day) == today {
-        let minutes = (unix + 8 * 3600).rem_euclid(86_400) / 60;
-        format!("{:02}:{:02}", minutes / 60, minutes % 60)
+        clock(unix)
     } else if year == today.0 && !folder {
         format!("{month:02}/{day:02}")
     } else {
@@ -270,8 +269,13 @@ pub fn file_size(bytes: u64) -> String {
 
 /// A Unix time in China, to the minute: `2026年10月19日 02:31`.
 pub fn datetime(unix: i64) -> String {
+    format!("{} {}", date(unix), clock(unix))
+}
+
+/// The time of day in China, `HH:MM`, as the status bar shows it.
+pub fn clock(unix: i64) -> String {
     let minutes = (unix + 8 * 3600).rem_euclid(86_400) / 60;
-    format!("{} {:02}:{:02}", date(unix), minutes / 60, minutes % 60)
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// A file's type and permissions as `ls -l` prints them: `drwxr-xr-x`.
@@ -520,6 +524,9 @@ mod tests {
     fn times_to_the_minute_in_china() {
         // 2026-10-18 18:31 UTC is 02:31 the next morning in Beijing.
         assert_eq!(datetime(1_792_348_260), "2026年10月19日 02:31");
+        assert_eq!(clock(1_792_348_260), "02:31");
+        // Midnight in Beijing is 16:00 UTC the day before.
+        assert_eq!(clock(1_792_339_200), "00:00");
     }
 
     #[test]

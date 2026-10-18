@@ -108,12 +108,11 @@ fn power(target: Target) -> Result<()> {
     })
 }
 
-/// Local wall-clock time as `HH:MM`.
-fn clock() -> String {
-    let now = unsafe { libc::time(std::ptr::null_mut()) };
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&now, &mut tm) };
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+/// The time of day in China for the status bar: the recovery carries no
+/// time zone files, and China's is the time zone the settings offer.
+fn clock() -> Result<String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?;
+    Ok(skyward_ui::fmt::clock(now.as_secs() as i64))
 }
 
 /// The recovery does not mount /data itself yet, so a mounted /data was
@@ -260,7 +259,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
     loop {
         let now = monotonic_ms();
         app.tick(now);
-        let time = clock();
+        let time = clock()?;
         if time != shown_clock {
             shown_clock = time;
             app.redraw();
