@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 pub mod bcb;
 pub mod clock;
+pub mod control;
 pub mod ueventd;
 
 /// A system property, or `None` when it is unset.

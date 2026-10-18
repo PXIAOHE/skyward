@@ -5,6 +5,7 @@ use anyhow::{anyhow, ensure, Context, Result};
 use skyward_config::{DeviceConfig, Service};
 use skyward_info::DataState;
 use skyward_install::{Detach, Installer};
+use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
 use skyward_ui::app::{App, Effect, FileKind, FileRow, Keys, MountFailure, Screen, Target, UsbLink};
 use skyward_ui::surface::kms::KmsSurface;
@@ -137,6 +138,26 @@ fn fastboot_status() -> Result<(bool, UsbLink)> {
         _ => UsbLink::Connecting,
     };
     Ok((running, link))
+}
+
+/// What the pages act on: a touch or a key, or what a program asked on the
+/// recovery socket.
+enum Incoming {
+    Input(Event),
+    Asked(Request),
+}
+
+/// What a request on the recovery socket comes to. adbd asks for fastboot
+/// while the slot's partitions are up, which fastbootd cannot work with, so
+/// the phone restarts into fastboot as from the reboot page; fastbootd asks
+/// for the recovery it runs in. A request that finds the recovery already
+/// where it asks to be, as when the keys left fastboot first, needs nothing.
+fn answer(request: Request, fastboot: bool) -> Vec<Effect> {
+    match (request, fastboot) {
+        (Request::Fastboot, false) => vec![Effect::Reboot(Target::Fastboot)],
+        (Request::Recovery, true) => vec![Effect::EnterRecovery],
+        _ => Vec::new(),
+    }
 }
 
 /// The time of day in China for the status bar: the recovery carries no
@@ -294,8 +315,8 @@ fn detach(services: Vec<Service>) -> Detach {
     })
 }
 
-/// Wait until a device or the installer has something, or `timeout_ms`
-/// passes.
+/// Wait until a device, the installer or the recovery socket has something,
+/// or `timeout_ms` passes.
 fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
     let mut polls: Vec<libc::pollfd> = fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
     let n = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, timeout_ms) };
@@ -318,6 +339,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h)?;
+    // adbd and fastbootd ask over it to go over to fastboot and back.
+    let control = Control::open()?;
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
     let mut backlight = Backlight::open()?;
     let mut app = App::new(start, w, h, cfg.display.density as f32 / 160.0);
@@ -419,6 +442,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
         if let Some(i) = &installer {
             fds.push(i.fd());
         }
+        if let Some(c) = &control {
+            fds.push(c.fd());
+        }
         wait(&fds, timeout)?;
         let now = monotonic_ms();
         // What the installer told comes first, so a touch acts on the page
@@ -433,10 +459,21 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
                 }
             }
         }
-        for ev in inputs.read()? {
-            let effects = match ev {
-                Event::Touch(t, at) => app.touch(t, &fonts, at),
-                Event::Key(k) => app.key(k, now),
+        // Then what programs asked on the recovery socket, each answered as
+        // the recovery stands when its turn comes.
+        let asked = match &control {
+            Some(c) => c.requests()?,
+            None => Vec::new(),
+        };
+        let incoming = asked.into_iter().map(Incoming::Asked).chain(inputs.read()?.into_iter().map(Incoming::Input));
+        for came in incoming {
+            let effects = match came {
+                Incoming::Asked(request) => {
+                    skyward_sys::kmsg(&format!("asked on the recovery socket: {request:?}"))?;
+                    answer(request, fastboot)
+                }
+                Incoming::Input(Event::Touch(t, at)) => app.touch(t, &fonts, at),
+                Incoming::Input(Event::Key(k)) => app.key(k, now),
             };
             for fx in effects {
                 eprintln!("effect {fx:?}");
