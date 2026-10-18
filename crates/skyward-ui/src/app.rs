@@ -1400,7 +1400,7 @@ mod tests {
     const PPD: f32 = 3.5;
 
     fn fonts() -> Fonts {
-        Fonts::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/fonts/MiSansVF.ttf"), 0).unwrap()
+        crate::font::bundled()
     }
 
     fn info() -> DeviceInfo {

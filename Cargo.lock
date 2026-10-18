@@ -1107,6 +1107,7 @@ dependencies = [
  "skyward-info",
  "skyward-install",
  "skyward-vab",
+ "ttf-parser",
 ]
 
 [[package]]

@@ -106,6 +106,9 @@ enum Cmd {
         config: std::path::PathBuf,
         #[arg(long, default_value = "/skyward/MiSansVF.ttf")]
         font: std::path::PathBuf,
+        /// The terminal's monospaced typeface.
+        #[arg(long, default_value = "/skyward/KirkMono-Regular.ttf")]
+        mono: std::path::PathBuf,
         /// Open on the unlock page instead of the home page.
         #[arg(long)]
         unlock: bool,
@@ -185,10 +188,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(target_os = "android")]
-        Cmd::Ui { config, font, unlock, dump } => {
+        Cmd::Ui { config, font, mono, unlock, dump } => {
             let cfg = DeviceConfig::load(&config)?;
             let start = if unlock { skyward_ui::app::Screen::Decrypt } else { skyward_ui::app::Screen::Home };
-            ui::run(&cfg, &font, start, dump.as_deref())
+            ui::run(&cfg, &font, &mono, start, dump.as_deref())
         }
     }
 }
@@ -301,7 +304,8 @@ fn recovery() -> Result<()> {
         }
         #[cfg(target_os = "android")]
         {
-            ui::run(&cfg, &Path::new("/").join(ramdisk::FONT), skyward_ui::app::Screen::Home, None)
+            let root = Path::new("/");
+            ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), skyward_ui::app::Screen::Home, None)
         }
         #[cfg(not(target_os = "android"))]
         {

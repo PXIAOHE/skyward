@@ -2,8 +2,8 @@ use ab_glyph::{Font, FontRef, PxScale, VariableFont};
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-/// One weight instance of the UI typeface. MiSans ships as a variable font, so
-/// every weight is the same file with a different `wght` coordinate.
+/// One weight instance of a typeface. MiSans ships as a variable font, so
+/// every UI weight is the same file with a different `wght` coordinate.
 pub struct Face {
     pub(crate) font: FontRef<'static>,
     upem: f32,
@@ -24,6 +24,11 @@ impl Face {
     /// the same way Android `sp` values are defined.
     pub fn scale(&self, em_px: f32) -> PxScale {
         PxScale::from(em_px * self.height / self.upem)
+    }
+
+    /// Whether the typeface draws `ch` itself.
+    pub fn has(&self, ch: char) -> bool {
+        self.font.glyph_id(ch).0 != 0
     }
 
     /// Vertical ink extent of the reference ideograph 「中」 relative to the
@@ -91,21 +96,60 @@ pub struct Fonts {
     pub strong: Face,
     /// The About page wordmark.
     pub display: Face,
+    /// The terminal's monospaced face, for the characters it has.
+    pub mono: Face,
+    /// What the UI typeface says about itself.
+    pub info: FontInfo,
+    /// What the monospaced typeface says about itself.
+    pub mono_info: FontInfo,
     data: &'static [u8],
     index: u32,
 }
 
+/// A typeface's own name, version and copyright, from its name table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontInfo {
+    pub family: String,
+    pub version: String,
+    /// The copyright notice, when the font carries one; some leave it to the
+    /// licence file that comes with them.
+    pub copyright: Option<String>,
+}
+
+impl FontInfo {
+    fn read(data: &[u8], index: u32) -> Result<FontInfo> {
+        let face = ttf_parser::Face::parse(data, index).map_err(|e| anyhow!("parse font: {e}"))?;
+        let name = |id: u16| -> Option<String> {
+            face.names().into_iter().filter(|n| n.name_id == id && n.is_unicode()).find_map(|n| n.to_string())
+        };
+        let needed = |id: u16| name(id).ok_or_else(|| anyhow!("the font names no entry {id}"));
+        let version = needed(ttf_parser::name_id::VERSION)?;
+        Ok(FontInfo {
+            family: needed(ttf_parser::name_id::FAMILY)?,
+            // "Version 4.009" names the version twice in a row labelled 版本.
+            version: version.strip_prefix("Version ").unwrap_or(&version).to_string(),
+            copyright: name(ttf_parser::name_id::COPYRIGHT_NOTICE),
+        })
+    }
+}
+
+/// Read a font file for the life of the process: the faces borrow its bytes.
+fn leak(path: &Path) -> Result<&'static [u8]> {
+    let bytes = std::fs::read(path).map_err(|e| anyhow!("read font {}: {e}", path.display()))?;
+    Ok(Box::leak(bytes.into_boxed_slice()))
+}
+
 impl Fonts {
-    pub fn load(path: impl AsRef<Path>, index: u32) -> Result<Self> {
-        Self::load_with(path, index, &STOCK_WEIGHTS)
+    /// The UI typeface from `path` (face `index` of a collection) and the
+    /// terminal's monospaced one from `mono`.
+    pub fn load(path: impl AsRef<Path>, index: u32, mono: impl AsRef<Path>) -> Result<Self> {
+        Self::load_with(path, index, mono, &STOCK_WEIGHTS)
     }
 
-    pub fn load_with(path: impl AsRef<Path>, index: u32, w: &Weights) -> Result<Self> {
-        let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|e| anyhow!("read font {}: {e}", path.display()))?;
-        // The face borrows the bytes for the life of the process; one copy
-        // backs every weight instance.
-        let data: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    pub fn load_with(path: impl AsRef<Path>, index: u32, mono: impl AsRef<Path>, w: &Weights) -> Result<Self> {
+        // One copy of the bytes backs every weight instance.
+        let data = leak(path.as_ref())?;
+        let mono_data = leak(mono.as_ref())?;
         let face = |wght: f32| Face::new(data, index, wght);
         Ok(Fonts {
             title: face(w.title)?,
@@ -117,6 +161,10 @@ impl Fonts {
             status: face(w.status)?,
             strong: face(w.strong)?,
             display: face(w.display)?,
+            // A single-weight file: the coordinate asks for the weight it is.
+            mono: Face::new(mono_data, 0, 400.0)?,
+            info: FontInfo::read(data, index)?,
+            mono_info: FontInfo::read(mono_data, 0)?,
             data,
             index,
         })
@@ -136,4 +184,11 @@ impl Fonts {
             .map(|a| (String::from_utf8_lossy(&a.tag).into_owned(), a.min_value, a.default_value, a.max_value))
             .collect()
     }
+}
+
+/// The typefaces the recovery image carries, from the repository.
+#[cfg(test)]
+pub(crate) fn bundled() -> Fonts {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/fonts");
+    Fonts::load(format!("{dir}/MiSansVF.ttf"), 0, format!("{dir}/KirkMono-Regular.ttf")).unwrap()
 }

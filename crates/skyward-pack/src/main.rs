@@ -54,6 +54,12 @@ enum Cmd {
         /// The UI typeface.
         #[arg(long)]
         font: PathBuf,
+        /// The terminal's monospaced typeface.
+        #[arg(long)]
+        mono: PathBuf,
+        /// The monospaced typeface's licence, which goes with it.
+        #[arg(long)]
+        mono_license: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -78,7 +84,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img)
         }
-        Cmd::Recovery { stock, binary, config, font, out } => {
+        Cmd::Recovery { stock, binary, config, font, mono, mono_license, out } => {
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
@@ -91,6 +97,8 @@ fn main() -> Result<()> {
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             rd.add(paths::CONFIG, 0o644, read(&config)?)?;
             rd.add(paths::FONT, 0o644, read(&font)?)?;
+            rd.add(paths::MONO, 0o644, read(&mono)?)?;
+            rd.add(paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier

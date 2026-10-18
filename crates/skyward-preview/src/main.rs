@@ -26,14 +26,14 @@ fn main() -> Result<()> {
     let out = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("preview-out"));
     std::fs::create_dir_all(&out)?;
 
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let font_path = font_path()?;
-    let fonts = Fonts::load(&font_path, 0)?;
+    let fonts = Fonts::load(&font_path, 0, root.join("resources/fonts/KirkMono-Regular.ttf"))?;
     eprintln!("font: {}", font_path.display());
     for (tag, min, def, max) in fonts.axes() {
         eprintln!("axis {tag}: {min}..{max} (default {def})");
     }
 
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cfg = DeviceConfig::load(root.join("devices/nezha.toml"))?;
     let (w, h) = (cfg.display.width, cfg.display.height);
     let ppd = cfg.display.density as f32 / 160.0;

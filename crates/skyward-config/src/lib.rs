@@ -9,6 +9,11 @@ pub mod ramdisk {
     pub const CONFIG: &str = "skyward/device.toml";
     /// The UI typeface.
     pub const FONT: &str = "skyward/MiSansVF.ttf";
+    /// The terminal's monospaced typeface.
+    pub const MONO: &str = "skyward/KirkMono-Regular.ttf";
+    /// The monospaced typeface's licence, which travels with every copy of
+    /// it.
+    pub const MONO_LICENSE: &str = "skyward/KirkMono-OFL.txt";
     /// The recovery service binary init starts.
     pub const RECOVERY: &str = "system/bin/recovery";
     /// The first property file init loads in recovery mode.

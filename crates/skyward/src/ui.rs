@@ -182,12 +182,12 @@ fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
     Ok(())
 }
 
-pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) -> Result<()> {
+pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Option<&Path>) -> Result<()> {
     if cfg.display.density == 0 {
         return Err(anyhow!("{}: [display] density is required to lay out the UI", cfg.device.codename));
     }
     let mut info = skyward_info::collect(cfg)?;
-    let fonts = Fonts::load(font, 0)?;
+    let fonts = Fonts::load(font, 0, mono)?;
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());

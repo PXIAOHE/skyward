@@ -121,6 +121,21 @@ impl Canvas {
         }
     }
 
+    /// Copy the opaque `strip`, as wide as this canvas, over it with its top
+    /// row at `y`; rows past either edge are left out.
+    pub fn put(&mut self, strip: &Canvas, y: i32) {
+        assert_eq!(strip.w, self.w, "a strip spans the canvas");
+        let first = (-y).clamp(0, strip.h as i32);
+        let last = (self.h as i32 - y).clamp(first, strip.h as i32);
+        if first == last {
+            return;
+        }
+        let row = self.w as usize * 4;
+        let dst = (y + first) as usize * row;
+        let n = (last - first) as usize * row;
+        self.data[dst..dst + n].copy_from_slice(&strip.data[first as usize * row..first as usize * row + n]);
+    }
+
     /// Each row as runs of clear, solid and partly covered pixels, for
     /// laying the canvas over something that keeps changing.
     pub fn runs(&self) -> Vec<Vec<Run>> {
