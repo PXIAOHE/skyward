@@ -115,6 +115,10 @@ enum Cmd {
     Keymint {
         #[arg(long, default_value = "/metadata/vold/metadata_encryption/key")]
         key: PathBuf,
+        /// Report instead what the key service keeps under this name, such
+        /// as profile_key_name_decrypt_999.
+        #[arg(long)]
+        alias: Option<String>,
     },
     /// Say what the phone's credential service answers, which takes no
     /// credential and changes nothing.
@@ -236,11 +240,19 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(target_os = "android")]
-        Cmd::Keymint { key } => {
+        Cmd::Keymint { key, alias } => {
             let binder = skyward_binder::driver::Binder::open()?;
             let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
             let hw = service.hardware()?;
             println!("keymint {} version {} at security level {} by {}", hw.name, hw.version, hw.security_level, hw.author);
+            if let Some(alias) = alias {
+                let held = skyward_crypto::keystore2::key_blob(Path::new(skyward_crypto::keystore2::DATABASE), &alias)?;
+                println!("{alias} is a key of {} bytes", held.len());
+                for (tag, value) in service.authorizations(&held, &[])? {
+                    println!("  tag {tag} = {value} ({value:#x})");
+                }
+                return Ok(());
+            }
             let stored = skyward_crypto::keystore::StoredKey::load(&key)?;
             for (tag, value) in stored.authorizations(&service)? {
                 println!("  tag {tag} = {value}");
