@@ -116,6 +116,10 @@ enum Cmd {
         #[arg(long, default_value = "/metadata/vold/metadata_encryption/key")]
         key: PathBuf,
     },
+    /// Open the data partition with the key the phone keeps for it, and
+    /// mount it read-only.
+    #[cfg(target_os = "android")]
+    Data,
     /// Drive the panel and touchscreen with the recovery UI.
     #[cfg(target_os = "android")]
     Ui {
@@ -233,6 +237,23 @@ fn main() -> Result<()> {
             }
             let raw = stored.unwrap(skyward_crypto::keystore::Unwrap::Hardware(&service))?;
             println!("{} holds a key of {} bytes", key.display(), raw.len());
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Data => {
+            let binder = skyward_binder::driver::Binder::open()?;
+            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+            let at = Path::new(skyward_crypto::data::MOUNT);
+            if skyward_block::mount::is_mount_point(at)? {
+                println!("{} is open already", at.display());
+            } else {
+                let (mapped, filesystem) = skyward_crypto::data::open(&service)?;
+                println!("{} holds {} at {}", mapped.display(), filesystem, at.display());
+            }
+            skyward_crypto::data::open_shared(&service)?;
+            println!("the files that belong to no one user can be read");
+            let users = skyward_crypto::data::open_users(&service)?;
+            println!("users whose own keys are in: {users:?}");
             Ok(())
         }
         #[cfg(target_os = "android")]

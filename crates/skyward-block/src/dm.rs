@@ -6,18 +6,23 @@ use std::mem::size_of;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
 /// One target of a device-mapper table, in 512-byte sectors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// `sectors` sectors of block device `device` (major, minor), starting
     /// at its sector `offset`.
     Linear { sectors: u64, device: (u32, u32), offset: u64 },
     Zero { sectors: u64 },
+    /// `sectors` sectors of `device`, decrypted with `key` under `cipher`
+    /// as the kernel names it. `wrapped` says the key is one only the
+    /// storage hardware can unwrap, which is how a phone keeps the key its
+    /// data partition is encrypted with out of the running system.
+    DefaultKey { sectors: u64, device: String, cipher: String, key: String, wrapped: bool },
 }
 
 impl Target {
     pub fn sectors(&self) -> u64 {
-        match *self {
-            Target::Linear { sectors, .. } | Target::Zero { sectors } => sectors,
+        match self {
+            Target::Linear { sectors, .. } | Target::Zero { sectors } | Target::DefaultKey { sectors, .. } => *sectors,
         }
     }
 
@@ -25,13 +30,21 @@ impl Target {
         match self {
             Target::Linear { .. } => "linear",
             Target::Zero { .. } => "zero",
+            Target::DefaultKey { .. } => "default-key",
         }
     }
 
     fn params(&self) -> String {
-        match *self {
+        match self {
             Target::Linear { device: (major, minor), offset, .. } => format!("{major}:{minor} {offset}"),
             Target::Zero { .. } => String::new(),
+            Target::DefaultKey { device, cipher, key, wrapped, .. } => {
+                let mut extra = vec!["allow_discards", "sector_size:4096", "iv_large_sectors"];
+                if *wrapped {
+                    extra.push("wrappedkey_v0");
+                }
+                format!("{cipher} {key} 0 {device} 0 {} {}", extra.len(), extra.join(" "))
+            }
         }
     }
 }

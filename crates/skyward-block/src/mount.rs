@@ -41,11 +41,19 @@ mod sys {
     /// the kernel accepts, and return its name. Only the kernel's answers for
     /// "not this filesystem" move on to the next one.
     pub fn mount_ro(device: &Path, target: &Path) -> Result<&'static str> {
+        mount_ro_with(device, target, "")
+    }
+
+    /// Mount read-only with `options`, which the filesystem reads as it
+    /// would the options a phone's own table gives it.
+    pub fn mount_ro_with(device: &Path, target: &Path, options: &str) -> Result<&'static str> {
         let (src, dst) = (cstr(device)?, cstr(target)?);
+        let data = CString::new(options).with_context(|| format!("{options} holds a NUL"))?;
+        let data = if options.is_empty() { null() } else { data.as_ptr().cast() };
         let mut refused = Vec::new();
         for fs in FILESYSTEMS {
             let ty = CString::new(fs).expect("filesystem names hold no NUL");
-            if unsafe { libc::mount(src.as_ptr(), dst.as_ptr(), ty.as_ptr(), libc::MS_RDONLY, null()) } == 0 {
+            if unsafe { libc::mount(src.as_ptr(), dst.as_ptr(), ty.as_ptr(), libc::MS_RDONLY, data) } == 0 {
                 return Ok(fs);
             }
             let e = os_error();
@@ -268,6 +276,10 @@ mod sys {
         bail!("this host does not mount {}", device.display())
     }
 
+    pub fn mount_ro_with(device: &Path, _target: &Path, _options: &str) -> Result<&'static str> {
+        bail!("this host does not mount {}", device.display())
+    }
+
     pub fn mount_ro_over(device: &Path, _target: &Path) -> Result<&'static str> {
         bail!("this host does not mount {}", device.display())
     }
@@ -302,5 +314,6 @@ mod sys {
 }
 
 pub use sys::{
-    holders, is_mount_point, mount_ro, mount_ro_over, umount, umount_detach, umount_detach_over, umount_over, visible,
+    holders, is_mount_point, mount_ro, mount_ro_over, mount_ro_with, umount, umount_detach, umount_detach_over,
+    umount_over, visible,
 };

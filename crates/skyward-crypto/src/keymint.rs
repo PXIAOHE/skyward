@@ -12,6 +12,7 @@ const OPERATION: &str = "android.hardware.security.keymint.IKeyMintOperation";
 
 const GET_HARDWARE_INFO: u32 = 1;
 const UPGRADE_KEY: u32 = 6;
+const CONVERT_STORAGE_KEY: u32 = 13;
 const GET_KEY_CHARACTERISTICS: u32 = 14;
 const BEGIN: u32 = 10;
 
@@ -118,6 +119,19 @@ impl<'a> KeyMint<'a> {
         };
         read.go(end)?;
         Ok(info)
+    }
+
+    /// Turn a key that only the storage hardware can use into the form it
+    /// takes for this start of the phone. The key itself never leaves the
+    /// secure world: what comes back is wrapped again, for the hardware to
+    /// unwrap as it reads and writes.
+    pub fn ephemeral_storage_key(&self, key: &[u8]) -> Result<Vec<u8>> {
+        let mut call = Parcel::call(DEVICE);
+        call.blob(key);
+        let reply = self.device.transact(CONVERT_STORAGE_KEY, &call).context("make a storage key for this start")?;
+        let mut read = reply.read();
+        status::ok(&mut read).context("make a storage key for this start")?;
+        read.blob().context("read the storage key")
     }
 
     /// What the key service says a key may be used for: each entry is a tag

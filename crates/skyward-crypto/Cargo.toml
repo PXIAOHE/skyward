@@ -10,4 +10,6 @@ sha2 = "0.10.9"
 aes-gcm = "0.10.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
+libc = { workspace = true }
 skyward-binder = { path = "../skyward-binder" }
+skyward-block = { path = "../skyward-block" }
