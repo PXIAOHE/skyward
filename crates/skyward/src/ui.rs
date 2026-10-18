@@ -123,6 +123,28 @@ fn data_state() -> Result<DataState> {
     Ok(if here.dev() != up.dev() { DataState::Decrypted } else { DataState::Unmounted })
 }
 
+/// Open the data partition and let in every key the phone keeps for it
+/// that needs nothing the user knows, and give the users whose own files
+/// can be read afterwards.
+fn decrypt() -> Result<Vec<u32>> {
+    use skyward_crypto::data;
+    let binder = skyward_binder::driver::Binder::open()?;
+    let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+    if !skyward_block::mount::is_mount_point(Path::new(data::MOUNT))? {
+        let (mapped, filesystem) = data::open(&service)?;
+        skyward_sys::kmsg(&format!("{} holds {filesystem} at {}", mapped.display(), data::MOUNT))?;
+    }
+    data::open_shared(&service)?;
+    let stretched = skyward_crypto::user::stretched_without_credential();
+    let mut opened = Vec::new();
+    for user in data::open_users(&service)? {
+        data::open_user_files(&service, user, &stretched)
+            .with_context(|| format!("open what user {user} owns"))?;
+        opened.push(user);
+    }
+    Ok(opened)
+}
+
 /// What the file manager lists for a folder: its entries, folders and
 /// links to folders first, then by name ignoring case, each folder with how
 /// many entries it holds. An entry gone by the time it is looked at, as
@@ -244,7 +266,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
     if backlight.level > 0 {
         app.state.brightness = (backlight.level as f32 / backlight.top as f32).min(1.0);
     }
-    let data = data_state()?;
+    let mut data = data_state()?;
     // The mount page shows the partitions as they are when it opens and
     // after each change; why they cannot be read is the page's to say.
     let mounts = || read_mounts(&cfg.services).map_err(|e| format!("{e:#}"));
@@ -352,6 +374,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
                     }
                     Effect::Cancel => installer.as_ref().context("no installer to cancel")?.cancel()?,
                     Effect::ReadMounts => app.set_mounts(mounts()),
+                    Effect::Decrypt => match decrypt() {
+                        Ok(users) => {
+                            data = data_state()?;
+                            app.refresh();
+                            skyward_sys::kmsg(&format!("the data partition is open, with the files of users {users:?}"))?;
+                        }
+                        Err(e) => {
+                            skyward_sys::kmsg(&format!("the data partition stays closed: {e:#}"))?;
+                            app.report(&format!("{e:#}"), now);
+                        }
+                    },
                     Effect::ReadDir(folder) => {
                         let files = read_folder(Path::new(&folder)).map_err(|e| format!("{e:#}"));
                         let listed = SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_secs();

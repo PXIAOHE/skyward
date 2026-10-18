@@ -74,6 +74,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Backup => ("滑动以备份", false),
         Confirm::Restore => ("滑动以恢复", true),
         Confirm::Slot => ("滑动以切换", true),
+        Confirm::Decrypt => ("滑动以解密", false),
     }
 }
 
@@ -155,12 +156,14 @@ pub fn home(cx: &Ctx) -> Frame {
         Row::new("备份").icon(BLUE, Icon::Backup),
         Row::new("恢复").icon(PURPLE, Icon::Restore),
         Row::new("挂载").icon(SLATE, Icon::Mount),
+        Row::new("解密").icon(BLUE, Icon::Lock).trail(Trail::Value(fmt::data(cx.data))),
     ]);
     out.extend(hits(&tools.rows, &[
         Action::Open(Screen::Install),
         Action::Open(Screen::Backup),
         Action::Open(Screen::Restore),
         Action::Open(Screen::Mount),
+        Action::Open(Screen::Decrypt),
     ]));
     y = tools.bottom + t.m.card_gap;
     let target = REBOOT_TARGETS[cx.state.reboot].0;
@@ -436,20 +439,24 @@ pub fn decrypt(cx: &Ctx) -> Frame {
     let m = &t.m;
     let x = m.w as f32 / 2.0;
     let lock_cy = m.dp(150.0);
+    let open = cx.data == DataState::Decrypted;
     c.fill_circle(x, lock_cy, m.dp(30.0), t.pal.card);
-    widgets::glyph(&mut c, Icon::Lock, x, lock_cy, m.dp(40.0), t.pal.accent, t.pal.card);
-    c.text_center(&f.heading, "输入锁屏图案", x, lock_cy + m.dp(64.0), m.dp(24.0), t.pal.text);
-    c.text_center(&f.body, "解锁后才能读取「数据」分区", x, lock_cy + m.dp(98.0), m.sub_px, t.pal.subtitle);
-    let (pcx, pcy, span) = (x, m.h as f32 * 0.6, m.dp(190.0));
-    widgets::pattern_lock(&mut c, t, pcx, pcy, span, &cx.state.pattern);
+    widgets::glyph(&mut c, if open { Icon::Folder } else { Icon::Lock }, x, lock_cy, m.dp(40.0), t.pal.accent, t.pal.card);
+    let (title, note) = match open {
+        true => ("数据分区已解密", "文件管理里可以看到手机上的文件"),
+        false => ("解密数据分区", "解开后才能看到手机上的文件"),
+    };
+    c.text_center(&f.heading, title, x, lock_cy + m.dp(64.0), m.dp(24.0), t.pal.text);
+    c.text_center(&f.body, note, x, lock_cy + m.dp(98.0), m.sub_px, t.pal.subtitle);
+    let mut out = Vec::new();
+    if !open {
+        let track = widgets::confirm(&mut c, t, f, m.h as f32 * 0.62, confirm_label(Confirm::Decrypt).0, false, cx.state.confirm);
+        out.push(Hit { rect: track, action: Action::Confirm(Confirm::Decrypt) });
+    }
     let skip_cy = m.h as f32 - m.dp(64.0);
-    c.text_center(&f.heading, "暂不解密", x, skip_cy, m.row_title_px, t.pal.accent);
-    let reach = span / 2.0 + m.dp(40.0);
-    let out = vec![
-        Hit { rect: Rect::new(pcx - reach, pcy - reach, reach * 2.0, reach * 2.0), action: Action::Pattern },
-        Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip },
-    ];
-    Frame { back: false, header: false, pattern: Some((pcx, pcy, span)), ..Frame::new(t, c, out, "解密", 0.0) }
+    c.text_center(&f.heading, if open { "完成" } else { "暂不解密" }, x, skip_cy, m.row_title_px, t.pal.accent);
+    out.push(Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
+    Frame { header: false, ..Frame::new(t, c, out, "解密", 0.0) }
 }
 
 /// Reboot target picker with a swipe-to-confirm control.

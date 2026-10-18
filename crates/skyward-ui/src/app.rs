@@ -144,6 +144,8 @@ pub enum Confirm {
     Restore,
     /// Start next from the slot chosen on the slot page.
     Slot,
+    /// Open the data partition with the keys the phone keeps for it.
+    Decrypt,
 }
 
 /// Which slots an image goes to, by the slot the phone runs from.
@@ -526,6 +528,8 @@ pub enum Effect {
     Unmount(String),
     /// List the folder at this path for the file manager.
     ReadDir(String),
+    /// Open the data partition with the keys the phone keeps for it.
+    Decrypt,
 }
 
 enum Drag {
@@ -1237,6 +1241,12 @@ impl App {
         self.snap = true;
     }
 
+    /// Show the user what the runtime has to say about work it was asked
+    /// to do.
+    pub fn report(&mut self, text: &str, now: u64) {
+        self.say(text, now);
+    }
+
     fn say(&mut self, text: &str, now: u64) {
         self.toast = Some((text.to_string(), now + TOAST_MS));
         self.dirty = true;
@@ -1702,6 +1712,7 @@ impl App {
                                 None => self.say("已经从这个槽位启动", now),
                                 Some(_) => self.say("切换槽位还没实现", now),
                             },
+                            Confirm::Decrypt => fx.push(Effect::Decrypt),
                             Confirm::Flash => {
                                 if let Install::Choosing(choice) = &self.state.install {
                                     let partition = choice.partitions[choice.partition];
