@@ -1,3 +1,4 @@
+use crate::token::Token;
 use anyhow::{Context, Result};
 use skyward_binder::driver::{Binder, Handle};
 use skyward_binder::parcel::Parcel;
@@ -85,6 +86,28 @@ fn parameter(p: &mut Parcel, tag: i32, value: Value) {
     p.fill(start, size);
 }
 
+/// Hand over the note the secure world wrote when the user answered their
+/// screen lock. A key guarded by the screen lock is refused without it.
+fn vouched(p: &mut Parcel, note: &Token) {
+    p.i32(1);
+    let start = p.here();
+    p.i32(0);
+    p.i64(note.challenge);
+    p.i64(note.user);
+    p.i64(note.authenticator);
+    p.i32(note.kind);
+    // The time it was written is a structure of its own.
+    p.i32(1);
+    let when = p.here();
+    p.i32(0);
+    p.i64(note.when);
+    let size = (p.here() - when) as i32;
+    p.fill(when, size);
+    p.blob(&note.mac);
+    let size = (p.here() - start) as i32;
+    p.fill(start, size);
+}
+
 /// What the phone says about its key hardware.
 pub struct Hardware {
     pub version: i32,
@@ -96,6 +119,7 @@ pub struct Hardware {
 /// The phone's key service, as this program talks to it.
 pub struct KeyMint<'a> {
     device: Handle<'a>,
+    note: Option<Token>,
 }
 
 impl<'a> KeyMint<'a> {
@@ -103,7 +127,13 @@ impl<'a> KeyMint<'a> {
     pub fn open(binder: &'a Binder) -> Result<KeyMint<'a>> {
         let device = service::find(binder, SERVICE)?
             .with_context(|| format!("{SERVICE} is not running; the phone's key service has to be started first"))?;
-        Ok(KeyMint { device })
+        Ok(KeyMint { device, note: None })
+    }
+
+    /// Keep the note the secure world wrote when a user answered their
+    /// screen lock, so the keys it guards can be used from here on.
+    pub fn vouch(&mut self, note: Token) {
+        self.note = Some(note);
     }
 
     pub fn hardware(&self) -> Result<Hardware> {
@@ -207,9 +237,13 @@ impl<'a> KeyMint<'a> {
         call.i32(PURPOSE_DECRYPT);
         call.blob(key_blob);
         Self::gcm_params(&mut call, app_id, nonce);
-        // The key is not bound to the screen being unlocked, so it takes no
-        // proof that anyone has unlocked it.
-        call.none();
+        // A key guarded by the screen lock takes the note the secure world
+        // wrote when the user answered it; one that is not guarded takes
+        // nothing, and is refused nothing for carrying a note either.
+        match &self.note {
+            Some(note) => vouched(&mut call, note),
+            None => call.none(),
+        }
 
         // The decryption the service opens outlives the reply that named
         // it, so take a share of it before the reply's room goes back.

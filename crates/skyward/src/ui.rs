@@ -129,17 +129,15 @@ fn data_state() -> Result<DataState> {
 fn decrypt() -> Result<Vec<u32>> {
     use skyward_crypto::data;
     let binder = skyward_binder::driver::Binder::open()?;
-    let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+    let mut service = skyward_crypto::keymint::KeyMint::open(&binder)?;
     if !skyward_block::mount::is_mount_point(Path::new(data::MOUNT))? {
         let (mapped, filesystem) = data::open(&service)?;
         skyward_sys::kmsg(&format!("{} holds {filesystem} at {}", mapped.display(), data::MOUNT))?;
     }
     data::open_shared(&service)?;
-    let stretched = skyward_crypto::user::stretched_without_credential();
     let mut opened = Vec::new();
     for user in data::open_users(&service)? {
-        data::open_user_files(&service, user, &stretched)
-            .with_context(|| format!("open what user {user} owns"))?;
+        data::open_user_files(&mut service, user, None).with_context(|| format!("open what user {user} owns"))?;
         opened.push(user);
     }
     Ok(opened)

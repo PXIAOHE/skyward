@@ -4,9 +4,11 @@
 //! what it opens holds every file, with the names and contents of the ones
 //! that are a user's own still encrypted.
 
+use crate::gatekeeper::Gatekeeper;
 use crate::keymint::KeyMint;
 use crate::keystore::{StoredKey, Unwrap};
 use anyhow::{Context, Result};
+use skyward_binder::driver::Binder;
 use skyward_block::dm::Target;
 use skyward_block::fstab::Entry;
 use std::path::{Path, PathBuf};
@@ -116,22 +118,42 @@ pub fn open_shared(service: &KeyMint) -> Result<[u8; crate::fscrypt::NAME_BYTES]
     Ok(name)
 }
 
-/// Let in the keys for the files of each user that are readable before
-/// that user signs in, and give the users they belong to.
-pub fn open_users(service: &KeyMint) -> Result<Vec<u32>> {
-    let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
-    let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
+/// Which users the phone keeps keys for, in order.
+pub fn users() -> Result<Vec<u32>> {
     let dir = Path::new(USER_KEYS).join("de");
     let mut users = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
         let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
         let Some(user) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<u32>().ok()) else { continue };
-        let raw = hardware_key(service, &path, wrapped)?;
-        crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
         users.push(user);
     }
     users.sort_unstable();
     Ok(users)
+}
+
+/// Let in the keys for the files of each user that are readable before
+/// that user signs in, and give the users they belong to.
+pub fn open_users(service: &KeyMint) -> Result<Vec<u32>> {
+    let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
+    let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
+    let users = users()?;
+    for user in &users {
+        let dir = Path::new(USER_KEYS).join("de").join(user.to_string());
+        let raw = hardware_key(service, &dir, wrapped)?;
+        crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
+    }
+    Ok(users)
+}
+
+/// Whether any user has set a screen lock, which is what makes a
+/// credential needed before their own files open.
+pub fn screen_lock_set() -> Result<bool> {
+    for user in users()? {
+        if protector(user)?.lock.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Where a phone keeps what it needs to recover a user's own secret.
@@ -155,19 +177,44 @@ pub fn protector(user: u32) -> Result<crate::user::Protector> {
     let [id] = &ids[..] else {
         anyhow::bail!("{} holds {} of the user's blobs, and one is expected", dir.display(), ids.len());
     };
+    // A user who has set a screen lock has what the phone recorded about
+    // it beside the blob; a user who has set none has nothing there.
+    let recorded = dir.join(format!("{id}.pwd"));
+    let lock = match recorded.exists() {
+        true => Some(crate::user::Lock::of(
+            &std::fs::read(&recorded).with_context(|| format!("read {}", recorded.display()))?,
+        )?),
+        false => None,
+    };
     Ok(crate::user::Protector {
         blob: std::fs::read(dir.join(format!("{id}.spblob"))).with_context(|| format!("read the blob in {}", dir.display()))?,
         secdiscardable: std::fs::read(dir.join(format!("{id}.secdis")))
             .with_context(|| format!("read what the blob in {} is bound to", dir.display()))?,
         id: id.clone(),
+        lock,
     })
 }
 
 /// Let in the key for a user's own files. `credential` is what the user
-/// knows, already stretched; a user who has set none has a fixed stand-in
-/// for it.
-pub fn open_user_files(service: &KeyMint, user: u32, stretched: &[u8]) -> Result<()> {
+/// would type at their screen lock; a user who has set none needs none,
+/// and has a fixed stand-in for it.
+pub fn open_user_files(service: &mut KeyMint, user: u32, credential: Option<&[u8]>) -> Result<()> {
     let protector = protector(user)?;
+    let stretched = match &protector.lock {
+        Some(lock) => {
+            let typed = credential.with_context(|| format!("user {user} has set a screen lock, and their files do not open without it"))?;
+            let stretched = lock.stretched(typed).context("stretch what the user typed")?;
+            // The key holding this user's secret is guarded by the screen
+            // lock, so the secure world has to be shown the credential
+            // itself before it will use that key.
+            let hardware = Binder::hardware()?;
+            let note = Gatekeeper::open(&hardware)?.verify(user, &lock.enrolled, &crate::user::gatekeeper_password(&stretched))?;
+            service.vouch(note);
+            stretched
+        }
+        None => crate::user::stretched_without_credential(),
+    };
+    let stretched = &stretched[..];
     let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &protector.key_alias())?;
     let content = crate::user::content(&protector.blob)?;
     if content.len() < 12 {

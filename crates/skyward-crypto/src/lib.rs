@@ -1,9 +1,12 @@
 pub mod fscrypt;
 pub mod keystore;
+pub mod token;
 pub mod user;
 
 #[cfg(target_os = "android")]
 pub mod data;
+#[cfg(target_os = "android")]
+pub mod gatekeeper;
 #[cfg(target_os = "android")]
 pub mod keymint;
 #[cfg(target_os = "android")]

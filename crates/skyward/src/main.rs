@@ -116,10 +116,20 @@ enum Cmd {
         #[arg(long, default_value = "/metadata/vold/metadata_encryption/key")]
         key: PathBuf,
     },
+    /// Say what the phone's credential service answers, which takes no
+    /// credential and changes nothing.
+    #[cfg(target_os = "android")]
+    Gatekeeper,
     /// Open the data partition with the key the phone keeps for it, and
     /// mount it read-only.
     #[cfg(target_os = "android")]
-    Data,
+    Data {
+        /// What a user would type at their screen lock, where one is set.
+        /// A wrong one is counted against that user by the phone's secure
+        /// world, the same as a wrong try on the screen itself.
+        #[arg(long)]
+        credential: Option<String>,
+    },
     /// Drive the panel and touchscreen with the recovery UI.
     #[cfg(target_os = "android")]
     Ui {
@@ -240,9 +250,16 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(target_os = "android")]
-        Cmd::Data => {
+        Cmd::Gatekeeper => {
+            let hardware = skyward_binder::driver::Binder::hardware()?;
+            let gatekeeper = skyward_crypto::gatekeeper::Gatekeeper::open(&hardware)?;
+            println!("the credential service answers for {}", gatekeeper.serves()?);
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Data { credential } => {
             let binder = skyward_binder::driver::Binder::open()?;
-            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+            let mut service = skyward_crypto::keymint::KeyMint::open(&binder)?;
             let at = Path::new(skyward_crypto::data::MOUNT);
             if skyward_block::mount::is_mount_point(at)? {
                 println!("{} is open already", at.display());
@@ -254,9 +271,8 @@ fn main() -> Result<()> {
             println!("the files that belong to no one user can be read");
             let users = skyward_crypto::data::open_users(&service)?;
             println!("users whose own keys are in: {users:?}");
-            let stretched = skyward_crypto::user::stretched_without_credential();
             for user in users {
-                match skyward_crypto::data::open_user_files(&service, user, &stretched) {
+                match skyward_crypto::data::open_user_files(&mut service, user, credential.as_deref().map(str::as_bytes)) {
                     Ok(()) => println!("user {user}'s own files can be read"),
                     Err(e) => println!("user {user}'s own files stay closed: {e:#}"),
                 }

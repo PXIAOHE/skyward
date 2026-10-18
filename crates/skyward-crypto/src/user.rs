@@ -13,6 +13,7 @@ use sha2::Sha256;
 /// Each of these names one use of the hashing, so the same bytes hashed
 /// for two purposes never agree.
 const SECDISCARDABLE: &[u8] = b"secdiscardable-transform";
+const GATEKEEPER: &[u8] = b"user-gk-authentication";
 const PROTECTOR_SECRET: &[u8] = b"application-id";
 const FILE_KEY: &[u8] = b"fbe-key";
 const CONTEXT: &[u8] = b"android-synthetic-password-personalization-context";
@@ -45,12 +46,102 @@ pub struct Protector {
     pub blob: Vec<u8>,
     /// The bytes whose erasure makes the blob unopenable.
     pub secdiscardable: Vec<u8>,
+    /// What the phone recorded about the screen lock the user set, where
+    /// one is set. A user who has set none has nothing recorded.
+    pub lock: Option<Lock>,
 }
 
 impl Protector {
     pub fn key_alias(&self) -> String {
         format!("synthetic_password_{}", self.id.trim_start_matches('0'))
     }
+}
+
+/// What a phone recorded when the user set a screen lock: how much work it
+/// takes to stretch what they type, and what the secure world recognises
+/// the stretched form by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lock {
+    /// Which kind of screen lock it is, in the phone's own numbering.
+    pub kind: i32,
+    /// How much work the stretching takes, as the powers of two the phone
+    /// wrote rather than the numbers themselves.
+    pub cost: [u8; 3],
+    pub salt: Vec<u8>,
+    /// What the secure world checks the stretched credential against. It
+    /// means nothing outside the secure world.
+    pub enrolled: Vec<u8>,
+}
+
+/// What the phone's own numbering calls each kind of screen lock.
+impl Lock {
+    pub const NONE: i32 = -1;
+    pub const PATTERN: i32 = 1;
+    pub const PIN: i32 = 3;
+    pub const PASSWORD: i32 = 4;
+
+    /// Read what the phone recorded. The numbers in it are written in the
+    /// order the network uses, which is what the phone's own writer does.
+    pub fn of(raw: &[u8]) -> Result<Lock> {
+        let mut record = Record { raw, at: 0 };
+        let kind = record.i32()?;
+        let cost = [record.u8()?, record.u8()?, record.u8()?];
+        let salt = record.counted()?.to_vec();
+        let enrolled = record.counted()?.to_vec();
+        Ok(Lock { kind, cost, salt, enrolled })
+    }
+
+    /// Stretch what the user typed into the secret the rest of this works
+    /// from. The work is deliberately slow, and the phone chose how slow.
+    pub fn stretched(&self, credential: &[u8]) -> Result<Vec<u8>> {
+        let [log_n, log_r, log_p] = self.cost;
+        let cost = scrypt::Params::new(log_n, 1 << log_r, 1 << log_p, STRETCHED_BYTES)
+            .map_err(|e| anyhow::anyhow!("the phone asks for stretching this code cannot do: {e}"))?;
+        let mut out = vec![0u8; STRETCHED_BYTES];
+        scrypt::scrypt(credential, &self.salt, &cost, &mut out).map_err(|e| anyhow::anyhow!("stretch the credential: {e}"))?;
+        Ok(out)
+    }
+}
+
+/// Reads the numbers and runs of bytes a phone wrote one after another.
+struct Record<'a> {
+    raw: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Record<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self.at + n;
+        if end > self.raw.len() {
+            bail!("the phone's record holds {} bytes, {n} more were read at {}", self.raw.len(), self.at);
+        }
+        let out = &self.raw[self.at..end];
+        self.at = end;
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn i32(&mut self) -> Result<i32> {
+        Ok(i32::from_be_bytes(self.take(4)?.try_into().expect("four bytes")))
+    }
+
+    /// A run of bytes, as its length and then the bytes.
+    fn counted(&mut self) -> Result<&'a [u8]> {
+        let len = self.i32()?;
+        if len < 0 {
+            bail!("the phone's record says a length of {len}");
+        }
+        self.take(len as usize)
+    }
+}
+
+/// What the secure world is asked to check: the stretched credential under
+/// its own name for that use.
+pub fn gatekeeper_password(stretched: &[u8]) -> Vec<u8> {
+    personalized_hash(GATEKEEPER, &[stretched])
 }
 
 /// SHA-512 of the parts behind a fixed name for what they are for.
@@ -173,7 +264,61 @@ mod tests {
 
     #[test]
     fn the_key_the_secure_world_holds_is_named_after_the_protector() {
-        let p = Protector { id: "08a692c0f39d97c6".into(), blob: Vec::new(), secdiscardable: Vec::new() };
+        let p = Protector { id: "08a692c0f39d97c6".into(), blob: Vec::new(), secdiscardable: Vec::new(), lock: None };
         assert_eq!(p.key_alias(), "synthetic_password_8a692c0f39d97c6");
+    }
+
+    /// The record as a phone writes it: the kind, the three powers of two
+    /// the stretching costs, then the salt and the enrolment, each behind
+    /// its own length.
+    fn recorded(kind: i32, salt: &[u8], enrolled: &[u8]) -> Vec<u8> {
+        let mut raw = kind.to_be_bytes().to_vec();
+        raw.extend_from_slice(&[11, 3, 1]);
+        raw.extend_from_slice(&(salt.len() as i32).to_be_bytes());
+        raw.extend_from_slice(salt);
+        raw.extend_from_slice(&(enrolled.len() as i32).to_be_bytes());
+        raw.extend_from_slice(enrolled);
+        // A phone writes how long the code is after all of it, which is
+        // nothing this needs.
+        raw.extend_from_slice(&6i32.to_be_bytes());
+        raw
+    }
+
+    #[test]
+    fn what_the_phone_recorded_about_the_screen_lock_is_read_back() {
+        let raw = recorded(Lock::PIN, &[0xCD; 16], &[0xAB; 58]);
+        assert_eq!(raw.len(), 93, "the length a phone writes for a code with a salt and an enrolment");
+        let lock = Lock::of(&raw).unwrap();
+        assert_eq!(lock.kind, Lock::PIN);
+        assert_eq!(lock.cost, [11, 3, 1]);
+        assert_eq!(lock.salt, vec![0xCD; 16]);
+        assert_eq!(lock.enrolled, vec![0xAB; 58]);
+    }
+
+    #[test]
+    fn a_record_that_ends_early_is_an_error() {
+        let raw = recorded(Lock::PASSWORD, &[1; 16], &[2; 58]);
+        assert!(Lock::of(&raw[..20]).is_err());
+        assert!(Lock::of(&[]).is_err());
+    }
+
+    /// Checked against the second test case of RFC 7914, which gives the
+    /// stretching for a password and salt with these costs. The published
+    /// answer is 64 bytes and the first 32 of it are the 32 asked for here,
+    /// because the last step of the stretching builds its answer in blocks.
+    #[test]
+    fn stretching_matches_the_published_answer_for_the_cost_the_phone_names() {
+        let lock = Lock { kind: Lock::PASSWORD, cost: [10, 3, 4], salt: b"NaCl".to_vec(), enrolled: Vec::new() };
+        let out = lock.stretched(b"password").unwrap();
+        assert_eq!(
+            out.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b373162"
+        );
+    }
+
+    #[test]
+    fn a_cost_no_machine_could_pay_is_an_error_rather_than_a_wait() {
+        let lock = Lock { kind: Lock::PIN, cost: [64, 3, 1], salt: b"salt".to_vec(), enrolled: Vec::new() };
+        assert!(lock.stretched(b"1234").is_err());
     }
 }
