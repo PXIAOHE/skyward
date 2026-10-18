@@ -7,8 +7,9 @@ use crate::glow::{self, GlowClock};
 use crate::motion::{self, Spring};
 use crate::pages::{self, Ctx};
 use crate::sprite::{Blurs, Sprite};
+use crate::search;
 use crate::theme::Theme;
-use crate::widgets::{self, Bar};
+use crate::widgets::{self, Bar, Cap, Layer};
 use skyward_info::{Charge, DataState, DeviceInfo};
 use skyward_install::{Event, ImageKind, Outcome, Stage};
 use skyward_vab::Slot;
@@ -31,11 +32,83 @@ pub enum Screen {
     Specs,
     /// How long the screen stays on with nothing touched.
     ScreenOff,
+    /// Finding a feature or partition by name, typed on the screen's own
+    /// keyboard.
+    Search,
+    Backup,
+    /// The backups found, to restore one.
+    Restore,
+    /// One backup, and what to restore from it.
+    RestoreBackup,
+    /// Tools for the experienced: files, a terminal, the logs.
+    Advanced,
+    Files,
+    /// One file, and what can be done with it.
+    FileInfo,
+    Terminal,
+    Language,
+    TimeZone,
+    /// Saving the logs, as a bug report asks for them.
+    Logs,
+    /// Skyward's own licence.
+    License,
+    /// The interface typeface and the terms it is used under.
+    FontLicense,
+    /// Which slot the phone starts from next.
+    Slot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Vibrate,
+    /// Compress a backup.
+    Compress,
+    /// Read a backup back once it is written.
+    Verify,
+}
+
+/// What a backup can take, in the order the backup page lists it.
+pub const BACKUP_PARTS: [&str; 4] = ["启动分区", "系统分区", "数据", "基带与 EFS"];
+
+/// Where a backup can go, in the order the backup page lists it.
+pub const BACKUP_PLACES: [&str; 2] = ["内部存储", "U 盘"];
+
+/// A backup found on storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupEntry {
+    /// When it was made, in Unix seconds.
+    pub made: i64,
+    pub size: u64,
+    /// Where it is, by its place in [`BACKUP_PLACES`].
+    pub place: usize,
+    /// Which of [`BACKUP_PARTS`] it holds.
+    pub parts: [bool; 4],
+}
+
+/// An entry of a folder, as the file manager lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileRow {
+    pub name: String,
+    pub kind: FileKind,
+    /// Bytes; for a link, the link's own.
+    pub size: u64,
+    /// Last changed, in Unix seconds.
+    pub modified: i64,
+    /// Type and permission bits, as `st_mode` holds them.
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    /// A folder, and how many entries it holds when it can be read.
+    Folder { items: Option<usize> },
+    File,
+    /// A symbolic link: where it points, and whether that is a folder.
+    Link { target: String, folder: bool },
+    /// A device, socket or pipe.
+    Special,
 }
 
 /// A partition the mount page lists: its name, where it sits, and how it
@@ -67,6 +140,10 @@ pub enum Confirm {
     Reboot,
     Wipe,
     Flash,
+    Backup,
+    Restore,
+    /// Start next from the slot chosen on the slot page.
+    Slot,
 }
 
 /// Which slots an image goes to, by the slot the phone runs from.
@@ -179,10 +256,35 @@ pub enum Action {
     RebootTo(Target),
     /// Keep the screen on for this choice in [`SCREEN_OFF`].
     ScreenOff(usize),
+    /// Tick or untick a part of the backup, by its place in
+    /// [`BACKUP_PARTS`].
+    BackupPart(usize),
+    /// Send the backup to a place in [`BACKUP_PLACES`].
+    BackupTo(usize),
+    /// Open a backup found, by its place in the list, to restore it.
+    OpenBackup(usize),
+    /// Tick or untick a part of the backup being restored.
+    RestorePart(usize),
+    /// Tick or untick a log to export: the recovery's, the kernel's.
+    LogPart(usize),
+    /// Save the logs to /tmp, or to internal storage.
+    LogsTo(usize),
+    /// Start next from this slot; `None` is the one running now.
+    PickSlot(Option<Slot>),
+    /// A key of the on-screen keyboard.
+    Type(Cap),
+    /// Empty the search field.
+    ClearSearch,
+    /// Open the file manager's entry at this place in the folder.
+    OpenEntry(usize),
+    /// Go up to the folder this many levels below the root, by its place in
+    /// the path shown over the list.
+    OpenAncestor(usize),
     /// A control whose work is not wired up yet; touching it says so.
     Unavailable(&'static str),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
     pub rect: Rect,
     pub action: Action,
@@ -205,6 +307,63 @@ pub struct Frame {
     pub hero: Option<HeroArt>,
     /// Centre and span of the pattern grid, on the unlock page.
     pub pattern: Option<(f32, f32, f32)>,
+    /// The colour of the page itself, past the canvas and under the bar.
+    pub bg: Rgba,
+    /// A list too long to draw whole: its rows are drawn as they scroll
+    /// into view, below the canvas's content and past its end.
+    pub rows: Option<Rows>,
+    /// A strip that scrolls with the page until it reaches the bar, then
+    /// stays under it.
+    pub pinned: Option<Pinned>,
+}
+
+/// The rows of a list drawn as they come into view, the way a list view
+/// binds its rows: where each lies on the page and what touching one does.
+pub struct Rows {
+    /// Page y of each row's top, then of the last row's bottom; whole
+    /// pixels, so the rows meet without seams.
+    pub edges: Vec<f32>,
+    pub action: fn(usize) -> Action,
+}
+
+impl Rows {
+    pub fn count(&self) -> usize {
+        self.edges.len() - 1
+    }
+
+    pub fn bottom(&self) -> f32 {
+        *self.edges.last().expect("a list has its top edge at least")
+    }
+
+    /// The row under page height `y`.
+    pub fn at(&self, y: f32) -> Option<usize> {
+        if y < self.edges[0] || y >= self.bottom() {
+            return None;
+        }
+        Some(self.edges.partition_point(|&e| e <= y) - 1)
+    }
+
+    /// The rows reaching into the band from `y0` to `y1`.
+    pub fn within(&self, y0: f32, y1: f32) -> std::ops::Range<usize> {
+        let first = self.edges.partition_point(|&e| e <= y0).saturating_sub(1);
+        let end = self.edges.partition_point(|&e| e < y1).min(self.count());
+        first.min(end)..end
+    }
+
+    /// Where row `i` lies on the page.
+    pub fn rect(&self, i: usize, w: f32) -> Rect {
+        Rect::new(0.0, self.edges[i], w, self.edges[i + 1] - self.edges[i])
+    }
+}
+
+/// A strip drawn once and laid over the page at `top`, or just under the
+/// bar once the page has scrolled it that far; its controls answer where
+/// it shows.
+pub struct Pinned {
+    pub canvas: Canvas,
+    pub top: f32,
+    /// In the strip's own coordinates.
+    pub hits: Vec<Hit>,
 }
 
 /// What the About page lays over its field: the wordmark and version, which
@@ -216,9 +375,27 @@ pub struct HeroArt {
 }
 
 impl Frame {
+    /// A page of cards on the grey page colour that opens with its title in
+    /// large type and goes back with `<`.
+    pub fn new(t: &Theme, canvas: Canvas, hits: Vec<Hit>, title: &'static str, content_top: f32) -> Frame {
+        Frame { canvas, hits, title, back: true, header: true, content_top, hero: None, pattern: None, bg: t.pal.bg, rows: None, pinned: None }
+    }
+
     /// The topmost control under a point in page coordinates.
-    pub fn hit(&self, x: f32, y: f32) -> Option<&Hit> {
-        self.hits.iter().rev().find(|h| h.rect.contains(x, y))
+    pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
+        if let Some(h) = self.hits.iter().rev().find(|h| h.rect.contains(x, y)) {
+            return Some(*h);
+        }
+        let rows = self.rows.as_ref()?;
+        let i = rows.at(y)?;
+        Some(Hit { rect: rows.rect(i, self.canvas.w as f32), action: (rows.action)(i) })
+    }
+
+    /// How tall the page is: its canvas, or its rows and the margin after
+    /// them if they reach further.
+    pub fn height(&self, t: &Theme) -> f32 {
+        let h = self.canvas.h as f32;
+        self.rows.as_ref().map_or(h, |r| h.max((r.bottom() + t.m.margin * 2.0).ceil()))
     }
 }
 
@@ -242,6 +419,38 @@ pub struct State {
     /// it could not.
     pub mounts: Result<Vec<MountRow>, String>,
     pub mount_failure: Option<MountFailure>,
+    /// Which of [`BACKUP_PARTS`] a backup takes.
+    pub backup: [bool; 4],
+    /// Where a backup goes, by its place in [`BACKUP_PLACES`].
+    pub backup_to: usize,
+    pub compress: bool,
+    pub verify: bool,
+    /// The backups found, newest first.
+    pub backups: Vec<BackupEntry>,
+    /// The backup being restored, by its place in `backups`, and which of
+    /// its parts to restore.
+    pub restore: Option<(usize, [bool; 4])>,
+    /// Which logs to export: the recovery's, the kernel's.
+    pub logs: [bool; 2],
+    /// Where the logs go: 0 for /tmp, 1 for internal storage.
+    pub logs_to: usize,
+    /// The slot chosen to start from next; `None` keeps the running one.
+    pub next_slot: Option<Slot>,
+    /// What is typed in the search field.
+    pub search: String,
+    /// The command line typed in the terminal.
+    pub command: String,
+    /// The on-screen keyboard's layer, and the key held down on it.
+    pub layer: Layer,
+    pub pressed: Option<Cap>,
+    /// The folder the file manager shows, what is in it as the runtime read
+    /// it or why it could not, and when it was read, in Unix seconds: dates
+    /// in the list are told against that day.
+    pub folder: String,
+    pub files: Result<Vec<FileRow>, String>,
+    pub listed: i64,
+    /// The entry the file page describes.
+    pub file: Option<FileRow>,
 }
 
 impl Default for State {
@@ -259,6 +468,23 @@ impl Default for State {
             install: Install::Idle,
             mounts: Ok(Vec::new()),
             mount_failure: None,
+            backup: [true, true, false, true],
+            backup_to: 0,
+            compress: false,
+            verify: true,
+            backups: Vec::new(),
+            restore: None,
+            logs: [true, true],
+            logs_to: 0,
+            next_slot: None,
+            search: String::new(),
+            command: String::new(),
+            layer: Layer::Letters,
+            pressed: None,
+            folder: "/".into(),
+            files: Ok(Vec::new()),
+            listed: 0,
+            file: None,
         }
     }
 }
@@ -298,6 +524,8 @@ pub enum Effect {
     Mount(String),
     /// Unmount the slot's partition with this base name.
     Unmount(String),
+    /// List the folder at this path for the file manager.
+    ReadDir(String),
 }
 
 enum Drag {
@@ -362,6 +590,8 @@ const BACKLIGHT_STEP_MS: u64 = 8;
 /// second tap of a wake habit, or the hand reaching for a phone whose
 /// screen an install just lit, should not act. Android's double-tap window.
 const WAKE_GUARD_MS: u64 = 400;
+/// How far past the screen, in screens, a long list keeps its rows drawn.
+const NEAR_SCREENS: f32 = 0.5;
 
 /// How a part of the screen eases between shown and hidden.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -456,6 +686,12 @@ fn dim_span(after: u64) -> u64 {
     DIM_MS.min(after / 5)
 }
 
+/// Where a pinned strip shows on a page scrolled to `offset`: with the page,
+/// or just under the bar once the page has carried it that far.
+fn pinned_top(t: &Theme, p: &Pinned, offset: f32) -> f32 {
+    (p.top - offset).max(widgets::bar_bottom(t))
+}
+
 /// Lay the sprite `blurs` keeps, moved by (`dx`, `dy`), in `color` at
 /// `level` of its strength, blurred by `blur` pixels.
 fn draw_faded(out: &mut Canvas, blurs: &mut Blurs, dx: f32, dy: f32, color: Rgba, level: f32, blur: f32) {
@@ -468,6 +704,14 @@ pub struct App {
     pub state: State,
     stack: Vec<(Screen, f32)>,
     frame: Option<Frame>,
+    /// The rows of the page's long list drawn so far, by their place in it;
+    /// those far off screen are let go, their canvases kept spare for the
+    /// next rows to be drawn on.
+    drawn: Vec<(usize, Canvas)>,
+    spare: Vec<Canvas>,
+    /// The file manager's folders left for one inside them, outermost
+    /// first, with how far each was scrolled.
+    left: Vec<(String, f32)>,
     /// The current page's large and bar titles, for its theme, with their
     /// blurred versions as they are needed.
     titles: Option<((Screen, bool), Blurs, Blurs)>,
@@ -514,6 +758,9 @@ impl App {
             state: State::default(),
             stack: vec![(start, 0.0)],
             frame: None,
+            drawn: Vec::new(),
+            spare: Vec::new(),
+            left: Vec::new(),
             titles: None,
             chip: None,
             dither: None,
@@ -758,6 +1005,7 @@ impl App {
     /// The page's readings changed (battery, storage): render it again.
     pub fn refresh(&mut self) {
         self.frame = None;
+        self.spare.extend(self.drawn.drain(..).map(|(_, c)| c));
         self.dirty = true;
     }
 
@@ -777,6 +1025,26 @@ impl App {
         self.refresh();
     }
 
+    /// The runtime listed a folder for the file manager at `listed`, in Unix
+    /// seconds, or could not: it becomes the folder shown. A folder gone back
+    /// up to shows where it was left, as the stock file manager does; any
+    /// other starts from its top.
+    pub fn set_files(&mut self, folder: String, files: Result<Vec<FileRow>, String>, listed: i64) {
+        if folder != self.state.folder && self.screen() == Screen::Files {
+            let kept = self.left.iter().position(|(path, _)| *path == folder);
+            let scroll = kept.map_or(0.0, |k| self.left[k].1);
+            self.left.truncate(kept.unwrap_or(self.left.len()));
+            self.top_mut().1 = scroll;
+            self.fling = None;
+            self.bounce = None;
+            self.pull = 0.0;
+        }
+        self.state.folder = folder;
+        self.state.files = files;
+        self.state.listed = listed;
+        self.refresh();
+    }
+
     /// Render the current page if what it shows has changed.
     pub fn frame(&mut self, f: &Fonts, info: &DeviceInfo, data: DataState) -> &Frame {
         if self.frame.is_none() {
@@ -791,7 +1059,8 @@ impl App {
     }
 
     fn max_scroll(&self) -> f32 {
-        self.frame.as_ref().map_or(0.0, |f| (f.canvas.h as f32 - self.h as f32).max(0.0))
+        let t = self.theme();
+        self.frame.as_ref().map_or(0.0, |f| (f.height(&t) - self.h as f32).max(0.0))
     }
 
     fn clamp_scroll(&mut self) {
@@ -820,6 +1089,7 @@ impl App {
             let (art, x, y) = widgets::back_chip(&t);
             self.chip = Some((t.dark, art, x, y));
         }
+        let screen = self.screen();
         let scroll = self.top().1;
         let offset = (scroll + self.overscroll(now)).round();
         let frame = self.frame.as_ref().expect("rendered above");
@@ -841,25 +1111,68 @@ impl App {
             let l = ((scroll - range) / m.dp(ABOUT_LOGO_FADE_DP)).clamp(0.0, 1.0);
             glow::ink_wordmark(out, &field, &glow.look().ink, &art.wordmark, 1.0 - 0.1 * l, 1.0 - l, fade, dither);
         } else {
-            // The page rows on screen, and the page colour past its ends.
-            let row = out.w as usize * 4;
-            let first = (-offset).clamp(0.0, out.h as f32) as usize;
-            let last = (frame.canvas.h as f32 - offset).clamp(first as f32, out.h as f32) as usize;
+            // The page rows on screen above a long list's rows, those rows,
+            // and the page colour past the ends; every pixel is written
+            // once.
+            let (row, h) = (out.w as usize * 4, out.h as f32);
+            let span = frame.rows.as_ref().map(|r| ((r.edges[0] - offset).clamp(0.0, h), (r.bottom() - offset).clamp(0.0, h)));
+            let (list_top, list_end) = span.unwrap_or((h, h));
+            let first = (-offset).clamp(0.0, h) as usize;
+            let last = (frame.canvas.h as f32 - offset).clamp(first as f32, list_top) as usize;
             if first < last {
                 let from = (offset as isize + first as isize) as usize * row;
                 out.data[first * row..last * row].copy_from_slice(&frame.canvas.data[from..from + (last - first) * row]);
             }
-            out.fill_rect(0.0, 0.0, out.w as f32, first as f32, t.pal.bg);
-            out.fill_rect(0.0, last as f32, out.w as f32, (out.h as usize - last) as f32, t.pal.bg);
+            out.fill_rect(0.0, 0.0, out.w as f32, first as f32, frame.bg);
+            out.fill_rect(0.0, last as f32, out.w as f32, list_top - last as f32, frame.bg);
+            let below = list_end.max(last as f32);
+            out.fill_rect(0.0, below, out.w as f32, h - below, frame.bg);
+            if let Some(rows) = &frame.rows {
+                // A long list's rows on screen, each drawn when it first
+                // shows. Those more than half a screen away are let go, and
+                // their canvases drawn over again for the rows coming in, as
+                // a list view recycles its rows.
+                let near = rows.within(offset - h * NEAR_SCREENS, offset + h * (1.0 + NEAR_SCREENS));
+                self.spare.extend(self.drawn.extract_if(.., |(i, _)| !near.contains(i)).map(|(_, c)| c));
+                for i in rows.within(offset, offset + h) {
+                    let k = match self.drawn.iter().position(|(j, _)| *j == i) {
+                        Some(k) => k,
+                        None => {
+                            let mut c = self.spare.pop().unwrap_or_else(|| Canvas::new(out.w, 0));
+                            c.h = (rows.edges[i + 1] - rows.edges[i]) as u32;
+                            c.data.resize((c.w * c.h * 4) as usize, 0);
+                            let cx = Ctx { t: &t, f, info, data, state: &self.state };
+                            pages::row(screen, &cx, i, &mut c);
+                            self.drawn.push((i, c));
+                            self.drawn.len() - 1
+                        }
+                    };
+                    out.put(&self.drawn[k].1, (rows.edges[i] - offset) as i32);
+                }
+            } else {
+                // Off a long list, its rows' canvases are not kept.
+                self.spare.clear();
+            }
             if frame.header {
                 let level = (1.0 - scroll / m.dp(TITLE_FADE_DP)).clamp(0.0, 1.0);
                 draw_faded(out, big, 0.0, -offset, t.pal.text, level, (1.0 - level) * m.dp(TITLE_BLUR_DP));
             }
         }
         let bar = self.bar.level(now);
+        let strip = frame.pinned.as_ref().map(|p| (p, pinned_top(&t, p, offset)));
         if bar > 0.0 {
-            let stops = if frame.hero.is_some() { &widgets::ABOUT_BAR_MASK[..] } else { &widgets::BAR_MASK[..] };
-            widgets::bar_mask(out, &t, stops, t.pal.bg, bar);
+            match strip {
+                // The strip under the bar is veiled with it, and the list
+                // thins out below the strip.
+                Some((p, top)) => widgets::strip_mask(out, &t, frame.bg, bar, top.round(), top.round() + p.canvas.h as f32),
+                None => {
+                    let stops = if frame.hero.is_some() { &widgets::ABOUT_BAR_MASK[..] } else { &widgets::BAR_MASK[..] };
+                    widgets::bar_mask(out, &t, stops, frame.bg, bar);
+                }
+            }
+        }
+        if let Some((p, top)) = strip {
+            out.put(&p.canvas, top.round() as i32);
         }
         if frame.back {
             let (_, chip, x, y) = self.chip.as_ref().expect("drawn above");
@@ -913,14 +1226,23 @@ impl App {
     }
 
     /// Go back a page. Leaving the sideload page stops what can be stopped;
-    /// while a package is being read or written, the page stays.
+    /// while a package is being read or written, the page stays. In the
+    /// file manager, back climbs a folder until it reaches the root.
     fn back(&mut self, now: u64) -> Vec<Effect> {
         let mut fx = Vec::new();
         if self.stack.len() <= 1 {
             return fx;
         }
-        if self.screen() == Screen::Mount {
-            self.state.mount_failure = None;
+        match self.screen() {
+            Screen::Mount => self.state.mount_failure = None,
+            Screen::Files => {
+                if let Some(up) = std::path::Path::new(&self.state.folder).parent() {
+                    return vec![Effect::ReadDir(up.to_string_lossy().into_owned())];
+                }
+            }
+            Screen::FileInfo => self.state.file = None,
+            Screen::RestoreBackup => self.state.restore = None,
+            _ => {}
         }
         if self.screen() == Screen::Sideload {
             match self.state.install {
@@ -998,8 +1320,15 @@ impl App {
         match action {
             Action::Open(s) => {
                 self.open(s);
-                if s == Screen::Mount {
-                    return vec![Effect::ReadMounts];
+                match s {
+                    Screen::Mount => return vec![Effect::ReadMounts],
+                    Screen::Files => return vec![Effect::ReadDir(self.state.folder.clone())],
+                    Screen::Search => {
+                        self.state.search.clear();
+                        self.state.layer = Layer::Letters;
+                    }
+                    Screen::Terminal => self.state.layer = Layer::Letters,
+                    _ => {}
                 }
             }
             Action::Skip => {
@@ -1014,8 +1343,13 @@ impl App {
                     self.refresh();
                 }
             }
-            Action::Toggle(Switch::Vibrate) => {
-                self.state.vibrate = !self.state.vibrate;
+            Action::Toggle(switch) => {
+                let on = match switch {
+                    Switch::Vibrate => &mut self.state.vibrate,
+                    Switch::Compress => &mut self.state.compress,
+                    Switch::Verify => &mut self.state.verify,
+                };
+                *on = !*on;
                 self.refresh();
             }
             Action::MountToggle(i) => {
@@ -1065,8 +1399,106 @@ impl App {
                 self.state.screen_off = k;
                 self.refresh();
             }
+            Action::BackupPart(k) => {
+                self.state.backup[k] = !self.state.backup[k];
+                self.refresh();
+            }
+            Action::BackupTo(k) => {
+                self.state.backup_to = k;
+                self.refresh();
+            }
+            Action::OpenBackup(i) => {
+                self.state.restore = Some((i, self.state.backups[i].parts));
+                self.open(Screen::RestoreBackup);
+            }
+            Action::RestorePart(k) => {
+                let (_, parts) = self.state.restore.as_mut().expect("the restore page shows a backup");
+                parts[k] = !parts[k];
+                self.refresh();
+            }
+            Action::LogPart(k) => {
+                self.state.logs[k] = !self.state.logs[k];
+                self.refresh();
+            }
+            Action::LogsTo(k) => {
+                self.state.logs_to = k;
+                self.refresh();
+            }
+            Action::PickSlot(slot) => {
+                self.state.next_slot = slot;
+                self.refresh();
+            }
+            Action::Type(cap) => return self.type_key(cap, now),
+            Action::ClearSearch => {
+                self.state.search.clear();
+                self.refresh();
+            }
+            Action::OpenEntry(i) => {
+                let entry = self.state.files.as_ref().expect("an entry opened is one the page lists")[i].clone();
+                match entry.kind {
+                    FileKind::Folder { .. } | FileKind::Link { folder: true, .. } => {
+                        // The folder left keeps its place for coming back.
+                        let scroll = self.top().1;
+                        self.left.push((self.state.folder.clone(), scroll));
+                        let path = std::path::Path::new(&self.state.folder).join(&entry.name);
+                        return vec![Effect::ReadDir(path.to_string_lossy().into_owned())];
+                    }
+                    FileKind::File | FileKind::Link { folder: false, .. } | FileKind::Special => {
+                        self.state.file = Some(entry);
+                        self.open(Screen::FileInfo);
+                    }
+                }
+            }
+            Action::OpenAncestor(depth) => {
+                let parts = std::path::Path::new(&self.state.folder).components();
+                if depth + 1 < parts.clone().count() {
+                    let path: std::path::PathBuf = parts.take(depth + 1).collect();
+                    return vec![Effect::ReadDir(path.to_string_lossy().into_owned())];
+                }
+            }
             Action::Unavailable(text) => self.say(text, now),
         }
+        Vec::new()
+    }
+
+    /// The text the keyboard types into on this page.
+    fn typing(&mut self) -> &mut String {
+        match self.screen() {
+            Screen::Search => &mut self.state.search,
+            Screen::Terminal => &mut self.state.command,
+            s => panic!("{s:?} has no keyboard"),
+        }
+    }
+
+    /// A key of the on-screen keyboard. A capital lasts one letter; return
+    /// opens the first result of a search, and runs a terminal's command.
+    fn type_key(&mut self, cap: Cap, now: u64) -> Vec<Effect> {
+        match cap {
+            Cap::Char(ch) => {
+                let shifted = self.state.layer == Layer::Shifted;
+                self.typing().push(if shifted { ch.to_ascii_uppercase() } else { ch });
+                if shifted {
+                    self.state.layer = Layer::Letters;
+                }
+            }
+            Cap::Space => self.typing().push(' '),
+            Cap::Backspace => {
+                self.typing().pop();
+            }
+            Cap::Shift => {
+                self.state.layer = if self.state.layer == Layer::Shifted { Layer::Letters } else { Layer::Shifted };
+            }
+            Cap::Show(layer) => self.state.layer = layer,
+            Cap::Enter => match self.screen() {
+                Screen::Search => {
+                    if let Some(first) = search::find(&self.state.search).first() {
+                        return self.act(Action::Open(first.screen), now);
+                    }
+                }
+                _ => self.say("终端还没接入，命令没有执行", now),
+            },
+        }
+        self.refresh();
         Vec::new()
     }
 
@@ -1120,10 +1552,15 @@ impl App {
                     return fx;
                 }
                 // The `<` stays put while the page scrolls; under the bar
-                // only it answers.
+                // only it answers. A pinned strip answers where it shows,
+                // over the rows beneath it.
                 let back = widgets::back_rect(&t);
+                let strip = self.frame.as_ref().and_then(|fr| fr.pinned.as_ref()).map(|p| (p, pinned_top(&t, p, scroll)));
+                let on_strip = strip.filter(|&(p, top)| y >= top && y < top + p.canvas.h as f32);
                 let hit = if self.frame.as_ref().is_some_and(|fr| fr.back) && back.contains(x, y) {
                     Some((Action::Back, back))
+                } else if let Some((p, top)) = on_strip {
+                    p.hits.iter().find(|h| h.rect.contains(x, y - top)).map(|h| (h.action, Rect { y: h.rect.y + top, ..h.rect }))
                 } else if self.bar.on && y < widgets::bar_bottom(&t) {
                     None
                 } else {
@@ -1231,8 +1668,17 @@ impl App {
                     self.repaint_confirm(&t, f, which, track);
                     if done {
                         match which {
-                            Confirm::Reboot => fx.push(Effect::Reboot(TARGETS[self.state.reboot])),
+                            Confirm::Reboot => match TARGETS[self.state.reboot] {
+                                Target::Fastboot => self.say("用户空间 fastboot 还没接入", now),
+                                target => fx.push(Effect::Reboot(target)),
+                            },
                             Confirm::Wipe => self.say("清除功能还没实现", now),
+                            Confirm::Backup => self.say("备份还没实现", now),
+                            Confirm::Restore => self.say("恢复还没实现", now),
+                            Confirm::Slot => match self.state.next_slot {
+                                None => self.say("已经从这个槽位启动", now),
+                                Some(_) => self.say("切换槽位还没实现", now),
+                            },
                             Confirm::Flash => {
                                 if let Install::Choosing(choice) = &self.state.install {
                                     let partition = choice.partitions[choice.partition];
@@ -1252,6 +1698,16 @@ impl App {
                 }
                 _ => {}
             },
+        }
+        // A key of the on-screen keyboard shows held down while the finger
+        // rests on it.
+        let held = match self.drag {
+            Drag::Press { action: Some(Action::Type(cap)), .. } => Some(cap),
+            _ => None,
+        };
+        if held != self.state.pressed {
+            self.state.pressed = held;
+            self.refresh();
         }
         fx
     }
@@ -1425,9 +1881,25 @@ mod tests {
     }
 
     /// Where on screen the first control doing `action` sits.
+    /// Where on screen the control doing `action` is: among the page's
+    /// controls, on its pinned strip, or a row of its long list.
     fn spot(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action) -> (f32, f32) {
-        let (x, y) = app.frame(f, i, DataState::Unmounted).hits.iter().find(|h| h.action == action).expect("control on the page").rect.centre();
-        (x, y - app.top().1)
+        let (t, scroll) = (app.theme(), app.top().1);
+        let fr = app.frame(f, i, DataState::Unmounted);
+        if let Some(h) = fr.hits.iter().find(|h| h.action == action) {
+            let (x, y) = h.rect.centre();
+            return (x, y - scroll);
+        }
+        if let Some(p) = &fr.pinned {
+            if let Some(h) = p.hits.iter().find(|h| h.action == action) {
+                let (x, y) = h.rect.centre();
+                return (x, y + pinned_top(&t, p, scroll));
+            }
+        }
+        let rows = fr.rows.as_ref().expect("control on the page");
+        let k = (0..rows.count()).find(|&k| (rows.action)(k) == action).expect("control on the page");
+        let (x, y) = rows.rect(k, fr.canvas.w as f32).centre();
+        (x, y - scroll)
     }
 
     fn tap(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action) -> Vec<Effect> {
@@ -1965,8 +2437,8 @@ mod tests {
     #[test]
     fn unfinished_features_explain_themselves() {
         let (f, i) = (fonts(), info());
-        let mut app = App::new(Screen::Home, W, H, PPD);
-        tap(&mut app, &f, &i, Action::Unavailable("备份还没实现"));
+        let mut app = App::new(Screen::Language, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Unavailable("这种语言还没有翻译"));
         assert_eq!(app.deadline(0), Some(TOAST_MS));
         app.tick(TOAST_MS);
         assert_eq!(app.deadline(TOAST_MS), app.idle_due());
@@ -2081,14 +2553,309 @@ mod tests {
     }
 
     #[test]
-    fn fastboot_cannot_be_chosen_until_it_is_wired_up() {
+    fn fastboot_is_chosen_like_any_target_but_not_restarted_to_yet() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Reboot, W, H, PPD);
-        let hits = &app.frame(&f, &i, DataState::Unmounted).hits;
         let fastboot = TARGETS.iter().position(|t| *t == Target::Fastboot).unwrap();
-        assert!(!hits.iter().any(|h| h.action == Action::RebootTarget(fastboot)));
-        tap(&mut app, &f, &i, Action::Unavailable("用户空间 fastboot 还没接入"));
-        assert_eq!(app.state.reboot, 0, "the target stays on system");
+        tap(&mut app, &f, &i, Action::RebootTarget(fastboot));
+        assert_eq!(app.state.reboot, fastboot);
+        assert!(swipe(&mut app, &f, &i, Confirm::Reboot).is_empty(), "the runtime cannot start userspace fastboot yet");
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says so");
+    }
+
+    /// Drag the knob of a swipe-to-confirm track all the way across.
+    fn swipe(app: &mut App, f: &Fonts, i: &DeviceInfo, which: Confirm) -> Vec<Effect> {
+        let track = app.frame(f, i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(which)).expect("the track is on the page").rect;
+        let y = track.centre().1 - app.top().1;
+        let mut fx = app.touch(Touch::Down(track.x + track.h / 2.0, y), f, 0);
+        fx.extend(app.touch(Touch::Move(track.x + track.w / 2.0, y), f, 0));
+        fx.extend(app.touch(Touch::Move(track.x + track.w, y), f, 0));
+        fx.extend(app.touch(Touch::Up, f, 0));
+        fx
+    }
+
+    #[test]
+    fn every_unfinished_entry_now_opens_its_page() {
+        let (f, i) = (fonts(), DeviceInfo { slot: Some(Slot::B), ..info() });
+        let routes: [(Screen, Screen); 13] = [
+            (Screen::Home, Screen::Search),
+            (Screen::Home, Screen::Backup),
+            (Screen::Home, Screen::Restore),
+            (Screen::Home, Screen::Advanced),
+            (Screen::Advanced, Screen::Files),
+            (Screen::Advanced, Screen::Terminal),
+            (Screen::Advanced, Screen::Logs),
+            (Screen::Settings, Screen::Language),
+            (Screen::Settings, Screen::TimeZone),
+            (Screen::Settings, Screen::Terminal),
+            (Screen::About, Screen::Logs),
+            (Screen::Specs, Screen::License),
+            (Screen::Specs, Screen::FontLicense),
+        ];
+        for (from, to) in routes {
+            let mut app = App::new(from, W, H, PPD);
+            tap(&mut app, &f, &i, Action::Open(to));
+            assert_eq!(app.screen(), to, "from {from:?}");
+        }
+        let mut app = App::new(Screen::Reboot, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Slot));
+        assert_eq!(app.screen(), Screen::Slot);
+    }
+
+    #[test]
+    fn a_backup_takes_what_is_ticked_to_where_it_is_sent() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Backup, &f, &i);
+        assert_eq!(app.state.backup, [true, true, false, true]);
+        tap(&mut app, &f, &i, Action::BackupPart(2));
+        tap(&mut app, &f, &i, Action::BackupPart(0));
+        assert_eq!(app.state.backup, [false, true, true, true]);
+        tap(&mut app, &f, &i, Action::BackupTo(1));
+        assert_eq!(app.state.backup_to, 1);
+        tap(&mut app, &f, &i, Action::Toggle(Switch::Compress));
+        tap(&mut app, &f, &i, Action::Toggle(Switch::Verify));
+        assert!(app.state.compress && !app.state.verify);
+        assert!(swipe(&mut app, &f, &i, Confirm::Backup).is_empty());
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says backing up is not done yet");
+    }
+
+    #[test]
+    fn a_backup_found_opens_to_choose_what_to_restore() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Restore, &f, &i);
+        assert!(app.frame(&f, &i, DataState::Unmounted).hits.is_empty(), "nothing found, nothing to open");
+        app.state.backups = vec![
+            BackupEntry { made: 1_792_348_260, size: 6_200_000_000, place: 0, parts: [true, true, false, true] },
+            BackupEntry { made: 1_792_000_000, size: 120_000_000, place: 1, parts: [true, false, false, false] },
+        ];
+        app.refresh();
+        tap(&mut app, &f, &i, Action::OpenBackup(0));
+        assert_eq!(app.screen(), Screen::RestoreBackup);
+        assert_eq!(app.state.restore, Some((0, [true, true, false, true])));
+        let parts: Vec<Action> =
+            app.frame(&f, &i, DataState::Unmounted).hits.iter().map(|h| h.action).filter(|a| matches!(a, Action::RestorePart(_))).collect();
+        assert_eq!(parts, [Action::RestorePart(0), Action::RestorePart(1), Action::RestorePart(3)], "only what the backup holds");
+        tap(&mut app, &f, &i, Action::RestorePart(1));
+        assert_eq!(app.state.restore, Some((0, [true, false, false, true])));
+        assert!(swipe(&mut app, &f, &i, Confirm::Restore).is_empty());
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Restore);
+        assert_eq!(app.state.restore, None);
+    }
+
+    #[test]
+    fn the_slot_page_picks_the_other_slot_and_the_reboot_page_says_so() {
+        let (f, i) = (fonts(), DeviceInfo { slot: Some(Slot::B), ..info() });
+        let mut app = App::new(Screen::Reboot, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Slot));
+        assert!(swipe(&mut app, &f, &i, Confirm::Slot).is_empty());
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "already starting from B");
+        tap(&mut app, &f, &i, Action::PickSlot(Some(Slot::A)));
+        assert_eq!(app.state.next_slot, Some(Slot::A));
+        tap(&mut app, &f, &i, Action::PickSlot(None));
+        assert_eq!(app.state.next_slot, None, "picking the running slot keeps it");
+        tap(&mut app, &f, &i, Action::PickSlot(Some(Slot::A)));
+        assert!(swipe(&mut app, &f, &i, Confirm::Slot).is_empty(), "switching is not done yet");
+    }
+
+    /// Type `text` on the keyboard of the page showing, one tap a key, in
+    /// the letters layer.
+    fn type_text(app: &mut App, f: &Fonts, i: &DeviceInfo, text: &str) {
+        for ch in text.chars() {
+            tap(app, f, i, Action::Type(Cap::Char(ch)));
+        }
+    }
+
+    #[test]
+    fn search_finds_by_pinyin_typed_on_its_own_keyboard() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Search, &f, &i);
+        type_text(&mut app, &f, &i, "bf");
+        assert_eq!(app.state.search, "bf");
+        let opens: Vec<Action> = app.frame(&f, &i, DataState::Unmounted).hits.iter().map(|h| h.action).filter(|a| matches!(a, Action::Open(_))).collect();
+        assert_eq!(opens, [Action::Open(Screen::Backup)]);
+        tap(&mut app, &f, &i, Action::Type(Cap::Backspace));
+        assert_eq!(app.state.search, "b");
+        tap(&mut app, &f, &i, Action::ClearSearch);
+        assert_eq!(app.state.search, "");
+        type_text(&mut app, &f, &i, "xpsj");
+        tap(&mut app, &f, &i, Action::Type(Cap::Enter));
+        assert_eq!(app.screen(), Screen::ScreenOff, "return opens the first result");
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Search);
+    }
+
+    #[test]
+    fn shift_makes_one_capital_and_the_layers_switch() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Search, &f, &i);
+        tap(&mut app, &f, &i, Action::Type(Cap::Shift));
+        type_text(&mut app, &f, &i, "ab");
+        assert_eq!(app.state.search, "Ab");
+        tap(&mut app, &f, &i, Action::Type(Cap::Show(Layer::Digits)));
+        type_text(&mut app, &f, &i, "1");
+        tap(&mut app, &f, &i, Action::Type(Cap::Show(Layer::Symbols)));
+        type_text(&mut app, &f, &i, "|");
+        tap(&mut app, &f, &i, Action::Type(Cap::Space));
+        assert_eq!(app.state.search, "Ab1| ");
+        tap(&mut app, &f, &i, Action::Type(Cap::Show(Layer::Letters)));
+        assert_eq!(app.state.layer, Layer::Letters);
+    }
+
+    #[test]
+    fn a_key_shows_held_down_while_touched() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Search, &f, &i);
+        let (x, y) = spot(&mut app, &f, &i, Action::Type(Cap::Char('q')));
+        app.touch(Touch::Down(x, y), &f, 0);
+        assert_eq!(app.state.pressed, Some(Cap::Char('q')));
+        app.touch(Touch::Up, &f, 0);
+        assert_eq!(app.state.pressed, None);
+        assert_eq!(app.state.search, "q");
+    }
+
+    #[test]
+    fn the_terminal_takes_a_command_it_cannot_run_yet() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Terminal));
+        type_text(&mut app, &f, &i, "ls");
+        assert_eq!(app.state.command, "ls");
+        tap(&mut app, &f, &i, Action::Type(Cap::Enter));
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says commands do not run yet");
+        assert_eq!(app.state.command, "ls", "what was typed stays");
+    }
+
+    fn entry(name: &str, kind: FileKind) -> FileRow {
+        FileRow { name: name.into(), kind, size: 4096, modified: 1_792_348_260, mode: 0o040_755, uid: 0, gid: 0 }
+    }
+
+    /// When the tests list folders: a day after the entries changed.
+    const LISTED: i64 = 1_792_348_260 + 86_400;
+
+    fn folder(items: usize) -> FileKind {
+        FileKind::Folder { items: Some(items) }
+    }
+
+    #[test]
+    fn the_file_manager_walks_folders_and_back_up_to_the_root() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Files)), vec![Effect::ReadDir("/".into())]);
+        let link = FileKind::Link { target: "/storage/self/primary".into(), folder: true };
+        app.set_files("/".into(), Ok(vec![entry("sdcard", link), entry("vendor", folder(12)), entry("init.rc", FileKind::File)]), LISTED);
+        assert_eq!(tap(&mut app, &f, &i, Action::OpenEntry(1)), vec![Effect::ReadDir("/vendor".into())]);
+        assert_eq!(tap(&mut app, &f, &i, Action::OpenEntry(0)), vec![Effect::ReadDir("/sdcard".into())], "a link to a folder opens like one");
+        app.set_files("/vendor".into(), Ok(vec![entry("etc", folder(3))]), LISTED);
+        assert_eq!(app.key(Key::Back, 0), vec![Effect::ReadDir("/".into())], "back climbs a folder");
+        assert_eq!(app.screen(), Screen::Files);
+        app.set_files("/".into(), Ok(vec![entry("init.rc", FileKind::File)]), LISTED);
+        tap(&mut app, &f, &i, Action::OpenEntry(0));
+        assert_eq!(app.screen(), Screen::FileInfo);
+        assert_eq!(app.state.file.as_ref().map(|e| e.name.as_str()), Some("init.rc"));
+        app.key(Key::Back, 0);
+        assert_eq!(app.state.file, None);
+        assert!(app.key(Key::Back, 0).is_empty(), "at the root, back leaves");
+        assert_eq!(app.screen(), Screen::Advanced);
+    }
+
+    #[test]
+    fn an_unreadable_folder_offers_nothing_to_open() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Files, W, H, PPD);
+        app.set_files("/data".into(), Err("read /data: Permission denied (os error 13)".into()), LISTED);
+        let fr = app.frame(&f, &i, DataState::Unmounted);
+        assert!(fr.hits.is_empty() && fr.rows.is_none());
+    }
+
+    #[test]
+    fn a_long_folder_scrolls_to_its_last_entry_in_one_list() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Files, W, H, PPD);
+        let many: Vec<FileRow> = (0..5000).map(|k| entry(&format!("IMG_{k:05}.jpg"), FileKind::File)).collect();
+        app.set_files("/sdcard/DCIM/Camera".into(), Ok(many), LISTED);
+        let rows = app.frame(&f, &i, DataState::Unmounted).rows.as_ref().expect("the entries are listed").count();
+        assert_eq!(rows, 5000, "every entry has its row");
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 0);
+        let end = app.max_scroll();
+        scroll_to(&mut app, &f, end, 1000);
+        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 2000);
+        assert!(app.drawn.len() < 40, "only the rows near the screen are kept drawn: {}", app.drawn.len());
+        assert!(app.drawn.iter().any(|(k, _)| *k == 4999), "the last row shows");
+        tap_at(&mut app, &f, &i, Action::OpenEntry(4999), 3000);
+        assert_eq!(app.screen(), Screen::FileInfo);
+        assert_eq!(app.state.file.as_ref().map(|e| e.name.as_str()), Some("IMG_04999.jpg"));
+    }
+
+    #[test]
+    fn a_folder_gone_back_up_to_shows_where_it_was_left() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Files));
+        let folders: Vec<FileRow> = (0..300).map(|k| entry(&format!("dir{k:03}"), folder(k))).collect();
+        app.set_files("/".into(), Ok(folders.clone()), LISTED);
+        app.frame(&f, &i, DataState::Unmounted);
+        scroll_to(&mut app, &f, 9000.0, 0);
+        let (_, y) = spot(&mut app, &f, &i, Action::OpenEntry(36));
+        assert!(y > 0.0 && y < H as f32, "row 36 is on screen at {y}");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::OpenEntry(36), 2000), vec![Effect::ReadDir("/dir036".into())]);
+        app.set_files("/dir036".into(), Ok(vec![entry("a", FileKind::File)]), LISTED);
+        assert_eq!(app.top().1, 0.0, "a folder opened starts from its top");
+        assert_eq!(app.key(Key::Back, 3000), vec![Effect::ReadDir("/".into())]);
+        app.set_files("/".into(), Ok(folders), LISTED);
+        assert_eq!(app.top().1, 9000.0, "back up, the folder is where it was left");
+    }
+
+    #[test]
+    fn the_path_goes_up_from_its_capsules_even_held_under_the_bar() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Files, W, H, PPD);
+        let many: Vec<FileRow> = (0..200).map(|k| entry(&format!("lib{k:03}.so"), FileKind::File)).collect();
+        app.set_files("/system/lib64".into(), Ok(many), LISTED);
+        assert_eq!(tap(&mut app, &f, &i, Action::OpenAncestor(1)), vec![Effect::ReadDir("/system".into())]);
+        scroll_to(&mut app, &f, 6000.0, 0);
+        app.tick(2000);
+        let t = app.theme();
+        let (_, y) = spot(&mut app, &f, &i, Action::OpenAncestor(0));
+        assert!(y > widgets::bar_bottom(&t) && y < widgets::bar_bottom(&t) + t.m.dp(51.0), "the capsules stay under the bar: {y}");
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 2000);
+        let (x, _) = spot(&mut app, &f, &i, Action::OpenAncestor(0));
+        let px = |c: &Canvas, x: f32, y: f32| c.data[(y as usize * W as usize + x as usize) * 4..][..3].to_vec();
+        assert_eq!(px(&c, x - t.m.dp(20.0), y), vec![243, 244, 247], "the root's capsule shows over the list");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::OpenAncestor(0), 3000), vec![Effect::ReadDir("/".into())]);
+        // The strip's empty end covers the rows beneath it.
+        app.touch(Touch::Down(W as f32 - t.m.dp(40.0), y), &f, 4000);
+        assert!(app.touch(Touch::Up, &f, 4000).is_empty());
+        assert_eq!(app.screen(), Screen::Files);
+    }
+
+    #[test]
+    fn rows_are_found_by_where_they_lie() {
+        let rows = Rows { edges: vec![100.0, 352.0, 682.0, 934.0], action: Action::OpenEntry };
+        assert_eq!(rows.count(), 3);
+        assert_eq!(rows.at(99.0), None);
+        assert_eq!(rows.at(100.0), Some(0));
+        assert_eq!(rows.at(352.0), Some(1));
+        assert_eq!(rows.at(933.0), Some(2));
+        assert_eq!(rows.at(934.0), None);
+        assert_eq!(rows.within(0.0, 100.0), 0..0);
+        assert_eq!(rows.within(0.0, 101.0), 0..1);
+        assert_eq!(rows.within(351.0, 700.0), 0..3);
+        assert_eq!(rows.within(700.0, 5000.0), 2..3);
+        assert_eq!(rows.within(934.0, 5000.0), 3..3);
+    }
+
+    #[test]
+    fn logs_are_chosen_and_their_place_picked() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Logs, W, H, PPD);
+        tap(&mut app, &f, &i, Action::LogPart(1));
+        assert_eq!(app.state.logs, [true, false]);
+        tap(&mut app, &f, &i, Action::LogsTo(1));
+        assert_eq!(app.state.logs_to, 1);
+        tap(&mut app, &f, &i, Action::Unavailable("导出日志还没实现"));
         assert_eq!(app.deadline(0), Some(TOAST_MS));
     }
 

@@ -1,14 +1,20 @@
-use crate::app::{Action, Confirm, Damage, Frame, HeroArt, Hit, Install, Pick, Screen, State, Switch, Target, SCREEN_OFF, TARGETS};
+use crate::app::{
+    Action, Confirm, Damage, FileKind, Frame, HeroArt, Hit, Install, Pick, Screen, State, Switch, Target, BACKUP_PARTS,
+    BACKUP_PLACES, SCREEN_OFF, TARGETS,
+};
 use crate::canvas::Canvas;
 use crate::color::Rgba;
+use crate::files;
 use crate::fmt;
 use crate::font::Fonts;
 use crate::geom::Rect;
+use crate::search;
 use crate::theme::Theme;
 use crate::widgets::{self, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DataState, DeviceInfo, VERSION};
 use skyward_install::{Outcome, Stage};
 use skyward_vab::Slot;
+use std::path::Path;
 
 // Tile colours sampled from the stock Settings, plus orange and red from the
 // same family for the destructive and reboot entries.
@@ -42,6 +48,20 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::About => about(cx),
         Screen::Specs => specs(cx),
         Screen::ScreenOff => screen_off(cx),
+        Screen::Search => search(cx),
+        Screen::Backup => backup(cx),
+        Screen::Restore => restore(cx),
+        Screen::RestoreBackup => restore_backup(cx),
+        Screen::Advanced => advanced(cx),
+        Screen::Files => files(cx),
+        Screen::FileInfo => file_info(cx),
+        Screen::Terminal => terminal(cx),
+        Screen::Language => language(cx),
+        Screen::TimeZone => time_zone(cx),
+        Screen::Logs => logs(cx),
+        Screen::License => license(cx),
+        Screen::FontLicense => font_license(cx),
+        Screen::Slot => slot(cx),
     }
 }
 
@@ -51,6 +71,9 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Reboot => ("滑动以重启", false),
         Confirm::Wipe => ("滑动以清除", true),
         Confirm::Flash => ("滑动以刷入", true),
+        Confirm::Backup => ("滑动以备份", false),
+        Confirm::Restore => ("滑动以恢复", true),
+        Confirm::Slot => ("滑动以切换", true),
     }
 }
 
@@ -96,7 +119,7 @@ pub fn home(cx: &Ctx) -> Frame {
     let mut y = t.m.content_top;
     let search_top = y;
     y = widgets::search_bar(&mut c, t, f, y, "搜索功能与分区");
-    out.push(Hit { rect: Rect::new(t.m.margin, search_top, t.m.w as f32 - t.m.margin * 2.0, t.m.search_h), action: Action::Unavailable("搜索还没实现") });
+    out.push(Hit { rect: Rect::new(t.m.margin, search_top, t.m.w as f32 - t.m.margin * 2.0, t.m.search_h), action: Action::Open(Screen::Search) });
 
     let sub = match &i.os_version {
         Some(v) => format!("{} · {v}", i.codename),
@@ -135,8 +158,8 @@ pub fn home(cx: &Ctx) -> Frame {
     ]);
     out.extend(hits(&tools.rows, &[
         Action::Open(Screen::Install),
-        Action::Unavailable("备份还没实现"),
-        Action::Unavailable("恢复还没实现"),
+        Action::Open(Screen::Backup),
+        Action::Open(Screen::Restore),
         Action::Open(Screen::Mount),
     ]));
     y = tools.bottom + t.m.card_gap;
@@ -149,11 +172,11 @@ pub fn home(cx: &Ctx) -> Frame {
     ]);
     out.extend(hits(&system.rows, &[
         Action::Open(Screen::Wipe),
-        Action::Unavailable("高级功能还没实现"),
+        Action::Open(Screen::Advanced),
         Action::Open(Screen::Settings),
         Action::Open(Screen::Reboot),
     ]));
-    Frame { canvas: c, hits: out, title: "Skyward", back: false, header: true, content_top: search_top, hero: None, pattern: None }
+    Frame { back: false, ..Frame::new(t, c, out, "Skyward", search_top) }
 }
 
 /// Preferences, opening with the stock「显示与亮度」theme previews.
@@ -178,17 +201,17 @@ pub fn settings(cx: &Ctx) -> Frame {
         Row::new("触摸振动").icon(PURPLE, Icon::Vibrate).trail(Trail::Switch(s.vibrate)),
     ]);
     out.extend(hits(&general.rows, &[
-        Action::Unavailable("语言还不能修改"),
-        Action::Unavailable("时区还不能修改"),
+        Action::Open(Screen::Language),
+        Action::Open(Screen::TimeZone),
         Action::Toggle(Switch::Vibrate),
     ]));
     y = widgets::section(&mut c, t, f, general.bottom, "调试");
     let debug = widgets::list(&mut c, t, f, y, &[Row::new("终端").icon(SLATE, Icon::Terminal)]);
-    out.extend(hits(&debug.rows, &[Action::Unavailable("终端还没实现")]));
+    out.extend(hits(&debug.rows, &[Action::Open(Screen::Terminal)]));
     y = widgets::section(&mut c, t, f, debug.bottom, "关于");
     let about = widgets::list(&mut c, t, f, y, &[Row::new("关于本机").trail(Trail::Value(VERSION))]);
     out.extend(hits(&about.rows, &[Action::Open(Screen::About)]));
-    Frame { canvas: fit(c, t, about.bottom), hits: out, title: "设置", back: true, header: true, content_top: top, hero: None, pattern: None }
+    Frame::new(t, fit(c, t, about.bottom), out, "设置", top)
 }
 
 /// How long the screen stays on with nothing touched, opened from the
@@ -211,7 +234,7 @@ pub fn screen_off(cx: &Ctx) -> Frame {
     if SCREEN_OFF[s.screen_off].is_none() {
         widgets::footnote(&mut c, t, f, y, "屏幕会一直亮着，同一画面显示太久会留下残影。");
     }
-    Frame { canvas: c, hits: hits(&times.rows, &picks), title: "息屏时间", back: true, header: true, content_top: top, hero: None, pattern: None }
+    Frame::new(t, c, hits(&times.rows, &picks), "息屏时间", top)
 }
 
 /// Mount manager: the slot's partitions, each with a switch to mount it
@@ -272,7 +295,7 @@ pub fn mount(cx: &Ctx) -> Frame {
         }
     };
 
-    Frame { canvas: fit(c, t, bottom), hits: out, title: "挂载", back: true, header: true, content_top: top, hero: None, pattern: None }
+    Frame::new(t, fit(c, t, bottom), out, "挂载", top)
 }
 
 /// About this device, modelled on the stock「我的设备」: the wordmark and
@@ -312,14 +335,14 @@ pub fn about(cx: &Ctx) -> Frame {
     }
     let y = widgets::spec_card(&mut c, t, f, summary.bottom + m.card_gap, &fmt::model_lines(&i.model), &specs, &tone);
     let links = widgets::list_toned(&mut c, t, f, y + m.card_gap, &[Row::new("全部参数与信息"), Row::new("导出日志")], &tone);
-    out.extend(hits(&links.rows, &[Action::Open(Screen::Specs), Action::Unavailable("导出日志还没实现")]));
+    out.extend(hits(&links.rows, &[Action::Open(Screen::Specs), Action::Open(Screen::Logs)]));
     let canvas = fit(c, t, links.bottom);
     let art = HeroArt {
         wordmark: widgets::wordmark(t, f, "Skyward", m.dp(233.7), m.dp(37.8)),
         version: widgets::version_line(t, f, VERSION),
         runs: canvas.runs(),
     };
-    Frame { canvas, hits: out, title: "关于本机", back: true, header: false, content_top: summary.rows[0].y, hero: Some(art), pattern: None }
+    Frame { header: false, hero: Some(art), ..Frame::new(t, canvas, out, "关于本机", summary.rows[0].y) }
 }
 
 /// Every reading the recovery has, modelled on the stock「全部参数与信息」.
@@ -402,8 +425,8 @@ pub fn specs(cx: &Ctx) -> Frame {
         Row::new("开源许可").trail(Trail::Value("GPL-3.0")),
         Row::new("界面字体").trail(Trail::Value("MiSans")),
     ]);
-    out.extend(hits(&links.rows, &[Action::Unavailable("许可证全文还没放进来"), Action::Unavailable("字体许可还没放进来")]));
-    Frame { canvas: fit(c, t, links.bottom), hits: out, title: "全部参数与信息", back: true, header: true, content_top: top, hero: None, pattern: None }
+    out.extend(hits(&links.rows, &[Action::Open(Screen::License), Action::Open(Screen::FontLicense)]));
+    Frame::new(t, fit(c, t, links.bottom), out, "全部参数与信息", top)
 }
 
 /// File-based-encryption unlock.
@@ -426,7 +449,7 @@ pub fn decrypt(cx: &Ctx) -> Frame {
         Hit { rect: Rect::new(pcx - reach, pcy - reach, reach * 2.0, reach * 2.0), action: Action::Pattern },
         Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip },
     ];
-    Frame { canvas: c, hits: out, title: "解密", back: false, header: false, content_top: 0.0, hero: None, pattern: Some((pcx, pcy, span)) }
+    Frame { back: false, header: false, pattern: Some((pcx, pcy, span)), ..Frame::new(t, c, out, "解密", 0.0) }
 }
 
 /// Reboot target picker with a swipe-to-confirm control.
@@ -448,27 +471,23 @@ pub fn reboot(cx: &Ctx) -> Frame {
         })
         .collect();
     let targets = widgets::list(&mut c, t, f, y, &rows);
-    let picks: Vec<Action> = TARGETS
-        .iter()
-        .enumerate()
-        .map(|(k, target)| match target {
-            Target::Fastboot => Action::Unavailable("用户空间 fastboot 还没接入"),
-            _ => Action::RebootTarget(k),
-        })
-        .collect();
+    let picks: Vec<Action> = (0..TARGETS.len()).map(Action::RebootTarget).collect();
     out.extend(hits(&targets.rows, &picks));
     y = targets.bottom;
     if let Some(slot) = cx.info.slot {
-        let next = format!("{}（当前）", slot.letter());
+        let next = match s.next_slot {
+            Some(other) => other.letter().to_string(),
+            None => format!("{}（当前）", slot.letter()),
+        };
         y = widgets::section(&mut c, t, f, y, "槽位");
         let slots = widgets::list(&mut c, t, f, y, &[Row::new("下次启动").trail(Trail::Value(&next))]);
-        out.extend(hits(&slots.rows, &[Action::Unavailable("切换槽位还没实现")]));
+        out.extend(hits(&slots.rows, &[Action::Open(Screen::Slot)]));
         y = slots.bottom;
     }
     let (label, danger) = confirm_label(Confirm::Reboot);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Reboot) });
-    Frame { canvas: c, hits: out, title: "重启", back: true, header: true, content_top: top, hero: None, pattern: None }
+    Frame::new(t, c, out, "重启", top)
 }
 
 /// Installing, opened from the home page: the system on the phone now, and
@@ -508,7 +527,7 @@ pub fn install(cx: &Ctx) -> Frame {
         methods.bottom,
         "能安装完整的 A/B 系统更新包，以及 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新会安装到另一个槽位，安装完成后从那个槽位启动。",
     );
-    Frame { canvas: c, hits: out, title: "安装", back: true, header: true, content_top: top, hero: None, pattern: None }
+    Frame::new(t, c, out, "安装", top)
 }
 
 /// A one-line card on how things stand.
@@ -633,7 +652,7 @@ pub fn sideload(cx: &Ctx) -> Frame {
         }
         Install::Finished { outcome, damage } => finished(&mut c, cx, top, outcome, *damage, &mut out),
     };
-    Frame { canvas: fit(c, t, bottom), hits: out, title: "通过电脑安装", back: true, header: true, content_top: top, hero: None, pattern: None }
+    Frame::new(t, fit(c, t, bottom), out, "通过电脑安装", top)
 }
 
 /// How an install ended, and where to go from there.
@@ -717,5 +736,388 @@ pub fn wipe(cx: &Ctx) -> Frame {
     let (label, danger) = confirm_label(Confirm::Wipe);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Wipe) });
-    Frame { canvas: c, hits: out, title: "清除数据", back: true, header: true, content_top: top, hero: None, pattern: None }
+    Frame::new(t, c, out, "清除数据", top)
+}
+
+/// A page laid out above the on-screen keyboard: where the keyboard's top
+/// is, and its keys as touch targets.
+fn keyboard_hits(c: &mut Canvas, t: &Theme, f: &Fonts, s: &State, enter: &str, out: &mut Vec<Hit>) -> f32 {
+    let top = t.m.h as f32 - widgets::keyboard_height(t);
+    let keys = widgets::keyboard(c, t, f, top, s.layer, s.pressed, enter);
+    out.extend(keys.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
+    top
+}
+
+/// Finding a feature or partition: the field where the title would be,
+/// what it finds, and the keyboard.
+pub fn search(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let m = &t.m;
+    let mut c = page(t);
+    let mut out = Vec::new();
+    let x = m.back_x + m.back_w + m.dp(18.0);
+    let field = widgets::search_field(&mut c, t, f, x, m.w as f32 - m.margin - x, m.back_cy, &s.search, "搜索功能与分区");
+    let top = field.field.y + field.field.h + m.dp(12.0);
+    let kb_top = m.h as f32 - widgets::keyboard_height(t);
+    if s.search.trim().is_empty() {
+        widgets::footnote(&mut c, t, f, top, "输入功能或分区的名称。中文名可以用拼音全拼或首字母，例如输入 bf 找到备份。");
+    } else {
+        let found = search::find(&s.search);
+        if found.is_empty() {
+            let none = format!("没有找到「{}」", s.search.trim());
+            widgets::list(&mut c, t, f, top, &[Row::new(&none).trail(Trail::None)]);
+        } else {
+            let rows: Vec<Row> = found.iter().map(|e| Row::new(e.title).subtitle(e.place)).collect();
+            let list = widgets::list(&mut c, t, f, top, &rows);
+            // The keyboard covers what does not fit above it.
+            let shown = list.rows.iter().zip(&found).filter(|(r, _)| r.y + r.h <= kb_top);
+            out.extend(shown.map(|(&rect, e)| Hit { rect, action: Action::Open(e.screen) }));
+        }
+    }
+    keyboard_hits(&mut c, t, f, s, "搜索", &mut out);
+    if let Some(rect) = field.clear {
+        out.push(Hit { rect, action: Action::ClearSearch });
+    }
+    Frame { header: false, ..Frame::new(t, c, out, "搜索", 0.0) }
+}
+
+/// Backing up: what to take, where it goes, and how.
+pub fn backup(cx: &Ctx) -> Frame {
+    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
+    let mut c = long_page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let decrypted = cx.data == DataState::Decrypted;
+    let y = widgets::section_first(&mut c, t, f, top, "备份内容");
+    let data = if decrypted { "应用、账户与设置，不含照片和下载的文件" } else { "应用、账户与设置，不含照片和下载的文件；需要先解密" };
+    let subs = ["boot、init_boot、vendor_boot、dtbo、vbmeta 和 recovery", "当前槽位在 super 里的分区", data, "IMEI、基带设置和传感器校准，刷坏后靠它恢复"];
+    let rows: Vec<Row> =
+        BACKUP_PARTS.iter().zip(subs).enumerate().map(|(k, (name, sub))| Row::new(name).subtitle(sub).trail(Trail::Check(s.backup[k]))).collect();
+    let parts = widgets::list(&mut c, t, f, y, &rows);
+    out.extend(hits(&parts.rows, &[0, 1, 2, 3].map(Action::BackupPart)));
+    let y = widgets::section(&mut c, t, f, parts.bottom, "存放位置");
+    let storage = match (decrypted, i.storage.free) {
+        (true, Some(free)) => format!("剩余 {}", fmt::gb(free)),
+        _ => "需要先解密数据分区".to_string(),
+    };
+    let places = widgets::list(&mut c, t, f, y, &[
+        Row::new(BACKUP_PLACES[0]).subtitle(&storage).trail(Trail::Check(s.backup_to == 0)),
+        Row::new(BACKUP_PLACES[1]).subtitle("通过 OTG 接入的 U 盘").trail(Trail::Check(s.backup_to == 1)),
+    ]);
+    out.extend(hits(&places.rows, &[Action::BackupTo(0), Action::BackupTo(1)]));
+    let y = widgets::section(&mut c, t, f, places.bottom, "选项");
+    let options = widgets::list(&mut c, t, f, y, &[
+        Row::new("压缩").subtitle("备份更小，耗时更长").trail(Trail::Switch(s.compress)),
+        Row::new("完成后校验").subtitle("逐个读回，确认备份完整").trail(Trail::Switch(s.verify)),
+    ]);
+    out.extend(hits(&options.rows, &[Action::Toggle(Switch::Compress), Action::Toggle(Switch::Verify)]));
+    let y = widgets::footnote(&mut c, t, f, options.bottom, "备份放在 Skyward/backups 文件夹里，按开始备份的时间命名。");
+    let (label, danger) = confirm_label(Confirm::Backup);
+    let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+    out.push(Hit { rect: track, action: Action::Confirm(Confirm::Backup) });
+    Frame::new(t, fit(c, t, track.y + track.h), out, "备份", top)
+}
+
+/// The backups found, newest first, to restore one.
+pub fn restore(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = long_page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let y = widgets::section_first(&mut c, t, f, top, "备份");
+    let bottom = if s.backups.is_empty() {
+        widgets::list(&mut c, t, f, y, &[Row::new("没有找到备份").trail(Trail::None)]).bottom
+    } else {
+        let titles: Vec<String> = s.backups.iter().map(|b| fmt::datetime(b.made)).collect();
+        let subs: Vec<String> =
+            s.backups.iter().map(|b| format!("{} · {} · {}", fmt::parts(&b.parts), fmt::bytes(b.size), BACKUP_PLACES[b.place])).collect();
+        let rows: Vec<Row> = titles.iter().zip(&subs).map(|(title, sub)| Row::new(title).subtitle(sub)).collect();
+        let list = widgets::list(&mut c, t, f, y, &rows);
+        out.extend(list.rows.iter().enumerate().map(|(k, &rect)| Hit { rect, action: Action::OpenBackup(k) }));
+        list.bottom
+    };
+    let bottom = widgets::footnote(&mut c, t, f, bottom, "恢复会在内部存储的 Skyward/backups 文件夹和 U 盘里查找备份，内部存储需要先解密数据分区。");
+    Frame::new(t, fit(c, t, bottom), out, "恢复", top)
+}
+
+/// One backup: when and where it was made, and which of its parts to
+/// restore.
+pub fn restore_backup(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let (i, chosen) = s.restore.expect("the restore page shows a backup");
+    let b = &s.backups[i];
+    let mut c = long_page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let y = widgets::info_card(&mut c, t, f, top, &[
+        ("备份时间", fmt::datetime(b.made)),
+        ("大小", fmt::bytes(b.size)),
+        ("位置", BACKUP_PLACES[b.place].to_string()),
+    ]);
+    let y = widgets::section(&mut c, t, f, y, "恢复内容");
+    let held: Vec<usize> = (0..BACKUP_PARTS.len()).filter(|&k| b.parts[k]).collect();
+    let rows: Vec<Row> = held.iter().map(|&k| Row::new(BACKUP_PARTS[k]).trail(Trail::Check(chosen[k]))).collect();
+    let list = widgets::list(&mut c, t, f, y, &rows);
+    out.extend(list.rows.iter().zip(&held).map(|(&rect, &k)| Hit { rect, action: Action::RestorePart(k) }));
+    let y = widgets::footnote(&mut c, t, f, list.bottom, "恢复会用备份覆盖手机上对应分区现有的内容。");
+    let (label, danger) = confirm_label(Confirm::Restore);
+    let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+    out.push(Hit { rect: track, action: Action::Confirm(Confirm::Restore) });
+    let delete = widgets::list(&mut c, t, f, track.y + track.h + t.m.dp(28.0), &[Row::new("删除这个备份").tint(t.pal.danger).trail(Trail::None)]);
+    out.extend(hits(&delete.rows, &[Action::Unavailable("删除备份还没实现")]));
+    Frame::new(t, fit(c, t, delete.bottom), out, "恢复备份", top)
+}
+
+/// Tools for the experienced.
+pub fn advanced(cx: &Ctx) -> Frame {
+    let (t, f) = (cx.t, cx.f);
+    let mut c = page(t);
+    let top = t.m.content_top;
+    let tools = widgets::list(&mut c, t, f, top, &[
+        Row::new("文件管理").icon(BLUE, Icon::Folder),
+        Row::new("终端").icon(SLATE, Icon::Terminal),
+        Row::new("导出日志").icon(ORANGE, Icon::Log),
+    ]);
+    let out = hits(&tools.rows, &[Action::Open(Screen::Files), Action::Open(Screen::Terminal), Action::Open(Screen::Logs)]);
+    Frame::new(t, c, out, "高级", top)
+}
+
+/// The file manager, laid out as the stock file manager lays out a folder:
+/// the path as capsules, held under the bar once scrolled there, then every
+/// entry of the folder in one list on the plain page, folders first, each
+/// row drawn as it scrolls into view.
+pub fn files(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let bg = files::page(t);
+    let mut c = Canvas::new(t.m.w, t.m.h);
+    c.clear(bg);
+    let rows = match &s.files {
+        Err(why) => {
+            files::note(&mut c, t, f, "读不到这个文件夹", Some(why));
+            None
+        }
+        Ok(entries) if entries.is_empty() => {
+            files::note(&mut c, t, f, "没有文件", None);
+            None
+        }
+        Ok(entries) => Some(files::rows(t, f, entries)),
+    };
+    let pinned = Some(files::strip(t, f, &s.folder));
+    Frame { bg, rows, pinned, ..Frame::new(t, c, Vec::new(), "文件管理", t.m.dp(files::STRIP_TOP_DP)) }
+}
+
+/// Row `i` of the page's long list over the whole of `c`, sized for it,
+/// drawn as the row comes into view.
+pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
+    match screen {
+        Screen::Files => {
+            let entries = cx.state.files.as_ref().expect("a folder listed draws its rows");
+            files::row(c, cx.t, cx.f, &entries[i], cx.state.listed);
+        }
+        other => unreachable!("{other:?} draws no list row by row"),
+    }
+}
+
+/// One entry of a folder: what it is, and what can be done with it.
+pub fn file_info(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let e = s.file.as_ref().expect("the file page shows an entry");
+    let mut c = long_page(t);
+    let top = t.m.content_top;
+    let mut facts = vec![("名称", e.name.clone()), ("位置", Path::new(&s.folder).join(&e.name).to_string_lossy().into_owned())];
+    match &e.kind {
+        FileKind::Link { target, .. } => facts.push(("指向", target.clone())),
+        _ => facts.push(("大小", format!("{}（{} 字节）", fmt::file_size(e.size), e.size))),
+    }
+    facts.push(("修改时间", fmt::datetime(e.modified)));
+    facts.push(("权限", format!("{}，所有者 {}，用户组 {}", fmt::mode(e.mode), e.uid, e.gid)));
+    let y = widgets::info_card(&mut c, t, f, top, &facts);
+    let actions = widgets::list(&mut c, t, f, y + t.m.card_gap, &[
+        Row::new("复制"),
+        Row::new("移动"),
+        Row::new("重命名"),
+        Row::new("删除").tint(t.pal.danger).trail(Trail::None),
+    ]);
+    let out = hits(&actions.rows, &[
+        Action::Unavailable("复制还没实现"),
+        Action::Unavailable("移动还没实现"),
+        Action::Unavailable("重命名还没实现"),
+        Action::Unavailable("删除还没实现"),
+    ]);
+    Frame::new(t, fit(c, t, actions.bottom), out, "文件信息", top)
+}
+
+/// A shell: what it printed, the command being typed after the prompt,
+/// and the keyboard.
+pub fn terminal(cx: &Ctx) -> Frame {
+    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
+    let m = &t.m;
+    let mut c = page(t);
+    let mut out = Vec::new();
+    let top = m.content_top;
+    let kb_top = keyboard_hits(&mut c, t, f, s, "执行", &mut out);
+    let bottom = kb_top - m.dp(12.0);
+    c.fill_round_rect(m.margin, top, m.w as f32 - m.margin * 2.0, bottom - top, m.card_radius, t.pal.card);
+    let lines = [format!("Skyward {VERSION}"), String::new(), format!("{}:/ # {}", i.codename, s.command)];
+    widgets::mono_text(&mut c, t, f, top + m.inner, &lines, true);
+    Frame::new(t, c, out, "终端", top)
+}
+
+/// The interface's languages; only Simplified Chinese is written yet.
+pub fn language(cx: &Ctx) -> Frame {
+    let (t, f) = (cx.t, cx.f);
+    let mut c = page(t);
+    let top = t.m.content_top;
+    let list = widgets::list(&mut c, t, f, top, &[
+        Row::new("简体中文").trail(Trail::Check(true)),
+        Row::new("繁體中文").subtitle("还没有翻译").trail(Trail::Check(false)),
+        Row::new("English").subtitle("Not translated yet").trail(Trail::Check(false)),
+    ]);
+    let out = hits(&list.rows[1..], &[Action::Unavailable("这种语言还没有翻译"), Action::Unavailable("这种语言还没有翻译")]);
+    widgets::footnote(&mut c, t, f, list.bottom, "界面文字目前只有简体中文。");
+    Frame::new(t, c, out, "语言", top)
+}
+
+/// Time zones the status bar's clock can keep, with the cities they cover.
+const TIME_ZONES: [(&str, &str); 9] = [
+    ("中国标准时间", "北京、上海"),
+    ("香港时间", "香港"),
+    ("台北时间", "台北"),
+    ("日本标准时间", "东京"),
+    ("协调世界时", "UTC"),
+    ("英国时间", "伦敦"),
+    ("中欧时间", "柏林、巴黎"),
+    ("美国东部时间", "纽约"),
+    ("美国太平洋时间", "洛杉矶"),
+];
+
+/// The time zone of the status bar's clock.
+pub fn time_zone(cx: &Ctx) -> Frame {
+    let (t, f) = (cx.t, cx.f);
+    let mut c = long_page(t);
+    let top = t.m.content_top;
+    let rows: Vec<Row> = TIME_ZONES.iter().enumerate().map(|(k, &(name, cities))| Row::new(name).subtitle(cities).trail(Trail::Check(k == 0))).collect();
+    let list = widgets::list(&mut c, t, f, top, &rows);
+    let others = vec![Action::Unavailable("修改时区还没实现"); TIME_ZONES.len() - 1];
+    let out = hits(&list.rows[1..], &others);
+    let bottom = widgets::footnote(&mut c, t, f, list.bottom, "时区决定状态栏显示的时间。");
+    Frame::new(t, fit(c, t, bottom), out, "时区", top)
+}
+
+/// Saving the logs, as a bug report asks for them.
+pub fn logs(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let y = widgets::section_first(&mut c, t, f, top, "日志内容");
+    let parts = widgets::list(&mut c, t, f, y, &[
+        Row::new("Recovery 日志").subtitle("界面、安装和挂载的输出").trail(Trail::Check(s.logs[0])),
+        Row::new("内核日志").subtitle("开机以来的内核消息，包括驱动和分区挂载").trail(Trail::Check(s.logs[1])),
+    ]);
+    out.extend(hits(&parts.rows, &[Action::LogPart(0), Action::LogPart(1)]));
+    let y = widgets::section(&mut c, t, f, parts.bottom, "保存到");
+    let storage = if cx.data == DataState::Decrypted { "Skyward/logs 文件夹" } else { "需要先解密数据分区" };
+    let places = widgets::list(&mut c, t, f, y, &[
+        Row::new("临时文件夹").subtitle("/tmp/skyward-logs，在电脑上用 adb pull 取走").trail(Trail::Check(s.logs_to == 0)),
+        Row::new("内部存储").subtitle(storage).trail(Trail::Check(s.logs_to == 1)),
+    ]);
+    out.extend(hits(&places.rows, &[Action::LogsTo(0), Action::LogsTo(1)]));
+    let y = widgets::footnote(&mut c, t, f, places.bottom, "临时文件夹在重启后清空。");
+    let export = widgets::button(&mut c, t, f, y + t.m.dp(24.0), "导出");
+    out.push(Hit { rect: export, action: Action::Unavailable("导出日志还没实现") });
+    Frame::new(t, c, out, "导出日志", top)
+}
+
+/// Skyward's licence, in Chinese and in the words the licence gives for a
+/// program's notice.
+const LICENSE_NOTICE: &str = "Skyward 是自由软件：你可以按照自由软件基金会发布的 GNU 通用公共许可证第 3 版，或者（由你选择）任何更新的版本，重新发布和修改它。\n\n\
+发布 Skyward 是希望它能有用，但它不附带任何担保，也不担保它适于销售或适合某一特定用途。详情请看 GNU 通用公共许可证。";
+
+const LICENSE_ORIGINAL: &str = "Skyward\nCopyright (C) 2026 Kirk Lin\n\n\
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.\n\n\
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.\n\n\
+You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.";
+
+/// Skyward's own licence.
+pub fn license(cx: &Ctx) -> Frame {
+    let (t, f) = (cx.t, cx.f);
+    let mut c = long_page(t);
+    let top = t.m.content_top;
+    let y = widgets::info_card(&mut c, t, f, top, &[("许可证", "GNU 通用公共许可证第 3 版或更新的版本（GPL-3.0-or-later）".to_string())]);
+    let y = widgets::paragraph(&mut c, t, f, y + t.m.dp(4.0), LICENSE_NOTICE);
+    let y = widgets::section(&mut c, t, f, y, "原文");
+    let bottom = widgets::paragraph(&mut c, t, f, y - t.m.dp(16.0), LICENSE_ORIGINAL);
+    Frame::new(t, fit(c, t, bottom), Vec::new(), "开源许可", top)
+}
+
+/// The monospaced typeface's licence, which names the copyright holders on
+/// its first lines; the image carries the same file beside the font.
+const MONO_LICENSE: &str = include_str!("../../../resources/fonts/KirkMono-OFL.txt");
+
+/// The typefaces, as they name themselves, and the terms each is used under.
+pub fn font_license(cx: &Ctx) -> Frame {
+    let (t, f) = (cx.t, cx.f);
+    let mut c = long_page(t);
+    let top = t.m.content_top;
+    let y = widgets::section_first(&mut c, t, f, top, "界面文字");
+    let y = widgets::info_card(&mut c, t, f, y, &[
+        ("字体", f.info.family.clone()),
+        ("版本", f.info.version.clone()),
+        ("版权", f.info.copyright.clone().expect("MiSans names its copyright holder")),
+    ]);
+    let y = widgets::paragraph(
+        &mut c,
+        t,
+        f,
+        y + t.m.dp(4.0),
+        "Skyward 的界面文字使用小米的 MiSans 字体，按《MiSans 字体知识产权许可协议》免费使用。字体文件没有经过改动，只随 Skyward 一起提供，不单独分发。\n\n协议全文见 hyperos.mi.com/font/zh/download。",
+    );
+    let y = widgets::section(&mut c, t, f, y, "终端文字");
+    let holders: Vec<&str> = MONO_LICENSE.lines().take_while(|l| l.starts_with("Copyright")).collect();
+    let y = widgets::info_card(&mut c, t, f, y, &[
+        ("字体", f.mono_info.family.clone()),
+        ("版本", f.mono_info.version.clone()),
+        ("版权", holders.join("\n")),
+        ("许可证", "SIL 开源字体许可证 1.1 版（OFL-1.1）".to_string()),
+    ]);
+    let bottom = widgets::paragraph(
+        &mut c,
+        t,
+        f,
+        y + t.m.dp(4.0),
+        "终端的文字使用 Kirk Mono 等宽字体。这份许可证允许自由使用、修改和再发布字体，但不能单独出售字体本身。\n\n许可证全文随字体放在 /skyward/KirkMono-OFL.txt，也可以在 openfontlicense.org 查看。",
+    );
+    Frame::new(t, fit(c, t, bottom), Vec::new(), "界面字体", top)
+}
+
+/// Which slot the phone starts from next.
+pub fn slot(cx: &Ctx) -> Frame {
+    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
+    let mut c = page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let Some(current) = i.slot else {
+        widgets::list(&mut c, t, f, top, &[Row::new("这台手机没有 A/B 槽位").trail(Trail::None)]);
+        return Frame::new(t, c, out, "启动槽位", top);
+    };
+    let chosen = s.next_slot.unwrap_or(current);
+    let y = widgets::section_first(&mut c, t, f, top, "下次启动");
+    let titles = [Slot::A, Slot::B].map(|slot| format!("槽位 {}", slot.letter()));
+    let rows: Vec<Row> = [Slot::A, Slot::B]
+        .iter()
+        .zip(&titles)
+        .map(|(&slot, title)| {
+            let sub = if slot == current { "现在运行的系统" } else { "另一个槽位" };
+            Row::new(title).subtitle(sub).trail(Trail::Check(slot == chosen))
+        })
+        .collect();
+    let list = widgets::list(&mut c, t, f, y, &rows);
+    let picks = [Slot::A, Slot::B].map(|slot| Action::PickSlot((slot != current).then_some(slot)));
+    out.extend(hits(&list.rows, &picks));
+    let y = widgets::footnote(&mut c, t, f, list.bottom, "另一个槽位里没有完整的系统时，切换后手机会无法开机。");
+    let (label, danger) = confirm_label(Confirm::Slot);
+    let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+    out.push(Hit { rect: track, action: Action::Confirm(Confirm::Slot) });
+    Frame::new(t, c, out, "启动槽位", top)
 }

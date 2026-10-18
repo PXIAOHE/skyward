@@ -6,14 +6,14 @@ use skyward_config::{DeviceConfig, Service};
 use skyward_info::DataState;
 use skyward_install::{Detach, Installer};
 use skyward_sys::Power;
-use skyward_ui::app::{App, Effect, MountFailure, Screen, Target};
+use skyward_ui::app::{App, Effect, FileKind, FileRow, MountFailure, Screen, Target};
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
@@ -122,6 +122,50 @@ fn data_state() -> Result<DataState> {
     let here = fs::metadata("/data").context("stat /data")?;
     let up = fs::metadata("/").context("stat /")?;
     Ok(if here.dev() != up.dev() { DataState::Decrypted } else { DataState::Unmounted })
+}
+
+/// What the file manager lists for a folder: its entries, folders and
+/// links to folders first, then by name ignoring case, each folder with how
+/// many entries it holds. An entry gone by the time it is looked at, as
+/// processes in /proc go, is left out.
+fn read_folder(path: &Path) -> Result<Vec<FileRow>> {
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let mut rows = Vec::new();
+    for entry in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
+        let full = entry.with_context(|| format!("read {}", path.display()))?.path();
+        let meta = match fs::symlink_metadata(&full) {
+            Ok(meta) => meta,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(e).with_context(|| format!("stat {}", full.display())),
+        };
+        let kind = if meta.file_type().is_symlink() {
+            let target = fs::read_link(&full).with_context(|| format!("read the link {}", full.display()))?;
+            // A link to nothing leads to no folder.
+            let folder = match fs::metadata(&full) {
+                Ok(to) => to.is_dir(),
+                Err(e) if gone(&e) => false,
+                Err(e) => return Err(e).with_context(|| format!("follow {}", full.display())),
+            };
+            FileKind::Link { target: target.to_string_lossy().into_owned(), folder }
+        } else if meta.is_dir() {
+            // A folder that may not be read shows that in place of a count.
+            let items = match fs::read_dir(&full) {
+                Ok(inside) => Some(inside.count()),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => None,
+                Err(e) if gone(&e) => continue,
+                Err(e) => return Err(e).with_context(|| format!("read {}", full.display())),
+            };
+            FileKind::Folder { items }
+        } else if meta.is_file() {
+            FileKind::File
+        } else {
+            FileKind::Special
+        };
+        let name = full.file_name().with_context(|| format!("{} has no name", full.display()))?.to_string_lossy().into_owned();
+        rows.push(FileRow { name, kind, size: meta.len(), modified: meta.mtime(), mode: meta.mode(), uid: meta.uid(), gid: meta.gid() });
+    }
+    rows.sort_by_key(|r| (!matches!(r.kind, FileKind::Folder { .. } | FileKind::Link { folder: true, .. }), r.name.to_lowercase()));
+    Ok(rows)
 }
 
 /// The slot's logical partitions and how each shows now, for the mount page.
@@ -298,6 +342,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
                     }
                     Effect::Cancel => installer.as_ref().context("no installer to cancel")?.cancel()?,
                     Effect::ReadMounts => app.set_mounts(mounts()),
+                    Effect::ReadDir(folder) => {
+                        let files = read_folder(Path::new(&folder)).map_err(|e| format!("{e:#}"));
+                        let listed = SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_secs();
+                        app.set_files(folder, files, listed as i64);
+                    }
                     // A partition that will not mount, or is in use, is the
                     // page's to report; the recovery carries on.
                     Effect::Mount(base) => {

@@ -1,4 +1,4 @@
-use crate::app::MountFailure;
+use crate::app::{FileKind, FileRow, MountFailure, BACKUP_PARTS};
 use skyward_info::{Battery, Charge, Cpu, DataState, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
@@ -213,6 +213,12 @@ pub fn patch(p: &PatchLevel) -> String {
 
 /// The day a Unix time falls on in China, `2026年5月8日`.
 pub fn date(unix: i64) -> String {
+    let (year, month, day) = day_in_china(unix);
+    format!("{year}年{month}月{day}日")
+}
+
+/// The calendar day of a Unix time in China: year, month, day.
+fn day_in_china(unix: i64) -> (i64, i64, i64) {
     // Days since 1970 to a calendar date, counting in 400-year eras that
     // start on 1 March.
     let z = (unix + 8 * 3600).div_euclid(86_400) + 719_468;
@@ -223,8 +229,103 @@ pub fn date(unix: i64) -> String {
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year}年{month}月{day}日")
+    (yoe + era * 400 + i64::from(month <= 2), month, day)
+}
+
+/// When a list entry last changed, as the stock file manager tells it
+/// against `now`, when the folder was read: the time for today, month and
+/// day for a file from this year, and the whole date for a folder from this
+/// year or anything older.
+pub fn file_time(unix: i64, folder: bool, now: i64) -> String {
+    let (year, month, day) = day_in_china(unix);
+    let today = day_in_china(now);
+    if (year, month, day) == today {
+        let minutes = (unix + 8 * 3600).rem_euclid(86_400) / 60;
+        format!("{:02}:{:02}", minutes / 60, minutes % 60)
+    } else if year == today.0 && !folder {
+        format!("{month:02}/{day:02}")
+    } else {
+        format!("{year}/{month:02}/{day:02}")
+    }
+}
+
+/// A file's size as the stock file manager writes it: in steps of 1000,
+/// going up a unit past 900, with at most two decimals and no trailing
+/// zeros.
+pub fn file_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let (mut v, mut unit) = (bytes as f64, 0);
+    while v > 900.0 && unit < UNITS.len() - 1 {
+        v /= 1000.0;
+        unit += 1;
+    }
+    let hundredths = (v * 100.0).round() as u64;
+    let n = match hundredths {
+        h if h % 100 == 0 => format!("{v:.0}"),
+        h if h % 10 == 0 => format!("{v:.1}"),
+        _ => format!("{v:.2}"),
+    };
+    format!("{n} {}", UNITS[unit])
+}
+
+/// A Unix time in China, to the minute: `2026年10月19日 02:31`.
+pub fn datetime(unix: i64) -> String {
+    let minutes = (unix + 8 * 3600).rem_euclid(86_400) / 60;
+    format!("{} {:02}:{:02}", date(unix), minutes / 60, minutes % 60)
+}
+
+/// A file's type and permissions as `ls -l` prints them: `drwxr-xr-x`.
+pub fn mode(mode: u32) -> String {
+    let kind = match mode & 0o170_000 {
+        0o040_000 => 'd',
+        0o120_000 => 'l',
+        0o020_000 => 'c',
+        0o060_000 => 'b',
+        0o010_000 => 'p',
+        0o140_000 => 's',
+        _ => '-',
+    };
+    let mut out = String::from(kind);
+    // The set-user, set-group and sticky bits show in each class's x.
+    for (shift, special, set, unset) in [(6, 0o4000, 's', 'S'), (3, 0o2000, 's', 'S'), (0, 0o1000, 't', 'T')] {
+        let bits = (mode >> shift) & 7;
+        out.push(if bits & 4 != 0 { 'r' } else { '-' });
+        out.push(if bits & 2 != 0 { 'w' } else { '-' });
+        out.push(match (bits & 1 != 0, mode & special != 0) {
+            (true, true) => set,
+            (false, true) => unset,
+            (true, false) => 'x',
+            (false, false) => '-',
+        });
+    }
+    out
+}
+
+/// What the file manager says under an entry's name.
+/// The line under an entry's name in the file list, in the stock file
+/// manager's words, with dates told against `now`, when the folder was read.
+pub fn file_line(f: &FileRow, now: i64) -> String {
+    const DIVIDER: &str = "  |  ";
+    match &f.kind {
+        FileKind::Folder { items: Some(n) } => format!("{}{DIVIDER}{n}项", file_time(f.modified, true, now)),
+        FileKind::Folder { items: None } => "访问限制".to_string(),
+        FileKind::File => format!("{}{DIVIDER}{}", file_time(f.modified, false, now), file_size(f.size)),
+        FileKind::Link { target, .. } => format!("链接到 {target}"),
+        FileKind::Special => {
+            let what = match f.mode & 0o170_000 {
+                0o020_000 => "字符设备",
+                0o060_000 => "块设备",
+                0o010_000 => "管道",
+                _ => "套接字",
+            };
+            format!("{}{DIVIDER}{what}", file_time(f.modified, false, now))
+        }
+    }
+}
+
+/// The parts a backup holds: `启动分区、系统分区`.
+pub fn parts(held: &[bool; 4]) -> String {
+    BACKUP_PARTS.iter().zip(held).filter(|(_, &on)| on).map(|(name, _)| *name).collect::<Vec<_>>().join("、")
 }
 
 /// What an image is, and what it holds.
@@ -413,6 +514,66 @@ mod tests {
     fn screen_off_times() {
         let labels: Vec<String> = crate::app::SCREEN_OFF.iter().map(|&ms| screen_off(ms)).collect();
         assert_eq!(labels, ["15 秒", "30 秒", "1 分钟", "2 分钟", "5 分钟", "10 分钟", "永不"]);
+    }
+
+    #[test]
+    fn times_to_the_minute_in_china() {
+        // 2026-10-18 18:31 UTC is 02:31 the next morning in Beijing.
+        assert_eq!(datetime(1_792_348_260), "2026年10月19日 02:31");
+    }
+
+    #[test]
+    fn modes_read_as_ls_prints_them() {
+        assert_eq!(mode(0o040_755), "drwxr-xr-x");
+        assert_eq!(mode(0o100_644), "-rw-r--r--");
+        assert_eq!(mode(0o120_777), "lrwxrwxrwx");
+        assert_eq!(mode(0o041_777), "drwxrwxrwt", "the sticky /tmp");
+        assert_eq!(mode(0o104_755), "-rwsr-xr-x", "set-user on an executable");
+        assert_eq!(mode(0o020_600), "crw-------");
+    }
+
+    #[test]
+    fn entries_say_what_they_are() {
+        // Changed at 2026-10-19 02:31 in Beijing; listed a week later.
+        let row = |kind, size, mode| FileRow { name: "x".into(), kind, size, modified: 1_792_348_260, mode, uid: 0, gid: 0 };
+        let later = 1_792_348_260 + 7 * 86_400;
+        assert_eq!(file_line(&row(FileKind::Folder { items: Some(6) }, 4096, 0o040_755), later), "2026/10/19  |  6项");
+        assert_eq!(file_line(&row(FileKind::Folder { items: None }, 4096, 0o040_700), later), "访问限制");
+        assert_eq!(file_line(&row(FileKind::File, 26_950, 0o100_644), later), "10/19  |  26.95 KB");
+        let link = FileKind::Link { target: "/storage/self/primary".into(), folder: true };
+        assert_eq!(file_line(&row(link, 21, 0o120_777), later), "链接到 /storage/self/primary");
+        assert_eq!(file_line(&row(FileKind::Special, 0, 0o060_600), later), "10/19  |  块设备");
+    }
+
+    #[test]
+    fn list_dates_are_told_against_the_day_the_folder_was_read() {
+        // 2026-10-19 02:31 in Beijing.
+        let at = 1_792_348_260;
+        assert_eq!(file_time(at, false, at + 3600), "02:31", "today: the time");
+        assert_eq!(file_time(at, true, at + 3600), "02:31", "a folder today too");
+        assert_eq!(file_time(at, false, at + 86_400), "10/19", "this year: a file's month and day");
+        assert_eq!(file_time(at, true, at + 86_400), "2026/10/19", "this year: a folder's whole date");
+        assert_eq!(file_time(at, false, at + 90 * 86_400), "2026/10/19", "another year: the whole date");
+        // 2026-10-18 23:59 UTC is already the 19th in Beijing.
+        assert_eq!(file_time(1_792_367_940, false, at), "07:59");
+    }
+
+    #[test]
+    fn sizes_go_up_a_unit_past_900_with_two_decimals_at_most() {
+        assert_eq!(file_size(0), "0 B");
+        assert_eq!(file_size(900), "900 B");
+        assert_eq!(file_size(901), "0.9 KB");
+        assert_eq!(file_size(42_633), "42.63 KB");
+        assert_eq!(file_size(26_950), "26.95 KB");
+        assert_eq!(file_size(1_090_000), "1.09 MB");
+        assert_eq!(file_size(634_960), "634.96 KB");
+        assert_eq!(file_size(2_000_000_000), "2 GB");
+        assert_eq!(file_size(1_500_000), "1.5 MB");
+    }
+
+    #[test]
+    fn a_backup_lists_its_parts() {
+        assert_eq!(parts(&[true, true, false, true]), "启动分区、系统分区、基带与 EFS");
     }
 
     #[test]

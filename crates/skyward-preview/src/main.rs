@@ -2,9 +2,11 @@ use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
-use skyward_ui::app::{Action, App, Choice, Damage, Install, MountFailure, MountRow, Pick, Screen, Touch, SCREEN_OFF};
-use skyward_ui::widgets::{self, Bar};
-use skyward_ui::{Canvas, Fonts, Theme};
+use skyward_ui::app::{
+    Action, App, BackupEntry, Choice, Damage, FileKind, FileRow, Install, MountFailure, MountRow, Pick, Screen, Touch, SCREEN_OFF,
+};
+use skyward_ui::widgets::{self, Bar, Layer};
+use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
 use skyward_vab::{Slot, SnapshotState};
 use std::fs::File;
 use std::io::BufWriter;
@@ -20,6 +22,9 @@ type Shot<'a> = (&'a str, Screen, bool, &'a DeviceInfo, DataState, &'a [usize]);
 /// File name, dark theme, readings, a mount that failed, and the partitions
 /// left unmounted.
 type MountShot<'a> = (&'a str, bool, &'a DeviceInfo, Option<MountFailure>, &'a [&'a str]);
+
+/// File name, page, dark theme, and what to set before the page is drawn.
+type PageShot<'a> = (&'a str, Screen, bool, &'a dyn Fn(&mut App));
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -176,8 +181,55 @@ fn main() -> Result<()> {
         println!("wrote {}", path.display());
     }
 
+    // The pages the remaining features open, each with what it would show.
+    let backups = vec![
+        BackupEntry { made: 1_792_348_260, size: 6_214_000_000, place: 0, parts: [true, true, false, true] },
+        BackupEntry { made: 1_791_830_000, size: 141_000_000, place: 1, parts: [true, false, false, false] },
+    ];
+    let pages: [PageShot; 23] = [
+        ("41-search-light", Screen::Search, false, &|_| {}),
+        ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
+        ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
+        ("44-backup-light", Screen::Backup, false, &|_| {}),
+        ("45-backup-dark", Screen::Backup, true, &|app| app.state.backup_to = 1),
+        ("46-restore-light-none", Screen::Restore, false, &|_| {}),
+        ("47-restore-light", Screen::Restore, false, &|app| app.state.backups = backups.clone()),
+        ("48-restore-backup-light", Screen::RestoreBackup, false, &|app| {
+            app.state.backups = backups.clone();
+            app.state.restore = Some((0, [true, false, false, true]));
+        }),
+        ("49-advanced-light", Screen::Advanced, false, &|_| {}),
+        ("50-files-light", Screen::Files, false, &|app| app.set_files("/".into(), Ok(sample_root()), LISTED)),
+        ("51-files-dark", Screen::Files, true, &|app| app.set_files("/".into(), Ok(sample_root()), LISTED)),
+        ("52-file-info-light", Screen::FileInfo, false, &|app| app.state.file = sample_root().into_iter().find(|e| e.name == "init.environ.rc")),
+        ("61-files-names-light", Screen::Files, false, &|app| app.set_files("/sdcard/Download".into(), Ok(sample_download()), LISTED)),
+        ("62-files-empty-light", Screen::Files, false, &|app| app.set_files("/cust".into(), Ok(Vec::new()), LISTED)),
+        ("63-files-unreadable-dark", Screen::Files, true, &|app| {
+            app.set_files("/sys/kernel/debug".into(), Err("read /sys/kernel/debug: Permission denied (os error 13)".into()), LISTED)
+        }),
+        ("53-terminal-light", Screen::Terminal, false, &|app| app.state.command = "ls -l /vendor".into()),
+        ("54-terminal-dark-symbols", Screen::Terminal, true, &|app| {
+            app.state.command = "cat /proc/mounts | grep erofs".into();
+            app.state.layer = Layer::Symbols;
+        }),
+        ("55-language-light", Screen::Language, false, &|_| {}),
+        ("56-time-zone-light", Screen::TimeZone, false, &|_| {}),
+        ("57-logs-light", Screen::Logs, false, &|_| {}),
+        ("58-license-light", Screen::License, false, &|_| {}),
+        ("59-font-license-light", Screen::FontLicense, false, &|_| {}),
+        ("60-slot-dark", Screen::Slot, true, &|app| app.state.next_slot = Some(Slot::A)),
+    ];
+    for (name, screen, dark, set) in pages {
+        let mut app = App::new(screen, w, h, ppd);
+        app.state.dark = dark;
+        set(&mut app);
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &whole_page(&mut app, &fonts, &info, open))?;
+        println!("wrote {}", path.display());
+    }
+
     // The panel mid-gesture, to set beside recordings of the same moves.
-    let moments: [Moment; 12] = [
+    let moments: [Moment; 14] = [
         ("08-about-light", Screen::About, false, &|_, _| 2000),
         ("08-about-dark", Screen::About, true, &|_, _| 2000),
         ("08-about-light-later", Screen::About, false, &|_, _| 9000),
@@ -190,6 +242,16 @@ fn main() -> Result<()> {
         ("27-back-cue-short", Screen::Home, false, &|app, f| swipe_in(app, f, &info, 133.0)),
         ("28-back-cue-armed", Screen::Home, false, &|app, f| swipe_in(app, f, &info, 323.0)),
         ("29-about-scrolled", Screen::About, false, &|app, f| drag(app, f, 1900.0, 1500.0)),
+        ("64-files-scrolled", Screen::Files, false, &|app, f| {
+            app.set_files("/system/bin".into(), Ok(sample_bin()), LISTED);
+            app.frame(f, &info, open);
+            drag(app, f, 2000.0, 700.0)
+        }),
+        ("65-files-scrolled-dark", Screen::Files, true, &|app, f| {
+            app.set_files("/system/bin".into(), Ok(sample_bin()), LISTED);
+            app.frame(f, &info, open);
+            drag(app, f, 2000.0, 700.0)
+        }),
     ];
     for (name, screen, dark, act) in moments {
         let mut app = App::new(screen, w, h, ppd);
@@ -278,12 +340,118 @@ fn sample_mounts(unmounted: &[&str]) -> Vec<MountRow> {
         .collect()
 }
 
+/// When the previews' folders are listed: 2026-10-19 23:46 in Beijing, the
+/// time their status bar shows.
+const LISTED: i64 = 1_792_424_760;
+
+/// The ramdisk's timestamp on every file a recovery image carries.
+const RAMDISK_TIME: i64 = 1_230_768_000;
+
+fn link(name: &str, target: &str, folder: bool) -> FileRow {
+    let kind = FileKind::Link { target: target.into(), folder };
+    FileRow { name: name.into(), kind, size: target.len() as u64, modified: RAMDISK_TIME, mode: 0o120_777, uid: 0, gid: 0 }
+}
+
+fn folder(name: &str, items: usize, modified: i64) -> FileRow {
+    FileRow { name: name.into(), kind: FileKind::Folder { items: Some(items) }, size: 4096, modified, mode: 0o040_755, uid: 0, gid: 0 }
+}
+
+fn file(name: &str, size: u64, modified: i64) -> FileRow {
+    FileRow { name: name.into(), kind: FileKind::File, size, modified, mode: 0o100_644, uid: 0, gid: 0 }
+}
+
+/// Part of the root folder of a Xiaomi 13 Ultra, as `ls -la /` lists it,
+/// in the file manager's order.
+fn sample_root() -> Vec<FileRow> {
+    let made = RAMDISK_TIME;
+    vec![
+        folder("apex", 31, made),
+        link("bin", "/system/bin", true),
+        link("cache", "/data/cache", true),
+        folder("data", 0, made),
+        folder("dev", 142, LISTED - 3600),
+        link("etc", "/system/etc", true),
+        folder("metadata", 9, made),
+        folder("mnt", 14, LISTED - 3600),
+        folder("odm", 7, made),
+        folder("proc", 612, LISTED - 3600),
+        folder("product", 0, made),
+        link("sdcard", "/storage/self/primary", true),
+        folder("system", 9, made),
+        folder("vendor", 11, made),
+        link("init", "/system/bin/init", false),
+        FileRow { name: "init.environ.rc".into(), kind: FileKind::File, size: 621, modified: made, mode: 0o100_750, uid: 0, gid: 2000 },
+    ]
+}
+
+/// A download folder whose names take one line, two, or more than two.
+fn sample_download() -> Vec<FileRow> {
+    let (today, this_year, earlier) = (LISTED - 4 * 3600, 1_790_380_800, 1_667_692_800);
+    vec![
+        folder("Skyward", 3, today),
+        folder("安装包", 68, this_year),
+        file("1d9bf122-130e-4db7-ae55-460c84819f0e.pdf", 1_090_000, this_year),
+        file("2021一带一路暨金砖大赛之物联网技术及其在智慧城市与工业互联网领域的应用创新赛表彰文件.pdf", 634_960, earlier),
+        file("OTA_ishtar_OS3.0.305.0.WMACNXM_20260412_full_package_signed_for_recovery_install.zip", 7_014_220_000, this_year),
+        file("README.txt", 900, today),
+        file("skyward-recovery-ishtar.img", 104_857_600, today),
+    ]
+}
+
+/// A Xiaomi 13 Ultra's /system/bin: programs, and the links to toybox that
+/// stand for its commands, in the file manager's order.
+fn sample_bin() -> Vec<FileRow> {
+    let programs = [
+        "abb", "am", "app_process32", "app_process64", "applypatch", "appops", "appwidget", "atrace", "audioserver", "auditctl",
+        "blkid", "bmgr", "bootanimation", "bootstat", "bpfloader", "bugreport", "bugreportz", "cameraserver", "cmd", "content",
+        "crash_dump32", "crash_dump64", "debuggerd", "device_config", "dmctl", "dpm", "dumpstate", "dumpsys", "e2fsck", "e2fsdroid",
+        "fsck.f2fs", "fsck_msdos", "gatekeeperd", "gpuservice", "hid", "idmap2", "ime", "incident", "incidentd", "init", "input",
+        "installd", "ip", "iptables", "keystore2", "lmkd", "locksettings", "logcat", "logd", "lpdump", "lshal", "make_f2fs",
+        "mediaserver", "mke2fs", "monkey", "netd", "odsign", "perfetto", "ping", "pm", "reboot", "resize2fs", "run-as",
+        "screencap", "screenrecord", "sdcard", "sensorservice", "service", "servicemanager", "settings", "sgdisk", "sh",
+        "simpleperf", "sm", "snapshotctl", "storaged", "surfaceflinger", "svc", "tombstoned", "toolbox", "toybox", "traced",
+        "tune2fs", "uiautomator", "uncrypt", "update_engine", "update_verifier", "vdc", "vold", "wificond", "wm",
+    ];
+    let commands = [
+        "base64", "basename", "cat", "chcon", "chmod", "chown", "cmp", "cp", "cut", "date", "dd", "df", "diff", "dirname", "dmesg",
+        "du", "echo", "env", "expr", "find", "free", "getprop", "grep", "head", "hostname", "id", "ifconfig", "insmod", "kill",
+        "ln", "ls", "lsmod", "lsof", "md5sum", "mkdir", "mount", "mv", "netstat", "nohup", "pgrep", "pidof", "pkill", "printf",
+        "ps", "pwd", "readlink", "rm", "rmdir", "sed", "sendevent", "seq", "setprop", "sleep", "sort", "start", "stat", "stop",
+        "tail", "tar", "tee", "top", "touch", "tr", "umount", "uname", "uptime", "wc", "which", "xargs", "xxd",
+    ];
+    let mut rows = vec![folder("hw", 34, RAMDISK_TIME)];
+    let mut rest: Vec<FileRow> = programs
+        .iter()
+        .enumerate()
+        .map(|(k, name)| FileRow { mode: 0o100_755, gid: 2000, ..file(name, 18_000 + 7_919 * k as u64 % 900_000, RAMDISK_TIME) })
+        .chain(commands.iter().map(|name| link(name, "toybox", false)))
+        .collect();
+    rest.sort_by_key(|r| r.name.to_lowercase());
+    rows.extend(rest);
+    rows
+}
+
 /// The full length of a page with the status bar over its top, the way a
-/// long screenshot shows it.
+/// long screenshot shows it: a long list's rows and a pinned strip in the
+/// places an unscrolled page gives them.
 fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo, data: DataState) -> Canvas {
     let t = app.theme();
+    let (screen, state) = (app.screen(), app.state.clone());
     let frame = app.frame(f, info, data);
-    let mut c = Canvas { w: frame.canvas.w, h: frame.canvas.h, data: frame.canvas.data.clone() };
+    let mut c = Canvas::new(frame.canvas.w, frame.height(&t) as u32);
+    c.clear(frame.bg);
+    c.put(&frame.canvas, 0);
+    if let Some(rows) = &frame.rows {
+        let cx = Ctx { t: &t, f, info, data, state: &state };
+        for k in 0..rows.count() {
+            let mut row = Canvas::new(c.w, (rows.edges[k + 1] - rows.edges[k]) as u32);
+            pages::row(screen, &cx, k, &mut row);
+            c.put(&row, rows.edges[k] as i32);
+        }
+    }
+    if let Some(p) = &frame.pinned {
+        c.put(&p.canvas, p.top.round() as i32);
+    }
     let battery = info.battery.as_ref().map(|b| (b.level, b.charge == Charge::Charging));
     widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery }, t.pal.status);
     c
