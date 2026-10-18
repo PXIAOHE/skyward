@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 /// The mark libbinder writes into every call header. Both ends have to agree
 /// on it: it tells apart the copies of libbinder a phone carries, and the one
@@ -172,12 +172,30 @@ impl<'a> Reader<'a> {
 
     /// The handle of an object in the sending process. The other kinds of
     /// object a transaction can carry take the same room, so a reply holding
-    /// one of those can still be read past.
+    /// one of those can still be read past. What follows the object says how
+    /// far its interface is meant to travel, which this side does not act on.
     pub fn object(&mut self) -> Result<Option<u32>> {
         let raw = self.take(24)?;
         let kind = u32::from_le_bytes(raw[0..4].try_into().expect("four bytes"));
         let handle = u32::from_le_bytes(raw[8..12].try_into().expect("four bytes"));
+        self.i32().context("read how far the object's interface travels")?;
         Ok((kind == BINDER_TYPE_HANDLE).then_some(handle))
+    }
+
+    /// Step into a structure the other side wrote whole: it says first
+    /// whether the structure is there at all, then how long it is. The
+    /// answer is where it ends, so fields this side does not know about can
+    /// be stepped over.
+    pub fn structure(&mut self) -> Result<usize> {
+        if self.i32().context("read whether the structure is there")? == 0 {
+            bail!("the structure was left out where one was expected");
+        }
+        let at = self.here();
+        let size = self.i32().context("read how long the structure is")?;
+        if size < 4 {
+            bail!("a structure of {size} bytes cannot hold even its own length");
+        }
+        Ok(at + size as usize)
     }
 
     fn skip_padding(&mut self) {
@@ -246,19 +264,50 @@ mod tests {
         assert!(Reader::new(short.bytes()).blob().is_err());
     }
 
+    /// An object as the driver lays it out: its kind, its flags, the handle
+    /// or address, its cookie, and how far its interface travels.
+    fn object(kind: &[u8; 4], handle: u64) -> Parcel {
+        let mut p = Parcel::default();
+        p.i32(i32::from_be_bytes(*kind));
+        p.i32(0);
+        p.i64(handle as i64);
+        p.i64(0);
+        p.i32(63);
+        p
+    }
+
     #[test]
     fn an_object_gives_up_its_handle_only_when_it_is_a_handle() {
+        let held = object(b"sh*\x85", 42);
+        let mut r = Reader::new(held.bytes());
+        assert_eq!(r.object().unwrap(), Some(42));
+        assert_eq!(r.here(), held.bytes().len(), "an object is read whole");
+        let own = object(b"sb*\x85", 42);
+        assert_eq!(Reader::new(own.bytes()).object().unwrap(), None);
+    }
+
+    #[test]
+    fn a_structure_says_where_it_ends() {
         let mut p = Parcel::default();
-        p.i32(BINDER_TYPE_HANDLE as i32);
+        p.i32(1);
+        let at = p.here();
         p.i32(0);
-        p.i64(42);
-        p.i64(0);
-        assert_eq!(Reader::new(p.bytes()).object().unwrap(), Some(42));
-        let mut other = Parcel::default();
-        other.i32(i32::from_be_bytes(*b"sb*\x85"));
-        other.i32(0);
-        other.i64(42);
-        other.i64(0);
-        assert_eq!(Reader::new(other.bytes()).object().unwrap(), None);
+        p.i32(7);
+        p.i32(8);
+        let size = (p.here() - at) as i32;
+        p.fill(at, size);
+        p.i32(99);
+        let mut r = Reader::new(p.bytes());
+        let end = r.structure().unwrap();
+        assert_eq!(r.i32().unwrap(), 7);
+        r.go(end).unwrap();
+        assert_eq!(r.i32().unwrap(), 99, "what follows the structure comes next");
+    }
+
+    #[test]
+    fn a_structure_left_out_is_an_error() {
+        let mut p = Parcel::default();
+        p.i32(0);
+        assert!(Reader::new(p.bytes()).structure().is_err());
     }
 }

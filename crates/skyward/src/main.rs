@@ -107,6 +107,13 @@ enum Cmd {
     /// directory, such as android.hardware.security.keymint.IKeyMintDevice/default.
     #[cfg(target_os = "android")]
     Service { name: String },
+    /// Report the phone's key service and, given a key directory Android
+    /// wrote, unwrap the key it holds and say how long it is.
+    #[cfg(target_os = "android")]
+    Keymint {
+        #[arg(long, default_value = "/metadata/vold/metadata_encryption/key")]
+        key: PathBuf,
+    },
     /// Drive the panel and touchscreen with the recovery UI.
     #[cfg(target_os = "android")]
     Ui {
@@ -210,6 +217,25 @@ fn main() -> Result<()> {
                 None => "not registered",
             };
             println!("{name} is {described} and {running}");
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Keymint { key } => {
+            let binder = skyward_binder::driver::Binder::open()?;
+            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+            let hw = service.hardware()?;
+            println!("keymint {} version {} at security level {} by {}", hw.name, hw.version, hw.security_level, hw.author);
+            let stored = skyward_crypto::keystore::StoredKey::load(&key)?;
+            match stored.authorizations(&service) {
+                Ok(tags) => {
+                    for (tag, value) in tags {
+                        println!("  tag {tag} = {value}");
+                    }
+                }
+                Err(e) => println!("what the key may be used for is not readable: {e:#}"),
+            }
+            let raw = stored.unwrap(skyward_crypto::keystore::Unwrap::Hardware(&service))?;
+            println!("{} holds a key of {} bytes", key.display(), raw.len());
             Ok(())
         }
         #[cfg(target_os = "android")]

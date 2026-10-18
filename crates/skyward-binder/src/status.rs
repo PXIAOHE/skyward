@@ -1,5 +1,6 @@
 use crate::parcel::Reader;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use std::fmt;
 
 const NONE: i32 = 0;
 const SECURITY: i32 = -1;
@@ -10,6 +11,26 @@ const ILLEGAL_STATE: i32 = -5;
 const UNSUPPORTED_OPERATION: i32 = -7;
 const SERVICE_SPECIFIC: i32 = -8;
 const TRANSACTION_FAILED: i32 = -129;
+
+/// Why a call did not go through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fault {
+    /// The service turned the call down in its own terms, by its own number.
+    Service { code: i32, said: String },
+    /// The call did not reach the method at all.
+    Call { exception: i32, said: String },
+}
+
+impl fmt::Display for Fault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Fault::Service { code, said } => write!(f, "the service refused the call with its error {code}{}", aside(said)),
+            Fault::Call { exception, said } => write!(f, "the call ended in {}{}", name(*exception), aside(said)),
+        }
+    }
+}
+
+impl std::error::Error for Fault {}
 
 fn name(exception: i32) -> &'static str {
     match exception {
@@ -24,24 +45,6 @@ fn name(exception: i32) -> &'static str {
     }
 }
 
-/// Read the mark every reply opens with, leaving the reader on whatever the
-/// method itself answered. A service that refused the call says so here, and
-/// its own error number comes with it.
-pub fn ok(r: &mut Reader) -> Result<()> {
-    match r.i32().context("read how the call ended")? {
-        NONE => Ok(()),
-        SERVICE_SPECIFIC => {
-            let said = r.string().unwrap_or_default();
-            let code = r.i32().unwrap_or(0);
-            bail!("the service refused the call with its error {code}{}", aside(&said));
-        }
-        other => {
-            let said = r.string().unwrap_or_default();
-            bail!("the call ended in {}{}", name(other), aside(&said));
-        }
-    }
-}
-
 fn aside(said: &str) -> String {
     if said.is_empty() {
         String::new()
@@ -50,10 +53,45 @@ fn aside(said: &str) -> String {
     }
 }
 
+/// Read the mark every reply opens with, leaving the reader on whatever the
+/// method itself answered. What a refusal carries is a message, room for a
+/// trace the service did not send, and, when the service has its own
+/// numbering, its number.
+pub fn ok(r: &mut Reader) -> Result<()> {
+    let exception = r.i32().context("read how the call ended")?;
+    if exception == NONE {
+        return Ok(());
+    }
+    let said = r.string().unwrap_or_default();
+    r.i32().context("read the room left for a trace")?;
+    Err(match exception {
+        SERVICE_SPECIFIC => Fault::Service { code: r.i32().context("read the service's own error")?, said },
+        _ => Fault::Call { exception, said },
+    }
+    .into())
+}
+
+/// The service's own error number, when that is why a call failed.
+pub fn refused_with(e: &anyhow::Error) -> Option<i32> {
+    match e.downcast_ref::<Fault>() {
+        Some(Fault::Service { code, .. }) => Some(*code),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parcel::Parcel;
+
+    fn refusal(exception: i32, said: &str, code: i32) -> Vec<u8> {
+        let mut p = Parcel::default();
+        p.i32(exception);
+        p.string(said);
+        p.i32(0);
+        p.i32(code);
+        p.bytes().to_vec()
+    }
 
     #[test]
     fn a_reply_that_went_through_leaves_the_rest_to_be_read() {
@@ -67,23 +105,26 @@ mod tests {
     }
 
     #[test]
-    fn a_services_own_error_number_is_reported() {
-        let mut p = Parcel::default();
-        p.i32(SERVICE_SPECIFIC);
-        p.string("no such key");
-        p.i32(-38);
-        let bytes = p.bytes().to_vec();
-        let said = format!("{:#}", ok(&mut Reader::new(&bytes)).unwrap_err());
-        assert!(said.contains("-38") && said.contains("no such key"), "{said}");
+    fn a_services_own_error_number_can_be_acted_on() {
+        let bytes = refusal(SERVICE_SPECIFIC, "no such key", -62);
+        let e = ok(&mut Reader::new(&bytes)).unwrap_err();
+        assert_eq!(refused_with(&e), Some(-62));
+        let said = format!("{e:#}");
+        assert!(said.contains("-62") && said.contains("no such key"), "{said}");
     }
 
     #[test]
-    fn a_refusal_by_the_binder_layer_is_named() {
-        let mut p = Parcel::default();
-        p.i32(SECURITY);
-        p.string("");
-        let bytes = p.bytes().to_vec();
-        let said = format!("{:#}", ok(&mut Reader::new(&bytes)).unwrap_err());
-        assert!(said.contains("security"), "{said}");
+    fn a_services_error_is_still_found_under_what_the_caller_added() {
+        let bytes = refusal(SERVICE_SPECIFIC, "", -43);
+        let e = ok(&mut Reader::new(&bytes)).unwrap_err().context("unwrap the key");
+        assert_eq!(refused_with(&e), Some(-43));
+    }
+
+    #[test]
+    fn a_refusal_by_the_binder_layer_is_named_and_is_not_the_services_own() {
+        let bytes = refusal(SECURITY, "", 0);
+        let e = ok(&mut Reader::new(&bytes)).unwrap_err();
+        assert_eq!(refused_with(&e), None);
+        assert!(format!("{e:#}").contains("security"), "{e:#}");
     }
 }

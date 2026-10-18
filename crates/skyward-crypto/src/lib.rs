@@ -1,12 +1,11 @@
-pub mod flow;
-pub mod hal;
-pub mod keystorage;
-pub mod mock;
-pub mod password;
+pub mod keystore;
 
-pub use flow::{Unlocker, UserKey};
-pub use hal::{HalError, HalResult};
-pub use keystorage::{StoredKey, Stretching};
+#[cfg(target_os = "android")]
+pub mod keymint;
 
-#[cfg(test)]
-mod tests;
+#[cfg(target_os = "android")]
+impl keystore::Decryptor for keymint::KeyMint<'_> {
+    fn gcm_decrypt(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], body: &[u8]) -> anyhow::Result<Vec<u8>> {
+        keymint::KeyMint::gcm_decrypt(self, key_blob, app_id, nonce, body)
+    }
+}
