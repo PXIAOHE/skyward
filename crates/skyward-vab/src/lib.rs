@@ -7,7 +7,8 @@ use std::path::Path;
 mod partitions;
 
 pub use partitions::{
-    mount_partitions, mount_point, mounted_partitions, release_partitions, unmount_partitions, Mounted, Mounts,
+    mount_one, mount_partitions, mount_point, mounted_partitions, release_partitions, slot_bases, unmount_one,
+    unmount_partitions, Mounted, Mounts,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
