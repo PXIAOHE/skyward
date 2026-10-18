@@ -139,6 +139,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
     let mut shown_clock = String::new();
     let mut read_at = Instant::now();
     let mut installer: Option<Installer> = None;
+    // Whether the panel's frame memory has been blacked out for an off
+    // panel; cleared once a real frame is shown again.
+    let mut blanked = false;
     loop {
         let now = monotonic_ms();
         app.tick(now);
@@ -152,20 +155,31 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
             read_at = Instant::now();
             app.refresh();
         }
+        let panel = app.panel(now);
         let mut shown = false;
-        if app.take_dirty() && app.display_on() {
-            let t0 = Instant::now();
-            app.compose(&mut screen, &fonts, &info, data, &shown_clock, now);
-            surface.present(&screen)?;
-            eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
-            if let Some(path) = dump {
-                fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
+        if panel.is_some() {
+            if app.take_dirty() {
+                let t0 = Instant::now();
+                app.compose(&mut screen, &fonts, &info, data, &shown_clock, now);
+                surface.present(&screen)?;
+                eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
+                if let Some(path) = dump {
+                    fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
+                }
+                shown = true;
             }
-            shown = true;
+            blanked = false;
+        } else if !blanked {
+            // Black out the panel's frame memory before the backlight goes
+            // to 0, so an OLED that floors the backlight above zero rather
+            // than cutting it shows nothing and cannot burn in.
+            screen.data.fill(0);
+            surface.present(&screen)?;
+            blanked = true;
         }
         // After the frame, so a panel coming back on lights with what it
         // should show now, never with what it showed when it went off.
-        backlight.show(app.panel(now))?;
+        backlight.show(panel)?;
         // A frame shown has waited for the panel, which keeps the loop to
         // its pace; otherwise the CPU gets at least a millisecond.
         let floor = if shown { 0 } else { 1 };
