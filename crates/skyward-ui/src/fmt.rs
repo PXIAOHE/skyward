@@ -1,5 +1,7 @@
 use skyward_info::{Battery, Charge, Cpu, DataState, PatchLevel, Storage};
-use skyward_vab::SnapshotState;
+use skyward_install::ota::Trouble;
+use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
+use skyward_vab::{Slot, SnapshotState};
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -182,6 +184,121 @@ pub fn data(d: DataState) -> &'static str {
     }
 }
 
+/// A file size, `7.1GB` or `96.0MB`.
+pub fn bytes(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000_000 => format!("{:.1}GB", n as f64 / 1e9),
+        n if n >= 1_000_000 => format!("{:.1}MB", n as f64 / 1e6),
+        n if n >= 1_000 => format!("{:.0}KB", n as f64 / 1e3),
+        n => format!("{n}B"),
+    }
+}
+
+/// `2026年4月1日`
+pub fn patch(p: &PatchLevel) -> String {
+    format!("{}年{}月{}日", p.year, p.month, p.day)
+}
+
+/// The day a Unix time falls on in China, `2026年5月8日`.
+pub fn date(unix: i64) -> String {
+    // Days since 1970 to a calendar date, counting in 400-year eras that
+    // start on 1 March.
+    let z = (unix + 8 * 3600).div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year}年{month}月{day}日")
+}
+
+/// What an image is, and what it holds.
+pub fn image_kind(kind: ImageKind) -> (&'static str, &'static str) {
+    match kind {
+        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::Recovery } => ("恢复模式镜像", "内核和恢复模式 ramdisk"),
+        ImageKind::Boot { kernel: false, ramdisk: Ramdisk::Recovery } => ("恢复模式镜像", "恢复模式 ramdisk"),
+        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::Generic } => ("启动镜像", "内核和通用 ramdisk"),
+        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::None } => ("启动镜像", "只有内核"),
+        ImageKind::Boot { kernel: false, .. } => ("启动镜像", "只有通用 ramdisk"),
+        ImageKind::VendorBoot => ("vendor_boot 镜像", "厂商 ramdisk 和设备树"),
+        ImageKind::Dtbo => ("dtbo 镜像", "设备树叠加层"),
+        ImageKind::Vbmeta => ("vbmeta 镜像", "启动验证数据"),
+    }
+}
+
+/// What a partition an image can go to is for.
+pub fn partition_role(name: &str) -> &'static str {
+    match name {
+        "boot" => "内核",
+        "init_boot" => "通用 ramdisk",
+        "recovery" => "恢复模式",
+        "vendor_boot" => "厂商 ramdisk 和设备树",
+        "dtbo" => "设备树叠加层",
+        "vbmeta" => "启动验证数据",
+        "vbmeta_system" => "系统分区的验证数据",
+        "vbmeta_vendor" => "厂商分区的验证数据",
+        _ => "分区",
+    }
+}
+
+/// `槽位 B`, `槽位 A 和 B`
+pub fn slots(slots: &[Slot]) -> String {
+    let letters: Vec<&str> = slots.iter().map(|s| s.letter()).collect();
+    format!("槽位 {}", letters.join(" 和 "))
+}
+
+/// Why a package was not installed, for a phone with this codename.
+pub fn refusal(r: &Refusal, codename: &str) -> String {
+    match r {
+        Refusal::Unknown => "无法识别这个文件。能安装的是 A/B 系统更新包和分区镜像。".into(),
+        Refusal::Script => "这是需要运行安装脚本的刷机包，这里只安装 A/B 系统更新包和分区镜像。".into(),
+        Refusal::NotAb(kind) if kind.is_empty() => "这不是 A/B 系统更新包，包里没有注明类型。".into(),
+        Refusal::NotAb(kind) => format!("这不是 A/B 系统更新包，包里注明的类型是 {kind}。"),
+        Refusal::OtherDevice(devices) => format!("这个包适用于 {devices}，这台手机是 {codename}。"),
+        Refusal::OtherSerial => "这个包只能安装在指定的几台手机上，不包括这台。".into(),
+        Refusal::Incremental => "这是增量更新包，只能在系统里安装。请改用完整包。".into(),
+        Refusal::Older { package, installed } => {
+            format!("这个包的构建日期（{}）早于手机上的系统（{}）。", date(*package), date(*installed))
+        }
+        Refusal::OlderPatch { package, installed } => {
+            format!("这个包的安全补丁（{package}）早于手机上的（{installed}），安装后会无法读取数据分区。")
+        }
+        Refusal::Wipe => "这个包要求安装后清除全部数据，清除功能还没实现。".into(),
+        Refusal::NoPartition => "这台手机没有能写入这个镜像的分区。".into(),
+        Refusal::Battery { level, charging: true } => format!("电量只有 {level}%，充电时至少需要 15%。"),
+        Refusal::Battery { level, charging: false } => format!("电量只有 {level}%，没有充电时至少需要 20%。"),
+        Refusal::Pending(state) => format!("{}。请先回到系统完成上一次更新，再来安装。", snapshot(state)),
+        Refusal::OldHost => "电脑上的 adb 版本过旧，无法分块发送。请更新 Android SDK Platform-Tools。".into(),
+    }
+}
+
+/// What went wrong, and the details behind it when there are any.
+pub fn failure(f: &Failure) -> (String, Option<String>) {
+    match f {
+        Failure::Engine(code) => {
+            let what = match Trouble::of(*code) {
+                Trouble::Signature => "安装包的签名不匹配，这台手机只接受官方签名的包。",
+                Trouble::Damaged => "安装包已经损坏，请重新下载。",
+                Trouble::Older => "安装包早于恢复模式允许的版本。",
+                Trouble::NoSpace => "super 分区的空间不够存放新系统。",
+                Trouble::Transfer => "读取安装包失败，数据线可能断开了。",
+                Trouble::Write => "写入分区失败。",
+                Trouble::Verify => "写入的分区没有通过校验。",
+                Trouble::PostInstall => "安装包最后的步骤失败了。",
+                Trouble::Unsupported => "这个包的格式比手机上的更新程序新，无法识别。",
+                Trouble::Other => "更新程序报错。",
+            };
+            (what.into(), Some(format!("update_engine 错误代码 {code}")))
+        }
+        Failure::Disconnected => ("电脑停止了发送：数据线断开了，或者 adb sideload 被中断。".into(), None),
+        Failure::Changed => ("电脑上的文件在发送途中被改动了，请重新发送。".into(), None),
+        Failure::Error(detail) => ("出现了意外的错误。".into(), Some(detail.clone())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +362,37 @@ mod tests {
         assert_eq!(inches(6.9), "6.9″");
         assert_eq!(verified("orange"), "橙色 · 设备已解锁，不校验系统");
         assert_eq!(health("Watchdog timer expire"), "Watchdog timer expire");
+    }
+
+    #[test]
+    fn sizes_and_dates() {
+        assert_eq!(bytes(7_103_041_280), "7.1GB");
+        assert_eq!(bytes(100_663_296), "100.7MB");
+        assert_eq!(bytes(131_072), "131KB");
+        assert_eq!(bytes(64), "64B");
+        // The Xiaomi 13 Ultra's installed system, by its ro.build.date.utc.
+        assert_eq!(date(1_778_243_655), "2026年5月8日");
+        assert_eq!(date(0), "1970年1月1日");
+        // Midnight on a leap day in UTC is eight in the morning in China.
+        assert_eq!(date(1_709_164_800), "2024年2月29日");
+        assert_eq!(date(1_709_164_800 - 8 * 3600 - 1), "2024年2月28日");
+        assert_eq!(patch(&PatchLevel { year: 2026, month: 4, day: 1 }), "2026年4月1日");
+        assert_eq!(slots(&[Slot::B]), "槽位 B");
+        assert_eq!(slots(&[Slot::A, Slot::B]), "槽位 A 和 B");
+    }
+
+    #[test]
+    fn reasons_read_as_sentences() {
+        assert_eq!(refusal(&Refusal::OtherDevice("nezha".into()), "ishtar"), "这个包适用于 nezha，这台手机是 ishtar。");
+        assert_eq!(
+            refusal(&Refusal::Older { package: 1_770_000_000, installed: 1_778_243_655 }, "ishtar"),
+            "这个包的构建日期（2026年2月2日）早于手机上的系统（2026年5月8日）。"
+        );
+        assert_eq!(refusal(&Refusal::Battery { level: 12, charging: true }, "ishtar"), "电量只有 12%，充电时至少需要 15%。");
+        assert_eq!(
+            failure(&Failure::Engine(26)),
+            ("安装包的签名不匹配，这台手机只接受官方签名的包。".into(), Some("update_engine 错误代码 26".into()))
+        );
+        assert_eq!(failure(&Failure::Error("open ep0: busy".into())).1.as_deref(), Some("open ep0: busy"));
     }
 }

@@ -9,6 +9,7 @@ anyhow = { workspace = true }
 ab_glyph = "0.2.32"
 rayon = "1.12.0"
 skyward-info = { path = "../skyward-info" }
+skyward-install = { path = "../skyward-install" }
 skyward-vab = { path = "../skyward-vab" }
 
 [target.'cfg(target_os = "android")'.dependencies]
