@@ -645,6 +645,12 @@ impl Fade {
         }
     }
 
+    /// Stand fully in or out at once.
+    fn jump(&mut self, on: bool) {
+        self.on = on;
+        self.from = if on { 1.0 } else { 0.0 };
+    }
+
     fn moving(&self, now: u64) -> bool {
         self.level(now) != if self.on { 1.0 } else { 0.0 }
     }
@@ -734,6 +740,10 @@ pub struct App {
     cue: Option<(bool, f32, Spring)>,
     title: Fade,
     bar: Fade,
+    /// A page was put up, or the file manager's folder changed: once it is
+    /// rendered, the bar and its title stand as its scroll has them,
+    /// without easing in or out.
+    snap: bool,
     /// The About page's moving field, while that page shows.
     glow: Option<GlowClock>,
     display_on: bool,
@@ -773,6 +783,7 @@ impl App {
             cue: None,
             title: title_fade(start == Screen::About),
             bar: bar_fade(start == Screen::About),
+            snap: false,
             glow: None,
             display_on: true,
             active: None,
@@ -906,21 +917,26 @@ impl App {
         self.glow.is_some() && self.display_on && self.top().1 < self.theme().m.dp(ABOUT_FIELD_DP)
     }
 
-    /// Bring the bar and its title in or out for where the page is
-    /// scrolled: the title once the large one has faded, the bar once the
-    /// content slides under it. On the About page both come once the
-    /// version has faded out.
-    fn follow_scroll(&mut self, now: u64) {
-        let Some(fr) = &self.frame else { return };
+    /// Whether the bar's title and the bar belong over the rendered page
+    /// where it is scrolled: the title once the large one has faded, the bar
+    /// once the content slides under it. On the About page both come once
+    /// the version has faded out.
+    fn bar_wanted(&self) -> Option<(bool, bool)> {
+        let fr = self.frame.as_ref()?;
         let t = self.theme();
         let scroll = self.top().1;
-        let (title, bar) = if fr.hero.is_some() {
+        Some(if fr.hero.is_some() {
             let gone = scroll >= t.m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(&t);
             (gone, gone)
         } else {
             let under = (fr.content_top - widgets::bar_bottom(&t) - t.m.dp(20.0)).max(0.0);
             (fr.header && scroll >= t.m.dp(TITLE_FADE_DP), scroll > under)
-        };
+        })
+    }
+
+    /// Bring the bar and its title in or out as the page scrolls.
+    fn follow_scroll(&mut self, now: u64) {
+        let Some((title, bar)) = self.bar_wanted() else { return };
         self.title.set(title, now);
         self.bar.set(bar, now);
         if self.title.moving(now) || self.bar.moving(now) {
@@ -1038,6 +1054,7 @@ impl App {
             self.fling = None;
             self.bounce = None;
             self.pull = 0.0;
+            self.snap = true;
         }
         self.state.folder = folder;
         self.state.files = files;
@@ -1054,6 +1071,11 @@ impl App {
             let frame = pages::render(screen, &cx);
             self.frame = Some(frame);
             self.clamp_scroll();
+            if std::mem::take(&mut self.snap) {
+                let (title, bar) = self.bar_wanted().expect("rendered above");
+                self.title.jump(title);
+                self.bar.jump(bar);
+            }
         }
         self.frame.as_ref().expect("rendered above")
     }
@@ -1201,8 +1223,8 @@ impl App {
         }
     }
 
-    /// Put the page back where it rests and the bar away, for a page just
-    /// opened or returned to.
+    /// Put the page back where it rests, for a page just opened or returned
+    /// to; its first frame shows the bar as its scroll has it.
     fn settle_page(&mut self) {
         self.fling = None;
         self.pull = 0.0;
@@ -1212,6 +1234,7 @@ impl App {
         let hero = self.screen() == Screen::About;
         self.title = title_fade(hero);
         self.bar = bar_fade(hero);
+        self.snap = true;
     }
 
     fn say(&mut self, text: &str, now: u64) {
@@ -2384,6 +2407,27 @@ mod tests {
     }
 
     #[test]
+    fn a_scrolled_page_gone_back_to_has_its_bar_from_its_first_frame() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Settings));
+        app.frame(&f, &i, DataState::Unmounted);
+        let end = app.max_scroll();
+        scroll_to(&mut app, &f, end, 0);
+        app.tick(2000);
+        assert_eq!((app.title.level(2000), app.bar.level(2000)), (1.0, 1.0), "scrolled down, the bar is up");
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Language), 3000);
+        assert_eq!(app.screen(), Screen::Language);
+        tap_back(&mut app, &f, &i, 4000);
+        assert_eq!(app.screen(), Screen::Settings);
+        let mut c = Canvas::new(W, H);
+        app.tick(4008);
+        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 4008);
+        assert_eq!(app.top().1, end, "the page is where it was left");
+        assert_eq!((app.title.level(4008), app.bar.level(4008)), (1.0, 1.0), "its bar is up from the first frame");
+    }
+
+    #[test]
     fn theme_previews_switch_the_theme() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
@@ -2805,6 +2849,34 @@ mod tests {
         assert_eq!(app.key(Key::Back, 3000), vec![Effect::ReadDir("/".into())]);
         app.set_files("/".into(), Ok(folders), LISTED);
         assert_eq!(app.top().1, 9000.0, "back up, the folder is where it was left");
+    }
+
+    #[test]
+    fn a_folder_opened_or_gone_back_up_to_has_its_bar_from_its_first_frame() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Files));
+        let folders: Vec<FileRow> = (0..300).map(|k| entry(&format!("dir{k:03}"), folder(k))).collect();
+        app.set_files("/".into(), Ok(folders.clone()), LISTED);
+        app.frame(&f, &i, DataState::Unmounted);
+        scroll_to(&mut app, &f, 9000.0, 0);
+        app.tick(2000);
+        assert_eq!((app.title.level(2000), app.bar.level(2000)), (1.0, 1.0), "scrolled down, the bar is up");
+        // The runtime lists a folder as it is asked to, then goes round its
+        // loop: time passes, and the next frame is the folder's first.
+        let mut c = Canvas::new(W, H);
+        tap_at(&mut app, &f, &i, Action::OpenEntry(36), 3000);
+        app.set_files("/dir036".into(), Ok(vec![entry("a", FileKind::File)]), LISTED);
+        app.tick(3008);
+        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 3008);
+        assert_eq!((app.title.level(3008), app.bar.level(3008)), (0.0, 0.0), "a folder opened at its top has only its large title");
+        app.tick(4008);
+        assert_eq!(app.key(Key::Back, 4100), vec![Effect::ReadDir("/".into())]);
+        app.set_files("/".into(), Ok(folders), LISTED);
+        app.tick(4108);
+        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 4108);
+        assert_eq!((app.title.level(4108), app.bar.level(4108)), (1.0, 1.0), "back up, the list is under the bar from the first frame");
+        assert_ne!(app.deadline(4108), Some(0), "nothing eases in after it");
     }
 
     #[test]
