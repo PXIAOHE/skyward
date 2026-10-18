@@ -202,6 +202,10 @@ fn chevron(c: &mut Canvas, t: &Theme, right: f32, cy: f32, color: Rgba) {
     c.line(x1, cy, x0, cy + h / 2.0 - sw / 2.0, sw, color);
 }
 
+/// Punctuation that never starts a line; at the end of a full line it hangs
+/// past the edge instead.
+const NO_LINE_START: &str = "，。、；：！？）」』》%,.;:!?)]";
+
 fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -209,16 +213,21 @@ fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> Vec<String>
         let mut probe = line.clone();
         probe.push(ch);
         if !line.is_empty() && c.text_width(face, &probe, px) > max_w {
-            // Prefer breaking Latin runs at the last space.
-            if ch != ' ' {
-                if let Some(sp) = line.rfind(' ') {
-                    let rest = line[sp + 1..].to_string();
-                    if rest.chars().all(|r| r.is_ascii_alphanumeric()) && !rest.is_empty() {
-                        lines.push(line[..sp].to_string());
-                        line = rest;
-                        line.push(ch);
-                        continue;
-                    }
+            if NO_LINE_START.contains(ch) {
+                line.push(ch);
+                continue;
+            }
+            // A Latin word, file names among them, moves to the next line
+            // whole, unless it fills the line alone.
+            let word = |r: char| r.is_ascii_alphanumeric() || matches!(r, '_' | '-' | '.' | '/');
+            if word(ch) {
+                let start = line.char_indices().rev().take_while(|&(_, r)| word(r)).last().map(|(at, _)| at);
+                if let Some(at) = start.filter(|&at| at > 0) {
+                    let rest = line.split_off(at);
+                    lines.push(line.trim_end().to_string());
+                    line = rest;
+                    line.push(ch);
+                    continue;
                 }
             }
             lines.push(std::mem::take(&mut line));
