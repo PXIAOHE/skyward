@@ -32,16 +32,113 @@ const RECOVERY_DESCRIPTIONS: &str = "/system/etc/vintf/manifest";
 const DIRECTORY_SERVICE: &str = "servicemanager";
 const DIRECTORY_PROGRAM: &str = "/system/bin/servicemanager";
 
+/// The loader a program built to run before anything is mounted asks for,
+/// and where the installed system keeps the one it was built for: in the
+/// bundle that carries the rest of its own runtime.
+const EARLY_LOADER: &str = "/system/bin/bootstrap/linker64";
+const RUNTIME_BUNDLE: &str = "com.android.runtime";
+const BUNDLE_LOADER: &str = "bin/linker64";
+
+/// Which programs may register which hardware services, and where the
+/// directory for those services looks for that.
+const SERVICE_LABELS: &str = "/mnt/system/system/etc/selinux/plat_hwservice_contexts";
+const RECOVERY_LABELS: &str = "/system/etc/selinux";
+
+/// The driver the phone's hardware services talk over, as they expect to
+/// find it and as a recovery has it.
+const HARDWARE_DRIVER: &str = "/dev/hwbinder";
+const HARDWARE_DRIVER_NODE: &str = "/dev/binderfs/hwbinder";
+
+/// The directory for those services is itself one of them, and it turns
+/// itself off when the running system does not describe it.
+const HARDWARE_DIRECTORY: &str = "android.hidl.manager@1.2::IServiceManager/default";
+
+/// What says the directory is off. It is read by the services, and in a
+/// recovery there is nothing else to set it.
+const DIRECTORY_OFF: &str = "hwservicemanager.disabled";
+
+/// Where a recovery is given the descriptions of the services the running
+/// system carries. A recovery has no framework of its own, so this is read
+/// as the framework's description of what it offers.
+const RECOVERY_MANIFEST: &str = "/system/etc/vintf/manifest.xml";
+
+/// What the directory for the phone's hardware services of the older kind
+/// needs before it will run inside a recovery. The program is the installed
+/// system's own: it is built to run before any partition is mounted, so it
+/// asks for a loader under a name a recovery does not carry; it decides what
+/// may register from labels a recovery does not carry either; and it reads
+/// the driver under a name that a recovery, which has the driver's own
+/// filesystem, does not have.
+///
+/// `wanted` names the hardware services that will be asked for.
+pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
+    // A loader and the lowest libraries are built together and agree
+    // between them on how a program's own storage is laid out, so the
+    // installed system's programs are loaded by the installed system's
+    // loader rather than by the older one a recovery carries.
+    let loader = Path::new(EARLY_LOADER);
+    let from = bundle(RUNTIME_BUNDLE)?
+        .map(|at| at.join(BUNDLE_LOADER))
+        .filter(|p| p.is_file())
+        .with_context(|| format!("the installed system carries no {RUNTIME_BUNDLE}, which holds the loader its own programs ask for"))?;
+    let dir = loader.parent().expect("the loader is in a directory");
+    fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+    if loader.exists() {
+        fs::remove_file(loader).with_context(|| format!("take away {}", loader.display()))?;
+    }
+    std::os::unix::fs::symlink(&from, loader).with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
+    let driver = Path::new(HARDWARE_DRIVER);
+    if !driver.exists() {
+        std::os::unix::fs::symlink(HARDWARE_DRIVER_NODE, driver)
+            .with_context(|| format!("point {HARDWARE_DRIVER} at {HARDWARE_DRIVER_NODE}"))?;
+    }
+    let from = Path::new(SERVICE_LABELS);
+    let into = Path::new(RECOVERY_LABELS).join(from.file_name().expect("a named file"));
+    fs::create_dir_all(RECOVERY_LABELS).with_context(|| format!("make {RECOVERY_LABELS}"))?;
+    fs::copy(from, &into).with_context(|| format!("copy {} to {}", from.display(), into.display()))?;
+    fs::write(RECOVERY_MANIFEST, describe_hardware(wanted)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
+    // The directory turns itself off when it cannot find its own
+    // description, and a run of it before this was written may have left
+    // that behind.
+    skyward_sys::set_prop(DIRECTORY_OFF, "false")?;
+    Ok(())
+}
+
+/// The description a recovery offers of the hardware services that will be
+/// asked for, and of the directory they are asked of. Each is named as the
+/// package it is in and the rest of its name, which is how a description
+/// holds the two.
+fn describe_hardware(wanted: &[String]) -> Result<String> {
+    let mut out = String::from("<manifest version=\"1.0\" type=\"framework\">\n");
+    for name in std::iter::once(HARDWARE_DIRECTORY).chain(wanted.iter().map(String::as_str)) {
+        let (package, rest) = name
+            .split_once('@')
+            .with_context(|| format!("{name} does not read as a hardware service's name"))?;
+        out.push_str("    <hal format=\"hidl\">\n");
+        out.push_str(&format!("        <name>{package}</name>\n"));
+        out.push_str("        <transport>hwbinder</transport>\n");
+        out.push_str(&format!("        <fqname>@{rest}</fqname>\n"));
+        out.push_str("    </hal>\n");
+    }
+    out.push_str("</manifest>\n");
+    Ok(out)
+}
+
 /// Open the bundle of libraries the phone's own partitions were built
 /// against and give the directory they are in. A phone whose partitions
 /// need no bundle has none to open.
 pub fn libraries() -> Result<Option<PathBuf>> {
     let Some(version) = skyward_sys::prop(VENDOR_INTERFACE) else { return Ok(None) };
-    let name = format!("com.android.vndk.v{version}");
-    let at = Path::new(BUNDLE_MOUNT).join(&name);
-    let libs = at.join(BUNDLE_LIBS);
-    if libs.is_dir() {
-        return Ok(Some(libs));
+    Ok(bundle(&format!("com.android.vndk.v{version}"))?.map(|at| at.join(BUNDLE_LIBS)))
+}
+
+/// Open the bundle of this name where it lies, and give where it is. A
+/// bundle the phone does not carry gives nothing; one already open is left
+/// as it is.
+fn bundle(name: &str) -> Result<Option<PathBuf>> {
+    let at = Path::new(BUNDLE_MOUNT).join(name);
+    if skyward_block::mount::is_mount_point(&at)? {
+        return Ok(Some(at));
     }
     let Some(file) = BUNDLE_DIRS.iter().map(|d| Path::new(d).join(format!("{name}.apex"))).find(|p| p.is_file()) else {
         return Ok(None);
@@ -50,7 +147,7 @@ pub fn libraries() -> Result<Option<PathBuf>> {
     let device = skyward_block::loopdev::attach(&file, offset, length)?;
     fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
     skyward_block::mount::mount_ro(&device, &at)?;
-    Ok(Some(libs))
+    Ok(Some(at))
 }
 
 /// Where the filesystem lies inside a bundle.
@@ -91,11 +188,12 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<usize> {
                 continue;
             }
             let name = from.file_name().expect("a listed file has a name");
-            fs::write(into.join(name), &text).with_context(|| format!("copy {}", from.display()))?;
+            fs::write(into.join(name), as_framework(&text)).with_context(|| format!("copy {}", from.display()))?;
             copied += 1;
         }
     }
-    if copied > 0 {
+    let rewritten = say_framework(into)?;
+    if copied > 0 || rewritten > 0 {
         // The directory reads the descriptions once and keeps to them, so
         // it has to start again to see these.
         let was = crate::services::running(DIRECTORY_PROGRAM);
@@ -103,6 +201,34 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<usize> {
         answering_again(was)?;
     }
     Ok(copied)
+}
+
+/// A description of what the running system offers, rather than of what
+/// the phone's own partitions carry. A recovery publishes a description
+/// into the place both readers take as the framework's, and the newer of
+/// the two readers drops the whole set over one description that says it
+/// is the phone's.
+fn as_framework(text: &str) -> String {
+    text.replace("type=\"device\"", "type=\"framework\"").replace("type='device'", "type='framework'")
+}
+
+/// Say the same of the descriptions already there, which a recovery ships
+/// with, and give how many had to be rewritten.
+fn say_framework(dir: &Path) -> Result<usize> {
+    let mut rewritten = 0;
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
+        if path.extension().is_none_or(|e| e != "xml") {
+            continue;
+        }
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let said = as_framework(&text);
+        if said != text {
+            fs::write(&path, said).with_context(|| format!("rewrite {}", path.display()))?;
+            rewritten += 1;
+        }
+    }
+    Ok(rewritten)
 }
 
 /// Whether a description is of the service registered under `name`, which

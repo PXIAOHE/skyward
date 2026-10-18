@@ -118,6 +118,11 @@ pub struct Service {
     /// once it is ready.
     #[serde(default)]
     pub ready_service: Option<String>,
+    /// A service the program registers with the other directory, the one
+    /// the phone's hardware services of the older kind use. It is written
+    /// as the interface and then which of them it is.
+    #[serde(default)]
+    pub ready_hardware_service: Option<String>,
 }
 
 impl Service {
@@ -199,6 +204,8 @@ mod tests {
                 "/odm/bin/touchsensor",
                 "/vendor/bin/qseecomd",
                 "/vendor/bin/hw/android.hardware.security.keymint-service-qti",
+                "/mnt/system_ext/bin/hwservicemanager",
+                "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti",
             ]
         );
         assert_eq!(cfg.services[1].libraries, ["/odm/lib64", "/system/lib64"]);
@@ -207,6 +214,15 @@ mod tests {
         assert_eq!(
             cfg.services[3].ready_service.as_deref(),
             Some("android.hardware.security.keymint.IKeyMintDevice/default")
+        );
+        assert_eq!(
+            cfg.services[4].ready_property.as_deref(),
+            Some("hwservicemanager.ready"),
+            "the directory for the hardware services says so itself"
+        );
+        assert_eq!(
+            cfg.services[5].ready_hardware_service.as_deref(),
+            Some("android.hardware.gatekeeper@1.0::IGatekeeper/default")
         );
     }
 

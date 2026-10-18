@@ -46,9 +46,12 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
 
 /// Wait until the program has what it says it will be ready with.
 fn ready(s: &Service) -> Result<()> {
-    if s.ready_property.is_none() && s.ready_service.is_none() {
-        return Ok(());
-    }
+    let waited_on = match (&s.ready_property, &s.ready_service, &s.ready_hardware_service) {
+        (Some(p), _, _) => format!("set no {p}"),
+        (_, Some(n), _) => format!("registered no {n}"),
+        (_, _, Some(n)) => format!("registered no {n}"),
+        _ => return Ok(()),
+    };
     let until = Instant::now() + READY_TIMEOUT;
     loop {
         if let Some(name) = &s.ready_property {
@@ -56,19 +59,20 @@ fn ready(s: &Service) -> Result<()> {
                 return Ok(());
             }
         }
+        // Either directory may itself be starting again, and until it
+        // answers nothing can be looked up in it.
         if let Some(name) = &s.ready_service {
-            // The service directory may itself be starting again, and
-            // until it answers nothing can be looked up in it.
             if registered(name) {
                 return Ok(());
             }
         }
-        if Instant::now() >= until {
-            match (&s.ready_property, &s.ready_service) {
-                (Some(p), _) => bail!("{} set no {p} in {} seconds", s.path, READY_TIMEOUT.as_secs()),
-                (_, Some(n)) => bail!("{} registered no {n} in {} seconds", s.path, READY_TIMEOUT.as_secs()),
-                _ => unreachable!("one of them is set"),
+        if let Some(name) = &s.ready_hardware_service {
+            if registered_hardware(name) {
+                return Ok(());
             }
+        }
+        if Instant::now() >= until {
+            bail!("{} {waited_on} in {} seconds", s.path, READY_TIMEOUT.as_secs());
         }
         thread::sleep(READY_POLL);
     }
@@ -164,6 +168,17 @@ fn lock(path: &Path) -> Result<()> {
 pub fn registered(name: &str) -> bool {
     match skyward_binder::driver::Binder::open() {
         Ok(binder) => matches!(skyward_binder::service::find(&binder, name), Ok(Some(_))),
+        Err(_) => false,
+    }
+}
+
+/// Whether a hardware service of the older kind has registered with the
+/// directory its kind uses. It is named as the interface and then which of
+/// them it is.
+pub fn registered_hardware(name: &str) -> bool {
+    let Some((interface, instance)) = name.rsplit_once('/') else { return false };
+    match skyward_binder::driver::Binder::hardware() {
+        Ok(binder) => matches!(skyward_binder::hidl::find(&binder, interface, instance), Ok(Some(_))),
         Err(_) => false,
     }
 }

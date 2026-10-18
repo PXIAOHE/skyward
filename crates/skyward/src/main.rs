@@ -337,6 +337,11 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }
+    let hardware: Vec<String> = cfg.services.iter().filter_map(|s| s.ready_hardware_service.clone()).collect();
+    if !hardware.is_empty() {
+        secure::prepare_hardware_directory(&hardware)?;
+        skyward_sys::kmsg("the directory for the phone's hardware services can run")?;
+    }
     // Only a program that has to register with the service directory needs
     // the directory to know the phone describes it.
     let registering: Vec<String> = cfg.services.iter().filter_map(|s| s.ready_service.clone()).collect();

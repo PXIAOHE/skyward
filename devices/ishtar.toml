@@ -42,6 +42,23 @@ path = "/vendor/bin/hw/android.hardware.security.keymint-service-qti"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
 
+# The directory the phone's hardware services of the older kind register
+# with. A recovery carries none of it, so it is the installed system's own
+# program, running against the installed system's own libraries. It says it
+# is up by the property the services themselves wait on.
+[[service]]
+path = "/mnt/system_ext/bin/hwservicemanager"
+libraries = ["/mnt/system/system/lib64/bootstrap", "/mnt/system/system/lib64", "/mnt/system_ext/lib64"]
+ready_property = "hwservicemanager.ready"
+
+# The credential service: it is what the secure world has check a screen
+# lock, and the only thing that can hand out the note the key service wants
+# before it will use a key a screen lock guards.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
+
 # qcom-hv-haptics. Waveform 0 is the click: 8 pattern samples at 6667 µs
 # each (its debugfs entry, haptics/effect0).
 [haptics]
