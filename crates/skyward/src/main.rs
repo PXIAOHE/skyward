@@ -58,6 +58,8 @@ enum Cmd {
         #[arg(long)]
         slot: Option<u32>,
     },
+    /// Tell what a package or image is, the way the installer reads it.
+    Identify { file: PathBuf },
     /// Map the booted slot's partitions from super and mount them read-only.
     Mount,
     /// Unmount what `mount` mounted and remove its device-mapper devices.
@@ -143,6 +145,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Lp { super_dev, slot } => lp(&super_dev, slot),
+        Cmd::Identify { file } => identify(&file),
         Cmd::Mount => {
             let mounts = skyward_vab::mount_partitions(booted_slot()?)?;
             for d in &mounts.damaged {
@@ -340,6 +343,26 @@ fn info(config: &str) -> Result<()> {
     }
     let parts = skyward_block::list_by_name(skyward_block::BY_NAME)?;
     println!("partitions    = {} under {}", parts.len(), skyward_block::BY_NAME);
+    Ok(())
+}
+
+fn identify(path: &Path) -> Result<()> {
+    use skyward_install::package::{self, Package};
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    match package::identify(std::io::BufReader::new(file))? {
+        Package::Update(u) => {
+            println!("an A/B update to {}", u.version().unwrap_or("an unnamed version"));
+            println!("payload.bin at byte {}, {} bytes", u.payload_offset, u.payload_size);
+            for key in ["ota-type", "pre-device", "post-build", "post-timestamp", "post-security-patch-level", "pre-build"] {
+                if let Some(v) = u.metadata.get(key) {
+                    println!("{key:<26} {v}");
+                }
+            }
+        }
+        Package::Image(kind) => println!("{kind:?}, for {}", kind.partitions().join(" or ")),
+        Package::Script => println!("a zip that installs itself with a script"),
+        Package::Unknown => println!("nothing this recovery installs"),
+    }
     Ok(())
 }
 

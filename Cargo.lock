@@ -968,6 +968,7 @@ dependencies = [
  "skyward-block",
  "skyward-config",
  "skyward-info",
+ "skyward-install",
  "skyward-lp",
  "skyward-modules",
  "skyward-sys",
