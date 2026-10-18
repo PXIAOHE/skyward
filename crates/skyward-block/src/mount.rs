@@ -14,11 +14,14 @@ pub struct Visible {
 mod sys {
     use super::{Visible, FILESYSTEMS};
     use anyhow::{bail, Context, Result};
-    use procfs::process::{MountInfo, MountOptFields, Process};
-    use std::collections::HashSet;
+    use procfs::process::{all_processes, MMapPath, MountInfo, MountOptFields, Process};
+    use procfs::{ProcError, ProcResult};
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use std::ffi::CString;
     use std::fs;
+    use std::io::ErrorKind;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use std::ptr::null;
 
@@ -70,11 +73,6 @@ mod sys {
             return Err(os_error()).with_context(|| format!("detach {}", target.display()));
         }
         Ok(())
-    }
-
-    /// Make the read-only mount at `target` writable.
-    pub fn remount_rw(target: &Path) -> Result<()> {
-        remount(target, libc::MS_REMOUNT, "writable")
     }
 
     fn mounts() -> Result<Vec<MountInfo>> {
@@ -201,12 +199,69 @@ mod sys {
         }
         unpark(parked)
     }
+
+    /// The programs that hold each filesystem, keyed by the (major, minor)
+    /// of its device: those with one of its files mapped or open, or one of
+    /// its directories as their working or root directory, named by their
+    /// executable. A filesystem a program holds does not unmount.
+    pub fn holders() -> Result<HashMap<(u32, u32), BTreeSet<String>>> {
+        let mut found: HashMap<(u32, u32), BTreeSet<String>> = HashMap::new();
+        for p in all_processes().context("list the processes")? {
+            let Some(p) = present(p)? else { continue };
+            // Kernel threads have no executable and hold no files.
+            let Some(exe) = present(p.exe())? else { continue };
+            let name = exe.file_name().with_context(|| format!("{} has no file name", exe.display()))?.to_string_lossy();
+            let proc_dir = Path::new("/proc").join(p.pid().to_string());
+            let mut devices = Vec::new();
+            if let Some(maps) = present(p.maps())? {
+                let files = maps.into_iter().filter(|m| matches!(m.pathname, MMapPath::Path(_)));
+                devices.extend(files.map(|m| (m.dev.0 as u32, m.dev.1 as u32)));
+            }
+            if let Some(fds) = present(p.fd())? {
+                for fd in fds {
+                    let Some(fd) = present(fd)? else { continue };
+                    devices.extend(device_of(&proc_dir.join("fd").join(fd.fd.to_string()))?);
+                }
+            }
+            for dir in ["cwd", "root"] {
+                devices.extend(device_of(&proc_dir.join(dir))?);
+            }
+            for d in devices {
+                found.entry(d).or_default().insert(name.to_string());
+            }
+        }
+        Ok(found)
+    }
+
+    /// `None` for what went away while it was read: a process that ended,
+    /// a file it closed.
+    fn present<T>(read: ProcResult<T>) -> Result<Option<T>> {
+        match read {
+            Ok(v) => Ok(Some(v)),
+            Err(ProcError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The device of the filesystem `path` is on, following it if it is a
+    /// link; `None` when it went away.
+    fn device_of(path: &Path) -> Result<Option<(u32, u32)>> {
+        match fs::metadata(path) {
+            Ok(m) => {
+                let dev = m.dev() as libc::dev_t;
+                Ok(Some((libc::major(dev) as u32, libc::minor(dev) as u32)))
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("stat {}", path.display())),
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
 mod sys {
     use super::Visible;
     use anyhow::{bail, Result};
+    use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
 
     pub fn mount_ro(device: &Path, _target: &Path) -> Result<&'static str> {
@@ -233,10 +288,6 @@ mod sys {
         bail!("this host does not unmount {}", target.display())
     }
 
-    pub fn remount_rw(target: &Path) -> Result<()> {
-        bail!("this host does not remount {}", target.display())
-    }
-
     pub fn is_mount_point(path: &Path) -> Result<bool> {
         bail!("this host has no mount table to look up {}", path.display())
     }
@@ -244,8 +295,12 @@ mod sys {
     pub fn visible(path: &Path) -> Result<Option<Visible>> {
         bail!("this host has no mount table to look up {}", path.display())
     }
+
+    pub fn holders() -> Result<HashMap<(u32, u32), BTreeSet<String>>> {
+        bail!("this host does not look up which programs hold a filesystem")
+    }
 }
 
 pub use sys::{
-    is_mount_point, mount_ro, mount_ro_over, remount_rw, umount, umount_detach, umount_detach_over, umount_over, visible,
+    holders, is_mount_point, mount_ro, mount_ro_over, umount, umount_detach, umount_detach_over, umount_over, visible,
 };
