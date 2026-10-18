@@ -432,35 +432,19 @@ fn recovery() -> Result<()> {
             Ok(ms) => skyward_sys::kmsg(&format!("clock set to {} ms from the RTC and persist", ms))?,
             Err(e) => skyward_sys::kmsg(&format!("clock not set: {e:#}"))?,
         }
-        let slot = booted_slot()?;
-        // Recovery has to stay usable when super cannot be mounted, as after
-        // it is wiped, so the reason goes to the kernel log instead.
-        match skyward_vab::mount_partitions(slot) {
-            Ok(mounts) => {
-                for d in &mounts.damaged {
-                    skyward_sys::kmsg(&format!("super: {d}"))?;
-                }
-                for m in &mounts.partitions {
-                    skyward_sys::kmsg(&format!(
-                        "mounted {} on {} ({})",
-                        m.partition,
-                        m.mount_point.display(),
-                        m.filesystem
-                    ))?;
-                }
-                // Without them the screen still shows and the keys still
-                // work, so this reason goes to the kernel log as well.
-                #[cfg(target_os = "android")]
-                if let Err(e) = bring_up(&cfg, slot) {
-                    skyward_sys::kmsg(&format!("devices not brought up: {e:#}"))?;
-                }
-            }
-            Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
-        }
         #[cfg(target_os = "android")]
         {
+            use skyward_ui::app::Screen;
+            // fastbootd rewrites super, which it cannot do while the slot's
+            // partitions are mapped and mounted, so fastboot runs without
+            // them and without what runs from them.
+            let fastboot = request.args.iter().any(|a| a == "--fastboot");
+            if !fastboot {
+                prepare(&cfg, booted_slot()?)?;
+            }
             let root = Path::new("/");
-            ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), skyward_ui::app::Screen::Home, None)
+            let start = if fastboot { Screen::Fastboot } else { Screen::Home };
+            ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), start, None)
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -470,6 +454,30 @@ fn recovery() -> Result<()> {
     run().inspect_err(|e| {
         let _ = skyward_sys::kmsg(&format!("recovery failed: {e:#}"));
     })
+}
+
+/// Map and mount the slot's partitions from super, then bring up what runs
+/// from them. Recovery has to stay usable when super cannot be mounted, as
+/// after it is wiped, so the reason goes to the kernel log instead.
+#[cfg(target_os = "android")]
+fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
+    match skyward_vab::mount_partitions(slot) {
+        Ok(mounts) => {
+            for d in &mounts.damaged {
+                skyward_sys::kmsg(&format!("super: {d}"))?;
+            }
+            for m in &mounts.partitions {
+                skyward_sys::kmsg(&format!("mounted {} on {} ({})", m.partition, m.mount_point.display(), m.filesystem))?;
+            }
+            // Without them the screen still shows and the keys still work,
+            // so this reason goes to the kernel log as well.
+            if let Err(e) = bring_up(cfg, slot) {
+                skyward_sys::kmsg(&format!("devices not brought up: {e:#}"))?;
+            }
+        }
+        Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
+    }
+    Ok(())
 }
 
 fn info(config: &str) -> Result<()> {

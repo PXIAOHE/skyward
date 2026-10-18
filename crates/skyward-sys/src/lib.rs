@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::time::{Duration, Instant};
 
 pub mod bcb;
 pub mod clock;
@@ -40,6 +41,23 @@ pub fn set_prop(name: &str, value: &str) -> Result<()> {
 #[cfg(not(target_os = "android"))]
 pub fn set_prop(name: &str, _value: &str) -> Result<()> {
     bail!("this host has no property service to set {name}")
+}
+
+/// Wait until property `name` reads `value`, for at most `timeout`: init
+/// sets some properties only once it has done what another one asked of
+/// it.
+pub fn wait_prop(name: &str, value: &str, timeout: Duration) -> Result<()> {
+    let until = Instant::now() + timeout;
+    loop {
+        let now = prop(name);
+        if now.as_deref() == Some(value) {
+            return Ok(());
+        }
+        if Instant::now() >= until {
+            bail!("{name} is {now:?} after {} ms, not {value:?}", timeout.as_millis());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Where a power request sends the device.

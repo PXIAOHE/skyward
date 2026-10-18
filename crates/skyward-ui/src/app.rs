@@ -56,6 +56,11 @@ pub enum Screen {
     FontLicense,
     /// Which slot the phone starts from next.
     Slot,
+    /// The phone's own fastbootd serving the computer's fastboot, and where
+    /// to go from it. Its only page, worked with the keys: the partitions
+    /// the touchscreen runs from are left out while fastbootd rewrites
+    /// super.
+    Fastboot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,6 +241,36 @@ pub enum Target {
 
 pub const TARGETS: [Target; 6] = [Target::System, Target::Recovery, Target::Fastboot, Target::Bootloader, Target::Edl, Target::PowerOff];
 
+/// Where the fastboot page goes, in the order it lists them: the volume
+/// keys move between them and the power key takes one.
+pub const FASTBOOT_CHOICES: [(&str, Action); 4] = [
+    ("重启到系统", Action::RebootTo(Target::System)),
+    ("进入恢复模式", Action::EnterRecovery),
+    ("重启到 Bootloader", Action::RebootTo(Target::Bootloader)),
+    ("关机", Action::RebootTo(Target::PowerOff)),
+];
+
+/// How far a computer has the USB port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsbLink {
+    /// No cable, or nothing answering at its other end.
+    Unplugged,
+    /// Plugged in, with the computer still setting the port up.
+    Connecting,
+    /// Set up by the computer, which can send commands.
+    Connected,
+}
+
+/// Fastboot as its page shows it: whether the phone's fastbootd runs and
+/// how far a computer has the port, as the runtime last read them, and
+/// which of [`FASTBOOT_CHOICES`] the keys are on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fastboot {
+    pub running: bool,
+    pub link: UsbLink,
+    pub focus: usize,
+}
+
 /// How long the screen stays on with nothing touched, in milliseconds, in
 /// the order the page lists them; `None` keeps it on.
 pub const SCREEN_OFF: [Option<u64>; 7] = [Some(15_000), Some(30_000), Some(60_000), Some(120_000), Some(300_000), Some(600_000), None];
@@ -267,6 +302,9 @@ pub enum Action {
     FlashSlots(Pick),
     /// Leave the recovery for this target at once.
     RebootTo(Target),
+    /// Stop fastboot and bring the recovery's own pages up, without
+    /// restarting.
+    EnterRecovery,
     /// Keep the screen on for this choice in [`SCREEN_OFF`].
     ScreenOff(usize),
     /// Tick or untick a part of the backup, by its place in
@@ -469,6 +507,7 @@ pub struct State {
     pub listed: i64,
     /// The entry the file page describes.
     pub file: Option<FileRow>,
+    pub fastboot: Fastboot,
 }
 
 impl Default for State {
@@ -506,6 +545,7 @@ impl Default for State {
             files: Ok(Vec::new()),
             listed: 0,
             file: None,
+            fastboot: Fastboot { running: false, link: UsbLink::Unplugged, focus: 0 },
         }
     }
 }
@@ -551,6 +591,10 @@ pub enum Effect {
     Decrypt,
     /// Let in the keys for the own files of every user this code opens.
     Unlock(String),
+    /// Hand the USB port back from fastboot to adb, bring up what the
+    /// recovery runs from the slot's partitions, then show its pages with
+    /// [`App::enter_recovery`].
+    EnterRecovery,
 }
 
 enum Drag {
@@ -1069,6 +1113,24 @@ impl App {
         }
     }
 
+    /// The runtime read whether fastbootd runs and how far a computer has
+    /// the port: keep it and show it if it changed.
+    pub fn set_fastboot(&mut self, running: bool, link: UsbLink) {
+        let now = Fastboot { running, link, ..self.state.fastboot };
+        if self.state.fastboot != now {
+            self.state.fastboot = now;
+            self.refresh();
+        }
+    }
+
+    /// Fastboot has stopped and the recovery is up: its pages start again
+    /// from the home page, which nothing can go back from to fastboot.
+    pub fn enter_recovery(&mut self) {
+        self.stack = vec![(Screen::Home, 0.0)];
+        self.settle_page();
+        self.refresh();
+    }
+
     /// The runtime could not mount or unmount a partition: the mount page
     /// says so, and why.
     pub fn mount_failed(&mut self, failure: MountFailure) {
@@ -1459,6 +1521,7 @@ impl App {
                 }
             }
             Action::RebootTo(target) => return vec![Effect::Reboot(target)],
+            Action::EnterRecovery => return vec![Effect::EnterRecovery],
             Action::ScreenOff(k) => {
                 self.state.screen_off = k;
                 self.refresh();
@@ -1741,10 +1804,7 @@ impl App {
                     self.repaint_confirm(&t, f, which, track);
                     if done {
                         match which {
-                            Confirm::Reboot => match TARGETS[self.state.reboot] {
-                                Target::Fastboot => self.say("用户空间 fastboot 还没接入", now),
-                                target => fx.push(Effect::Reboot(target)),
-                            },
+                            Confirm::Reboot => fx.push(Effect::Reboot(TARGETS[self.state.reboot])),
                             Confirm::Wipe => self.say("清除功能还没实现", now),
                             Confirm::Backup => self.say("备份还没实现", now),
                             Confirm::Restore => self.say("恢复还没实现", now),
@@ -1802,6 +1862,23 @@ impl App {
         // a power press meant to wake it does not turn it back off.
         if self.just_woke(now) {
             self.stir(now);
+            return Vec::new();
+        }
+        // The touchscreen may run from the partitions fastboot leaves out,
+        // so its page is worked with the keys: volume moves between the
+        // choices, power takes the one it is on.
+        if self.screen() == Screen::Fastboot {
+            self.stir(now);
+            let (n, focus) = (FASTBOOT_CHOICES.len(), self.state.fastboot.focus);
+            self.state.fastboot.focus = match key {
+                Key::VolumeUp => (focus + n - 1) % n,
+                Key::VolumeDown => (focus + 1) % n,
+                Key::Power => return self.act(FASTBOOT_CHOICES[focus].1, now),
+                Key::Back => focus,
+            };
+            if self.state.fastboot.focus != focus {
+                self.refresh();
+            }
             return Vec::new();
         }
         if key == Key::Power {
@@ -2652,14 +2729,45 @@ mod tests {
     }
 
     #[test]
-    fn fastboot_is_chosen_like_any_target_but_not_restarted_to_yet() {
+    fn fastboot_is_chosen_and_restarted_to_like_any_target() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Reboot, W, H, PPD);
         let fastboot = TARGETS.iter().position(|t| *t == Target::Fastboot).unwrap();
         tap(&mut app, &f, &i, Action::RebootTarget(fastboot));
         assert_eq!(app.state.reboot, fastboot);
-        assert!(swipe(&mut app, &f, &i, Confirm::Reboot).is_empty(), "the runtime cannot start userspace fastboot yet");
-        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says so");
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Reboot), vec![Effect::Reboot(Target::Fastboot)]);
+    }
+
+    #[test]
+    fn the_fastboot_page_is_worked_with_the_keys() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Fastboot, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        assert_eq!(app.state.fastboot.focus, 0);
+        assert!(app.key(Key::VolumeDown, 0).is_empty());
+        assert_eq!(app.state.fastboot.focus, 1, "down moves to the next choice");
+        assert_eq!(app.key(Key::Power, 0), vec![Effect::EnterRecovery], "power takes it");
+        assert!(app.display_on(), "power leaves the panel on here");
+        app.key(Key::VolumeUp, 0);
+        app.key(Key::VolumeUp, 0);
+        assert_eq!(app.state.fastboot.focus, FASTBOOT_CHOICES.len() - 1, "up from the first goes round to the last");
+        assert_eq!(app.key(Key::Power, 0), vec![Effect::Reboot(Target::PowerOff)]);
+        assert_eq!(tap(&mut app, &f, &i, Action::RebootTo(Target::Bootloader)), vec![Effect::Reboot(Target::Bootloader)], "a touch takes a choice too");
+        assert!(app.key(Key::Back, 0).is_empty());
+        assert_eq!(app.screen(), Screen::Fastboot, "there is nothing to go back to");
+    }
+
+    #[test]
+    fn the_recovery_comes_up_from_fastboot_at_the_home_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Fastboot, W, H, PPD);
+        app.frame(&f, &i, DataState::Unmounted);
+        app.enter_recovery();
+        assert_eq!(app.screen(), Screen::Home);
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Home, "fastboot is not behind it");
+        assert!(app.key(Key::Power, 0).is_empty());
+        assert!(!app.display_on(), "power turns the panel off again");
     }
 
     /// Drag the knob of a swipe-to-confirm track all the way across.

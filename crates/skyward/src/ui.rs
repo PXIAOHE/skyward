@@ -6,14 +6,18 @@ use skyward_config::{DeviceConfig, Service};
 use skyward_info::DataState;
 use skyward_install::{Detach, Installer};
 use skyward_sys::Power;
-use skyward_ui::app::{App, Effect, FileKind, FileRow, Keys, MountFailure, Screen, Target};
+use skyward_ui::app::{App, Effect, FileKind, FileRow, Keys, MountFailure, Screen, Target, UsbLink};
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// How long init may take to hand the USB port to another function: the
+/// program behind the new one has to start and get ready first.
+const USB_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
@@ -101,11 +105,38 @@ fn power(target: Target) -> Result<()> {
     skyward_sys::power(match target {
         Target::System => Power::System,
         Target::Recovery => Power::Recovery,
+        Target::Fastboot => Power::Fastboot,
         Target::Bootloader => Power::Bootloader,
         Target::Edl => Power::Edl,
         Target::PowerOff => Power::Off,
-        Target::Fastboot => return Err(anyhow!("userspace fastboot is not wired up")),
     })
+}
+
+/// Hand the USB port to `function`, "adb" or "fastboot", through init:
+/// through "none" first, which stops the program serving the port now,
+/// then init starts the one behind the new function and sets the port up
+/// once that program is ready.
+fn usb(function: &str) -> Result<()> {
+    for state in ["none", function] {
+        skyward_sys::set_prop("sys.usb.config", state)?;
+        skyward_sys::wait_prop("sys.usb.state", state, USB_TIMEOUT)?;
+    }
+    Ok(())
+}
+
+/// Whether the phone's fastbootd runs, as init tells it, and how far a
+/// computer has the port, as the USB controller tells it.
+fn fastboot_status() -> Result<(bool, UsbLink)> {
+    let running = skyward_sys::prop("init.svc.fastbootd").as_deref() == Some("running");
+    let controller = skyward_sys::prop("sys.usb.controller").context("init names no USB controller")?;
+    let path = Path::new("/sys/class/udc").join(controller).join("state");
+    let state = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let link = match state.trim() {
+        "configured" => UsbLink::Connected,
+        "not attached" => UsbLink::Unplugged,
+        _ => UsbLink::Connecting,
+    };
+    Ok((running, link))
 }
 
 /// The time of day in China for the status bar: the recovery carries no
@@ -314,6 +345,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
     // Whether the panel's frame memory has been blacked out for an off
     // panel; cleared once a real frame is shown again.
     let mut blanked = false;
+    // Started for fastboot, the port goes to the phone's own fastbootd. The
+    // page says whether it came up and how far a computer has the port;
+    // why it did not come up goes to the kernel log and on screen.
+    let mut fastboot = start == Screen::Fastboot;
+    let mut port_at = Instant::now();
+    if fastboot {
+        if let Err(e) = usb("fastboot") {
+            skyward_sys::kmsg(&format!("fastbootd has not taken the port: {e:#}"))?;
+            app.report(&format!("{e:#}"), monotonic_ms());
+        }
+        let (running, link) = fastboot_status()?;
+        app.set_fastboot(running, link);
+    }
     loop {
         let now = monotonic_ms();
         app.tick(now);
@@ -334,6 +378,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
                 info.battery = battery;
                 app.refresh();
             }
+        }
+        // In fastboot the page follows fastbootd and the cable each second.
+        if fastboot && port_at.elapsed().as_secs() >= 1 {
+            let (running, link) = fastboot_status()?;
+            app.set_fastboot(running, link);
+            port_at = Instant::now();
         }
         let panel = app.panel(now);
         let mut shown = false;
@@ -455,6 +505,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
                             app.mount_failed(MountFailure { mounting: false, base, detail: format!("{e:#}") });
                         }
                         app.set_mounts(mounts());
+                    }
+                    // init stops fastbootd as the port goes through "none";
+                    // then the slot's partitions come up as at boot.
+                    Effect::EnterRecovery => {
+                        usb("adb")?;
+                        let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+                        crate::prepare(cfg, slot)?;
+                        info = skyward_info::collect(cfg)?;
+                        data = data_state()?;
+                        fastboot = false;
+                        app.enter_recovery();
                     }
                 }
             }

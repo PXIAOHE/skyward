@@ -1,6 +1,6 @@
 use crate::app::{
     Action, Confirm, Damage, FileKind, Frame, HeroArt, Hit, Install, Keys, Pick, Screen, State, Switch, Target,
-    BACKUP_PARTS, BACKUP_PLACES, SCREEN_OFF, TARGETS,
+    UsbLink, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -62,6 +62,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::License => license(cx),
         Screen::FontLicense => font_license(cx),
         Screen::Slot => slot(cx),
+        Screen::Fastboot => fastboot(cx),
     }
 }
 
@@ -1180,4 +1181,38 @@ pub fn slot(cx: &Ctx) -> Frame {
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Slot) });
     Frame::new(t, c, out, "启动槽位", top)
+}
+
+/// The phone's own fastbootd serving the computer: whether it runs, how far
+/// the computer has the port, and where to go from here, chosen with the
+/// keys and lit where they are.
+pub fn fastboot(cx: &Ctx) -> Frame {
+    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
+    let mut c = page(t);
+    let top = t.m.content_top;
+    let running = if s.fastboot.running { "正在运行" } else { "没有运行" };
+    let link = match s.fastboot.link {
+        UsbLink::Connected => "已连接电脑",
+        UsbLink::Connecting => "正在连接",
+        UsbLink::Unplugged => "没有连接电脑",
+    };
+    let slot = i.slot.map(|s| s.letter());
+    let mut facts = vec![
+        Row::new("fastbootd").trail(Trail::Text(running)),
+        Row::new("USB").trail(Trail::Text(link)),
+        Row::new("设备代号").trail(Trail::Text(&i.codename)),
+    ];
+    if let Some(letter) = slot {
+        facts.push(Row::new("当前槽位").trail(Trail::Text(letter)));
+    }
+    let y = widgets::section_first(&mut c, t, f, top, "状态");
+    let state = widgets::list(&mut c, t, f, y, &facts);
+    let y = widgets::footnote(&mut c, t, f, state.bottom, "现在可以用电脑上的 fastboot 命令刷写分区，包括 super 里的逻辑分区。");
+    let y = widgets::section(&mut c, t, f, y, "离开 fastboot");
+    let rows: Vec<Row> = FASTBOOT_CHOICES.iter().map(|&(title, _)| Row::new(title).trail(Trail::None)).collect();
+    let choices = widgets::list_focused(&mut c, t, f, y, &rows, s.fastboot.focus);
+    let actions: Vec<Action> = FASTBOOT_CHOICES.iter().map(|&(_, action)| action).collect();
+    let out = hits(&choices.rows, &actions);
+    widgets::footnote(&mut c, t, f, choices.bottom, "按音量键选择，按电源键确认。");
+    Frame { back: false, ..Frame::new(t, c, out, "Fastboot", top) }
 }

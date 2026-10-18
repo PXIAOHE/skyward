@@ -3,7 +3,8 @@ use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
 use skyward_ui::app::{
-    Action, App, BackupEntry, Choice, Damage, FileKind, FileRow, Install, MountFailure, MountRow, Pick, Screen, Touch, SCREEN_OFF,
+    Action, App, BackupEntry, Choice, Damage, FileKind, FileRow, Install, MountFailure, MountRow, Pick, Screen, Touch, UsbLink,
+    SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
@@ -186,7 +187,7 @@ fn main() -> Result<()> {
         BackupEntry { made: 1_792_348_260, size: 6_214_000_000, place: 0, parts: [true, true, false, true] },
         BackupEntry { made: 1_791_830_000, size: 141_000_000, place: 1, parts: [true, false, false, false] },
     ];
-    let pages: [PageShot; 23] = [
+    let pages: [PageShot; 25] = [
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
@@ -218,6 +219,11 @@ fn main() -> Result<()> {
         ("58-license-light", Screen::License, false, &|_| {}),
         ("59-font-license-light", Screen::FontLicense, false, &|_| {}),
         ("60-slot-dark", Screen::Slot, true, &|app| app.state.next_slot = Some(Slot::A)),
+        ("68-fastboot-light", Screen::Fastboot, false, &|app| app.set_fastboot(true, UsbLink::Connected)),
+        ("69-fastboot-dark-unplugged", Screen::Fastboot, true, &|app| {
+            app.set_fastboot(true, UsbLink::Unplugged);
+            app.state.fastboot.focus = 1;
+        }),
     ];
     for (name, screen, dark, set) in pages {
         let mut app = App::new(screen, w, h, ppd);
