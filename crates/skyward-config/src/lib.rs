@@ -18,6 +18,8 @@ pub mod ramdisk {
     pub const RECOVERY: &str = "system/bin/recovery";
     /// The first property file init loads in recovery mode.
     pub const PROP_DEFAULT: &str = "prop.default";
+    /// The scheduling profiles libprocessgroup reads.
+    pub const TASK_PROFILES: &str = "system/etc/task_profiles.json";
 
     /// Whether the running root is Skyward's recovery ramdisk.
     pub fn in_recovery() -> bool {

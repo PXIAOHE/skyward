@@ -99,6 +99,11 @@ fn main() -> Result<()> {
             rd.add(paths::FONT, 0o644, read(&font)?)?;
             rd.add(paths::MONO, 0o644, read(&mono)?)?;
             rd.add(paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
+            // A stock ramdisk may run logd without any scheduling profiles,
+            // and logd stops as soon as it cannot find the one it asks for.
+            if rd.find(paths::TASK_PROFILES).is_none() {
+                rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
+            }
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
@@ -126,6 +131,11 @@ fn main() -> Result<()> {
 /// for the recovery to fill in from the installed system once it has that
 /// mounted.
 const BUILD_VERSION: [&str; 2] = ["ro.build.version.release", "ro.build.version.security_patch"];
+
+/// The scheduling profiles a recovery's programs look up by name. A
+/// recovery's cgroup setup mounts no controllers, so of all a system's
+/// profiles do, only the timer slack applies here.
+const TASK_PROFILES: &[u8] = include_bytes!("task_profiles.json");
 
 /// A property file without the lines that set any of `names`.
 fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
@@ -178,6 +188,43 @@ mod tests {
         assert!(!text.contains("ro.build.version.release=13"));
         assert!(text.contains("ro.build.version.release_or_codename=13"), "a longer name is left alone");
         assert!(text.contains("ro.build.id=TQ") && text.contains("ro.product.name=ishtar"));
+    }
+
+    #[test]
+    fn the_profiles_name_all_the_recovery_asks_for() {
+        let profiles: serde_json::Value = serde_json::from_slice(TASK_PROFILES).expect("the profiles are JSON");
+        let names = |key: &str| -> Vec<String> {
+            profiles[key].as_array().expect("a list").iter().map(|p| p["Name"].as_str().expect("a name").to_string()).collect()
+        };
+        let (plain, aggregate) = (names("Profiles"), names("AggregateProfiles"));
+        // What libprocessgroup asks for when a program sets its scheduling
+        // policy, and what the recovery's own init scripts give logd.
+        let asked = [
+            "SCHED_SP_DEFAULT",
+            "SCHED_SP_BACKGROUND",
+            "SCHED_SP_FOREGROUND",
+            "SCHED_SP_TOP_APP",
+            "SCHED_SP_SYSTEM",
+            "SCHED_SP_RT_APP",
+            "CPUSET_SP_DEFAULT",
+            "CPUSET_SP_BACKGROUND",
+            "CPUSET_SP_FOREGROUND",
+            "CPUSET_SP_TOP_APP",
+            "CPUSET_SP_SYSTEM",
+            "CPUSET_SP_RESTRICTED",
+            "BlkIOBackground",
+            "BlkIOForeground",
+            "ServiceCapacityLow",
+        ];
+        for name in asked {
+            assert!(plain.iter().chain(&aggregate).any(|n| n == name), "{name} is missing");
+        }
+        for a in profiles["AggregateProfiles"].as_array().expect("a list") {
+            for part in a["Profiles"].as_array().expect("a list") {
+                let part = part.as_str().expect("a name");
+                assert!(plain.iter().any(|n| n == part), "{} is made of {part}, which is not a profile", a["Name"]);
+            }
+        }
     }
 
     #[test]
