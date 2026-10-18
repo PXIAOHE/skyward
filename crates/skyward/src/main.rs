@@ -63,6 +63,14 @@ enum Cmd {
     },
     /// Tell what a package or image is, the way the installer reads it.
     Identify { file: PathBuf },
+    /// Discard all a block device holds and write zeros over its start, as
+    /// a factory reset erases the data partition.
+    #[cfg(target_os = "android")]
+    Discard { device: PathBuf },
+    /// Make a filesystem on a block device, f2fs or ext4, as a factory
+    /// reset makes /metadata afresh.
+    #[cfg(target_os = "android")]
+    Mkfs { device: PathBuf, filesystem: String },
     /// Map the booted slot's partitions from super and mount them read-only.
     Mount,
     /// Unmount what `mount` mounted and remove its device-mapper devices.
@@ -181,8 +189,13 @@ fn main() -> Result<()> {
             let b = bcb::read(&bcb::misc())?;
             println!("command = {:?}", b.command);
             println!("args    = {:?}", b.args);
+            println!("request = {:?}", b.request());
             Ok(())
         }
+        #[cfg(target_os = "android")]
+        Cmd::Discard { device } => skyward_block::erase::discard(&device),
+        #[cfg(target_os = "android")]
+        Cmd::Mkfs { device, filesystem } => skyward_block::erase::make(&device, &filesystem, &[]),
         Cmd::Lp { super_dev, slot } => lp(&super_dev, slot),
         Cmd::Identify { file } => identify(&file),
         Cmd::Mount => {
