@@ -94,13 +94,15 @@ fn main() -> Result<()> {
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
-            // one.
+            // one. update_engine refuses a package built before the recovery
+            // itself unless both of the last two are set; the recovery checks
+            // packages against the installed system instead.
             let mut props = rd
                 .find(paths::PROP_DEFAULT)
                 .with_context(|| format!("{} is not in the ramdisk", paths::PROP_DEFAULT))?
                 .data
                 .clone();
-            props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\n");
+            props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
             img.ramdisk = rd.encode()?;
             write(&out, &img)
