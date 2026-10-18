@@ -47,7 +47,8 @@ enum Cmd {
     },
     /// Run as the recovery service (what init starts as /system/bin/recovery).
     Recovery,
-    /// Reboot through init: system, recovery, bootloader, edl, or off.
+    /// Reboot through init: system, recovery, fastboot, bootloader, edl, or
+    /// off.
     Reboot { target: String },
     /// Print the bootloader control block in misc.
     Bcb,

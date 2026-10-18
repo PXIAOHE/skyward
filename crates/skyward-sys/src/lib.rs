@@ -47,6 +47,10 @@ pub fn set_prop(name: &str, _value: &str) -> Result<()> {
 pub enum Power {
     System,
     Recovery,
+    /// The recovery's own userspace fastboot. On a phone with dynamic
+    /// partitions init leaves `--fastboot` for the recovery in misc and
+    /// boots it.
+    Fastboot,
     Bootloader,
     /// Qualcomm emergency download mode.
     Edl,
@@ -58,6 +62,7 @@ impl Power {
         Some(match name {
             "system" => Power::System,
             "recovery" => Power::Recovery,
+            "fastboot" => Power::Fastboot,
             "bootloader" => Power::Bootloader,
             "edl" => Power::Edl,
             "off" => Power::Off,
@@ -70,6 +75,7 @@ impl Power {
         match self {
             Power::System => "reboot,",
             Power::Recovery => "reboot,recovery",
+            Power::Fastboot => "reboot,fastboot",
             Power::Bootloader => "reboot,bootloader",
             Power::Edl => "reboot,edl",
             Power::Off => "shutdown,",
@@ -98,12 +104,13 @@ mod tests {
         for (name, cmd) in [
             ("system", "reboot,"),
             ("recovery", "reboot,recovery"),
+            ("fastboot", "reboot,fastboot"),
             ("bootloader", "reboot,bootloader"),
             ("edl", "reboot,edl"),
             ("off", "shutdown,"),
         ] {
             assert_eq!(Power::parse(name).unwrap().command(), cmd);
         }
-        assert_eq!(Power::parse("fastboot"), None);
+        assert_eq!(Power::parse("download"), None);
     }
 }
