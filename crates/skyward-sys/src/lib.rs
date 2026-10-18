@@ -27,6 +27,37 @@ pub fn prop(_name: &str) -> Option<String> {
     None
 }
 
+/// Every system property whose name starts with `prefix`, with its value.
+#[cfg(target_os = "android")]
+pub fn props(prefix: &str) -> Vec<(String, String)> {
+    use std::ffi::{c_char, c_void, CStr};
+    extern "C" {
+        fn __system_property_read_callback(
+            pi: *const libc::prop_info,
+            callback: unsafe extern "C" fn(cookie: *mut c_void, name: *const c_char, value: *const c_char, serial: u32),
+            cookie: *mut c_void,
+        );
+    }
+    unsafe extern "C" fn take(cookie: *mut c_void, name: *const c_char, value: *const c_char, _serial: u32) {
+        let all = unsafe { &mut *cookie.cast::<Vec<(String, String)>>() };
+        let (name, value) = unsafe { (CStr::from_ptr(name), CStr::from_ptr(value)) };
+        all.push((name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned()));
+    }
+    unsafe extern "C" fn each(pi: *const libc::prop_info, cookie: *mut c_void) {
+        unsafe { __system_property_read_callback(pi, take, cookie) };
+    }
+    let mut all: Vec<(String, String)> = Vec::new();
+    unsafe { libc::__system_property_foreach(each, (&mut all as *mut Vec<(String, String)>).cast()) };
+    all.retain(|(name, _)| name.starts_with(prefix));
+    all
+}
+
+/// Hosts have no property area.
+#[cfg(not(target_os = "android"))]
+pub fn props(_prefix: &str) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// Ask init to set a property; init refuses names the caller's SELinux
 /// domain may not set.
 #[cfg(target_os = "android")]
