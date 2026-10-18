@@ -17,7 +17,8 @@ use std::time::Instant;
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
     path: PathBuf,
-    max: u32,
+    /// The raw level at the top of the slider: the panel's normal maximum.
+    top: u32,
     /// The raw level last written; at first the one the bootloader left.
     level: u32,
 }
@@ -43,15 +44,15 @@ impl Backlight {
                 .parse()
                 .with_context(|| format!("parse {name}"))
         };
-        let max = read("max_brightness")?;
+        let top = normal_max(read("max_brightness")?)?;
         let level = read("brightness")?;
-        Ok(Backlight { path: dir.join("brightness"), max, level })
+        Ok(Backlight { path: dir.join("brightness"), top, level })
     }
 
-    /// Light the panel at `level` of its full brightness, or turn it off
+    /// Light the panel at `level` of its normal maximum, or turn it off
     /// with `None`. The file is written only when the raw level changes.
     fn show(&mut self, level: Option<f32>) -> Result<()> {
-        let raw = level.map_or(0, |v| ((v.clamp(0.0, 1.0) * self.max as f32).round() as u32).max(1));
+        let raw = level.map_or(0, |v| ((v.clamp(0.0, 1.0) * self.top as f32).round() as u32).max(1));
         if raw != self.level {
             fs::write(&self.path, raw.to_string()).with_context(|| format!("write {}", self.path.display()))?;
             eprintln!("backlight {raw}");
@@ -59,6 +60,39 @@ impl Backlight {
         }
         Ok(())
     }
+}
+
+/// The raw backlight level, out of `max`, at the panel's normal maximum.
+/// Above it the panel runs in high brightness mode, which the stock system
+/// keeps for strong sunlight and its slider does not reach. The panel the
+/// display driver booted with gives that maximum in the device tree, on a
+/// finer brightness scale of its own that spans the same light as the
+/// backlight's range.
+fn normal_max(max: u32) -> Result<u32> {
+    let param = "/sys/module/msm_drm/parameters/dsi_display0";
+    let boot = fs::read_to_string(param).with_context(|| format!("read {param}"))?;
+    // The panel's node, then its configuration after a colon, as in
+    // "qcom,mdss_dsi_m1_42_02_0a_dsc_cmd:"; the driver takes no name
+    // without the colon either.
+    let (name, _) = boot.trim().split_once(':').with_context(|| format!("{param} names no panel: {boot:?}"))?;
+    let soc = Path::new("/proc/device-tree/soc");
+    let node = fs::read_dir(soc)
+        .with_context(|| format!("read {}", soc.display()))?
+        .map(|e| e.map(|e| e.path().join(name)))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|p| p.is_dir())
+        .ok_or_else(|| anyhow!("panel {name} is not in the device tree"))?;
+    let cell = |prop: &str| -> Result<u32> {
+        let path = node.join(prop);
+        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let cell: [u8; 4] = bytes.as_slice().try_into().map_err(|_| anyhow!("{} is not one cell", path.display()))?;
+        Ok(u32::from_be_bytes(cell))
+    };
+    let normal = cell("mi,normal-max-brightness-clone")?;
+    let full = cell("mi,max-brightness-clone")?;
+    ensure!(normal > 0 && normal <= full, "panel {name}: normal maximum {normal} out of {full}");
+    Ok((f64::from(max) * f64::from(normal) / f64::from(full)).round() as u32)
 }
 
 /// Leave recovery for the chosen target.
@@ -128,10 +162,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
     let mut backlight = Backlight::open()?;
     let mut app = App::new(start, w, h, cfg.display.density as f32 / 160.0);
-    // Keep the level the boot splash had, so the panel does not jump; a
-    // dark panel gets the slider's default.
+    // Keep the level the boot splash had, so the panel does not jump, or
+    // the slider's top when it was brighter; a dark panel gets the
+    // slider's default.
     if backlight.level > 0 {
-        app.state.brightness = backlight.level as f32 / backlight.max as f32;
+        app.state.brightness = (backlight.level as f32 / backlight.top as f32).min(1.0);
     }
     let data = data_state()?;
 

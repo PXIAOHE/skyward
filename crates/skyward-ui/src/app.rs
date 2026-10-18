@@ -655,7 +655,8 @@ impl App {
         self.display_on
     }
 
-    /// The backlight at `now`: off, or this share of its full brightness.
+    /// The backlight at `now`: off, or this share of the brightness at the
+    /// slider's top.
     pub fn panel(&self, now: u64) -> Option<f32> {
         if !self.display_on {
             return None;
