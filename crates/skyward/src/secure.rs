@@ -2,9 +2,11 @@
 //! recovery: the libraries their partitions were built against, and a
 //! service directory that knows the phone describes them.
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Where a phone keeps the bundles of shared libraries its own partitions
 /// were built against.
@@ -31,6 +33,16 @@ const RECOVERY_DESCRIPTIONS: &str = "/system/etc/vintf/manifest";
 /// The name init knows the service directory by, and the program it runs.
 const DIRECTORY_SERVICE: &str = "servicemanager";
 const DIRECTORY_PROGRAM: &str = "/system/bin/servicemanager";
+
+/// Where init says which process each of its services runs as, one
+/// property per service, the service's name following this.
+const SERVICE_PIDS: &str = "init.svc_debug_pid.";
+
+/// How long a service init starts again may take to register again.
+const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long init may take to see a service it stopped gone.
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The loader a program built to run before anything is mounted asks for,
 /// and where the installed system keeps the one it was built for: in the
@@ -195,12 +207,64 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<usize> {
     let rewritten = say_framework(into)?;
     if copied > 0 || rewritten > 0 {
         // The directory reads the descriptions once and keeps to them, so
-        // it has to start again to see these.
+        // it has to start again to see these. It comes back knowing nothing
+        // of what had registered with it, and nothing registers again by
+        // itself, so init starts each of those services again, as the
+        // installed system's init does whenever its directory restarts.
+        let registered = registered()?;
         let was = crate::services::running(DIRECTORY_PROGRAM);
         skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE).context("have the service directory start again")?;
         answering_again(was)?;
+        register_again(&registered)?;
     }
     Ok(copied)
+}
+
+/// What has registered with the service directory, each with the init
+/// service whose process serves it; the directory's own entry is left out.
+fn registered() -> Result<Vec<(String, String)>> {
+    let Some(directory) = crate::services::running(DIRECTORY_PROGRAM) else { return Ok(Vec::new()) };
+    let binder = skyward_binder::driver::Binder::open()?;
+    let started = skyward_sys::props(SERVICE_PIDS);
+    let mut out = Vec::new();
+    for name in skyward_binder::service::names(&binder)? {
+        let Some(service) = skyward_binder::service::find(&binder, &name)? else { continue };
+        let pid = skyward_binder::service::pid(&service).with_context(|| format!("ask which process serves {name}"))?;
+        if pid == directory {
+            continue;
+        }
+        let (prop, _) = started
+            .iter()
+            .find(|(_, value)| value.parse() == Ok(pid))
+            .with_context(|| format!("{name} is served by process {pid}, which init does not run, so nothing would register it again"))?;
+        out.push((name, prop[SERVICE_PIDS.len()..].to_string()));
+    }
+    Ok(out)
+}
+
+/// Have init start again the services behind what had registered, and wait
+/// until each name is registered once more. A restart through init waits
+/// out the pause it keeps between two starts of a service, seconds after
+/// the service last started; stopping it and starting it does not.
+fn register_again(registered: &[(String, String)]) -> Result<()> {
+    let services: BTreeSet<&str> = registered.iter().map(|(_, service)| service.as_str()).collect();
+    for service in &services {
+        skyward_sys::set_prop("ctl.stop", service).with_context(|| format!("have init stop {service}"))?;
+    }
+    for service in &services {
+        skyward_sys::wait_prop(&format!("init.svc.{service}"), "stopped", STOP_TIMEOUT)?;
+        skyward_sys::set_prop("ctl.start", service).with_context(|| format!("have init start {service} again"))?;
+    }
+    let binder = skyward_binder::driver::Binder::open()?;
+    let until = Instant::now() + REGISTER_TIMEOUT;
+    for (name, service) in registered {
+        while skyward_binder::service::find(&binder, name)?.is_none() {
+            ensure!(Instant::now() < until, "{name} has not registered again since init started {service} again");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        skyward_sys::kmsg(&format!("{name} registered again from {service}"))?;
+    }
+    Ok(())
 }
 
 /// A description of what the running system offers, rather than of what
