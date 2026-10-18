@@ -1,3 +1,4 @@
+pub mod hidl;
 pub mod parcel;
 pub mod status;
 

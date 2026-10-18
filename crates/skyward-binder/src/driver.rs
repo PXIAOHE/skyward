@@ -1,10 +1,16 @@
-use crate::parcel::{Parcel, Reader};
+use crate::parcel::{Payload, Reader};
 use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::os::fd::AsRawFd;
+use std::path::Path;
 
 /// The driver every program on the phone reaches its neighbours through.
 const DEVICE: &str = "/dev/binder";
+
+/// The second driver, which the phone's hardware services talk over. Older
+/// phones have the node itself; newer ones have the driver's own filesystem
+/// and the node inside it.
+const HARDWARE: [&str; 2] = ["/dev/hwbinder", "/dev/binderfs/hwbinder"];
 
 /// The layout this crate speaks. The driver refuses a program that knows a
 /// different one.
@@ -27,6 +33,7 @@ const BINDER_SET_MAX_THREADS: u32 = ioc(WRITE, b'b', 5, 4);
 const BINDER_VERSION: u32 = ioc(WRITE | READ, b'b', 9, 4);
 
 const BC_TRANSACTION: u32 = ioc(WRITE, b'c', 0, size_of::<TransactionData>());
+const BC_TRANSACTION_SG: u32 = ioc(WRITE, b'c', 17, size_of::<TransactionData>() + 8);
 const BC_FREE_BUFFER: u32 = ioc(WRITE, b'c', 3, 8);
 const BC_ACQUIRE: u32 = ioc(WRITE, b'c', 5, 4);
 const BC_RELEASE: u32 = ioc(WRITE, b'c', 6, 4);
@@ -88,7 +95,22 @@ pub struct Binder {
 
 impl Binder {
     pub fn open() -> Result<Binder> {
-        let file = File::options().read(true).write(true).open(DEVICE).with_context(|| format!("open {DEVICE}"))?;
+        Binder::on(Path::new(DEVICE))
+    }
+
+    /// The driver the phone's hardware services talk over, which is a
+    /// second one of the same kind.
+    pub fn hardware() -> Result<Binder> {
+        let node = HARDWARE
+            .iter()
+            .map(Path::new)
+            .find(|p| p.exists())
+            .with_context(|| format!("none of {} is here, so no hardware service can be reached", HARDWARE.join(" or ")))?;
+        Binder::on(node)
+    }
+
+    fn on(node: &Path) -> Result<Binder> {
+        let file = File::options().read(true).write(true).open(node).with_context(|| format!("open {}", node.display()))?;
         let mut version: i32 = 0;
         unsafe { call(&file, BINDER_VERSION, &mut version as *mut i32 as *mut libc::c_void) }.context("ask the driver its protocol")?;
         if version != PROTOCOL {
@@ -107,24 +129,40 @@ impl Binder {
         Ok(Binder { file, map })
     }
 
-    /// The service directory, which every program reaches at handle 0.
+    /// The service directory, which every program reaches at handle 0. The
+    /// driver carries a call to whichever process holds that place without
+    /// being given a share of it first, so this takes none and gives none
+    /// back: taking one and giving it back on every look-up would have the
+    /// directory's own object counted up and down from outside while it is
+    /// still starting.
     pub fn directory(&self) -> Result<Handle<'_>> {
-        Handle::hold(self, 0)
+        Ok(Handle { binder: self, handle: 0, held: false })
     }
 
     /// Call method `code` on `handle` and wait for what it answers.
-    pub fn transact(&self, handle: u32, code: u32, data: &Parcel) -> Result<Reply<'_>> {
-        let payload = data.bytes();
+    pub fn transact(&self, handle: u32, code: u32, data: &impl Payload) -> Result<Reply<'_>> {
+        let payload = data.values();
+        let addresses = data.addresses();
         let td = TransactionData {
             target: handle as u64,
             code,
             flags: TF_ACCEPT_FDS,
             data_size: payload.len() as u64,
+            offsets_size: (addresses.len() * 8) as u64,
             buffer: payload.as_ptr() as u64,
+            offsets: addresses.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = BC_TRANSACTION.to_ne_bytes().to_vec();
+        // A call that hands over addresses is sent the way that tells the
+        // driver how much room to set aside for what they point at.
+        let mut write = match addresses.is_empty() {
+            true => BC_TRANSACTION.to_ne_bytes().to_vec(),
+            false => BC_TRANSACTION_SG.to_ne_bytes().to_vec(),
+        };
         write.extend_from_slice(bytes_of(&td));
+        if !addresses.is_empty() {
+            write.extend_from_slice(&data.pointed().to_ne_bytes());
+        }
         // The driver answers a call with a handful of short notices; what
         // the other side sent lands in the mapped room, not here.
         let mut read = [0u8; 256];
@@ -225,6 +263,9 @@ unsafe fn call(file: &File, request: u32, arg: *mut libc::c_void) -> Result<()> 
 pub struct Handle<'a> {
     binder: &'a Binder,
     handle: u32,
+    /// Whether a share of the object was taken, and so has to be given
+    /// back.
+    held: bool,
 }
 
 impl<'a> Handle<'a> {
@@ -232,17 +273,19 @@ impl<'a> Handle<'a> {
     /// the reply that carried it.
     pub fn hold(binder: &'a Binder, handle: u32) -> Result<Handle<'a>> {
         binder.tell(BC_ACQUIRE, &handle.to_ne_bytes()).context("hold an object open")?;
-        Ok(Handle { binder, handle })
+        Ok(Handle { binder, handle, held: true })
     }
 
-    pub fn transact(&self, code: u32, data: &Parcel) -> Result<Reply<'a>> {
+    pub fn transact(&self, code: u32, data: &impl Payload) -> Result<Reply<'a>> {
         self.binder.transact(self.handle, code, data)
     }
 }
 
 impl Drop for Handle<'_> {
     fn drop(&mut self) {
-        let _ = self.binder.tell(BC_RELEASE, &self.handle.to_ne_bytes());
+        if self.held {
+            let _ = self.binder.tell(BC_RELEASE, &self.handle.to_ne_bytes());
+        }
     }
 }
 
@@ -256,6 +299,12 @@ pub struct Reply<'a> {
 impl<'a> Reply<'a> {
     pub fn read(&self) -> Reader<'_> {
         Reader::new(self.data)
+    }
+
+    /// The reply as it lies in the driver's room, for a layout the plain
+    /// reader does not know.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.data
     }
 
     pub fn binder(&self) -> &'a Binder {
@@ -279,6 +328,7 @@ mod tests {
         assert_eq!(BINDER_VERSION, 0xc004_6209);
         assert_eq!(BINDER_SET_MAX_THREADS, 0x4004_6205);
         assert_eq!(BC_TRANSACTION, 0x4040_6300);
+        assert_eq!(BC_TRANSACTION_SG, 0x4048_6311);
         assert_eq!(BC_FREE_BUFFER, 0x4008_6303);
         assert_eq!(BR_REPLY, 0x8040_7203);
         assert_eq!(BR_NOOP, 0x0000_720c);

@@ -15,11 +15,32 @@ const UNSET_WORK_SOURCE: i32 = -1;
 /// An object in the sending process, as a transaction carries it.
 const BINDER_TYPE_HANDLE: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
 
+/// What a call carries. The values themselves are most of it; a call that
+/// hands over an address says where among the values that address sits, and
+/// how much room the far side needs for everything the addresses point at.
+pub trait Payload {
+    fn values(&self) -> &[u8];
+
+    fn addresses(&self) -> &[u64] {
+        &[]
+    }
+
+    fn pointed(&self) -> u64 {
+        0
+    }
+}
+
 /// The bytes of a call or its reply, in the layout libbinder reads: values
 /// little-endian, each one padded out to four bytes.
 #[derive(Default)]
 pub struct Parcel {
     data: Vec<u8>,
+}
+
+impl Payload for Parcel {
+    fn values(&self) -> &[u8] {
+        self.bytes()
+    }
 }
 
 impl Parcel {
