@@ -250,6 +250,16 @@ pub fn slots(slots: &[Slot]) -> String {
     format!("槽位 {}", letters.join(" 和 "))
 }
 
+/// How long the screen stays on with nothing touched: `30 秒`, `2 分钟`,
+/// or `永不`.
+pub fn screen_off(after_ms: Option<u64>) -> String {
+    match after_ms {
+        None => "永不".into(),
+        Some(ms) if ms < 60_000 => format!("{} 秒", ms / 1000),
+        Some(ms) => format!("{} 分钟", ms / 60_000),
+    }
+}
+
 /// Why a package was not installed, for a phone with this codename.
 pub fn refusal(r: &Refusal, codename: &str) -> String {
     match r {
@@ -379,6 +389,12 @@ mod tests {
         assert_eq!(patch(&PatchLevel { year: 2026, month: 4, day: 1 }), "2026年4月1日");
         assert_eq!(slots(&[Slot::B]), "槽位 B");
         assert_eq!(slots(&[Slot::A, Slot::B]), "槽位 A 和 B");
+    }
+
+    #[test]
+    fn screen_off_times() {
+        let labels: Vec<String> = crate::app::SCREEN_OFF.iter().map(|&ms| screen_off(ms)).collect();
+        assert_eq!(labels, ["15 秒", "30 秒", "1 分钟", "2 分钟", "5 分钟", "10 分钟", "永不"]);
     }
 
     #[test]

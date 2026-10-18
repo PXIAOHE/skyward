@@ -18,8 +18,8 @@ use std::time::Instant;
 struct Backlight {
     path: PathBuf,
     max: u32,
-    /// The level found at startup, as the bootloader left it.
-    start: u32,
+    /// The raw level last written; at first the one the bootloader left.
+    level: u32,
 }
 
 impl Backlight {
@@ -44,17 +44,20 @@ impl Backlight {
                 .with_context(|| format!("parse {name}"))
         };
         let max = read("max_brightness")?;
-        let start = read("brightness")?;
-        Ok(Backlight { path: dir.join("brightness"), max, start })
+        let level = read("brightness")?;
+        Ok(Backlight { path: dir.join("brightness"), max, level })
     }
 
-    fn set(&self, level: f32) -> Result<()> {
-        let v = ((level.clamp(0.0, 1.0) * self.max as f32).round() as u32).max(1);
-        fs::write(&self.path, v.to_string()).with_context(|| format!("write {}", self.path.display()))
-    }
-
-    fn off(&self) -> Result<()> {
-        fs::write(&self.path, "0").with_context(|| format!("write {}", self.path.display()))
+    /// Light the panel at `level` of its full brightness, or turn it off
+    /// with `None`. The file is written only when the raw level changes.
+    fn show(&mut self, level: Option<f32>) -> Result<()> {
+        let raw = level.map_or(0, |v| ((v.clamp(0.0, 1.0) * self.max as f32).round() as u32).max(1));
+        if raw != self.level {
+            fs::write(&self.path, raw.to_string()).with_context(|| format!("write {}", self.path.display()))?;
+            eprintln!("backlight {raw}");
+            self.level = raw;
+        }
+        Ok(())
     }
 }
 
@@ -123,14 +126,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h)?;
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
-    let backlight = Backlight::open()?;
+    let mut backlight = Backlight::open()?;
     let mut app = App::new(start, w, h, cfg.display.density as f32 / 160.0);
     // Keep the level the boot splash had, so the panel does not jump; a
     // dark panel gets the slider's default.
-    if backlight.start == 0 {
-        backlight.set(app.state.brightness)?;
-    } else {
-        app.state.brightness = backlight.start as f32 / backlight.max as f32;
+    if backlight.level > 0 {
+        app.state.brightness = backlight.level as f32 / backlight.max as f32;
     }
     let data = data_state()?;
 
@@ -162,6 +163,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
             }
             shown = true;
         }
+        // After the frame, so a panel coming back on lights with what it
+        // should show now, never with what it showed when it went off.
+        backlight.show(app.panel(now))?;
         // A frame shown has waited for the panel, which keeps the loop to
         // its pace; otherwise the CPU gets at least a millisecond.
         let floor = if shown { 0 } else { 1 };
@@ -172,19 +176,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
             fds.push(i.fd());
         }
         wait(&fds, timeout)?;
+        let now = monotonic_ms();
         // What the installer told comes first, so a touch acts on the page
         // as it now stands.
         if let Some(i) = &installer {
             for ev in i.events() {
                 let finished = matches!(ev, skyward_install::Event::Finished(_));
                 eprintln!("install {ev:?}");
-                app.install(ev);
+                app.install(ev, now);
                 if finished {
                     installer = None;
                 }
             }
         }
-        let now = monotonic_ms();
         for ev in inputs.read()? {
             let effects = match ev {
                 Event::Touch(t, at) => app.touch(t, &fonts, at),
@@ -193,9 +197,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
             for fx in effects {
                 eprintln!("effect {fx:?}");
                 match fx {
-                    Effect::Backlight(v) => backlight.set(v)?,
-                    Effect::Display(true) => backlight.set(app.state.brightness)?,
-                    Effect::Display(false) => backlight.off()?,
                     Effect::Reboot(target) => power(target)?,
                     Effect::Haptic => {
                         if let Some(h) = &mut haptics {

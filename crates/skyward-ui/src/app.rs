@@ -27,6 +27,8 @@ pub enum Screen {
     Sideload,
     About,
     Specs,
+    /// How long the screen stays on with nothing touched.
+    ScreenOff,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +120,10 @@ pub enum Target {
 
 pub const TARGETS: [Target; 6] = [Target::System, Target::Recovery, Target::Fastboot, Target::Bootloader, Target::Edl, Target::PowerOff];
 
+/// How long the screen stays on with nothing touched, in milliseconds, in
+/// the order the page lists them; `None` keeps it on.
+pub const SCREEN_OFF: [Option<u64>; 7] = [Some(15_000), Some(30_000), Some(60_000), Some(120_000), Some(300_000), Some(600_000), None];
+
 /// What a control does when touched.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -143,6 +149,8 @@ pub enum Action {
     FlashSlots(Pick),
     /// Leave the recovery for this target at once.
     RebootTo(Target),
+    /// Keep the screen on for this choice in [`SCREEN_OFF`].
+    ScreenOff(usize),
     /// A control whose work is not wired up yet; touching it says so.
     Unavailable(&'static str),
 }
@@ -192,6 +200,9 @@ impl Frame {
 pub struct State {
     pub dark: bool,
     pub brightness: f32,
+    /// How long the screen stays on with nothing touched, by its place in
+    /// [`SCREEN_OFF`].
+    pub screen_off: usize,
     pub vibrate: bool,
     pub reboot: usize,
     pub wipe: [bool; 4],
@@ -206,6 +217,8 @@ impl Default for State {
         State {
             dark: false,
             brightness: 0.5,
+            // Two minutes.
+            screen_off: 3,
             vibrate: true,
             reboot: 0,
             wipe: [true, false, true, false],
@@ -235,10 +248,6 @@ pub enum Key {
 /// Work the runtime carries out on the UI's behalf.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
-    /// Set the panel backlight to this fraction of its maximum.
-    Backlight(f32),
-    /// Turn the panel off or back on.
-    Display(bool),
     Reboot(Target),
     /// A short tap of the vibration motor.
     Haptic,
@@ -264,6 +273,9 @@ enum Drag {
     Slider(Rect),
     Confirm { which: Confirm, track: Rect, grab: f32 },
     Pattern,
+    /// The finger that lit the dark panel; nothing it does counts until it
+    /// lifts.
+    Waking,
 }
 
 const TOAST_MS: u64 = 2000;
@@ -294,6 +306,22 @@ const ABOUT_LOGO_FADE_DP: f32 = 40.0;
 const ABOUT_FIELD_DP: f32 = 389.0;
 /// The field is worked out every this many pixels and filled in between.
 const FIELD_CELL: usize = 24;
+/// Before the panel goes off it stays dim this long, in milliseconds, or
+/// a fifth of the screen-off time when that is shorter.
+const DIM_MS: u64 = 7000;
+/// The dim level is this much below the brightness set, no brighter than
+/// the ceiling, and never under the slider's floor unless the brightness
+/// set is.
+const DIM_DROP: f32 = 0.04;
+const DIM_CEILING: f32 = 0.05;
+/// The lowest brightness the slider sets.
+const MIN_BRIGHTNESS: f32 = 0.02;
+/// While the backlight eases, it steps once a frame of a 120 Hz panel.
+const BACKLIGHT_STEP_MS: u64 = 8;
+/// Just after the panel lights, a touch or key only keeps it awake: the
+/// second tap of a wake habit, or the hand reaching for a phone whose
+/// screen an install just lit, should not act. Android's double-tap window.
+const WAKE_GUARD_MS: u64 = 400;
 
 /// How a part of the screen eases between shown and hidden.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -327,6 +355,10 @@ struct Fade {
 impl Fade {
     fn hidden(show: Ease, hide: Ease) -> Fade {
         Fade { on: false, since: 0, from: 0.0, show, hide }
+    }
+
+    fn shown(show: Ease, hide: Ease) -> Fade {
+        Fade { on: true, since: 0, from: 1.0, show, hide }
     }
 
     /// How far in, 0 to 1, at `now`.
@@ -367,6 +399,23 @@ fn bar_fade(hero: bool) -> Fade {
     }
 }
 
+/// The panel at full brightness: it dims over half a second and comes
+/// back quickly when touched.
+fn full_brightness() -> Fade {
+    Fade::shown(Ease::Linear(150), Ease::Linear(500))
+}
+
+/// The level the panel dims to shortly before it goes off, for the
+/// brightness set.
+fn dim_level(full: f32) -> f32 {
+    (full - DIM_DROP).clamp(MIN_BRIGHTNESS, DIM_CEILING).min(full)
+}
+
+/// How long the panel stays dim before going off, for a screen-off time.
+fn dim_span(after: u64) -> u64 {
+    DIM_MS.min(after / 5)
+}
+
 /// Lay the sprite `blurs` keeps, moved by (`dx`, `dy`), in `color` at
 /// `level` of its strength, blurred by `blur` pixels.
 fn draw_faded(out: &mut Canvas, blurs: &mut Blurs, dx: f32, dy: f32, color: Rgba, level: f32, blur: f32) {
@@ -404,6 +453,15 @@ pub struct App {
     /// The About page's moving field, while that page shows.
     glow: Option<GlowClock>,
     display_on: bool,
+    /// When the screen was last touched or a key pressed; set on the first
+    /// tick, so the time before the UI started does not count.
+    active: Option<u64>,
+    /// When the panel last lit from dark, for the brief guard that keeps a
+    /// stray touch or key from acting on a page just put up.
+    woke_at: Option<u64>,
+    /// The panel at full brightness, or easing to the dim level it takes
+    /// shortly before going off.
+    bright: Fade,
     dirty: bool,
     w: u32,
     h: u32,
@@ -430,6 +488,9 @@ impl App {
             bar: bar_fade(start == Screen::About),
             glow: None,
             display_on: true,
+            active: None,
+            woke_at: None,
+            bright: full_brightness(),
             dirty: true,
             w,
             h,
@@ -463,25 +524,48 @@ impl App {
     }
 
     /// When time next has to pass through [`App::tick`]: at once while
-    /// something moves on its own, else when a shown message should
-    /// disappear.
+    /// something on the lit screen moves on its own, a frame on while the
+    /// backlight eases, else when a shown message should disappear or the
+    /// panel should dim or go off.
     pub fn deadline(&self, now: u64) -> Option<u64> {
-        let moving = self.fling.is_some()
-            || self.bounce.is_some()
-            || self.cue.is_some()
-            || self.title.moving(now)
-            || self.bar.moving(now)
-            || self.glowing();
+        let moving = self.display_on
+            && (self.fling.is_some()
+                || self.bounce.is_some()
+                || self.cue.is_some()
+                || self.title.moving(now)
+                || self.bar.moving(now)
+                || self.glowing());
         if moving {
             return Some(0);
         }
-        self.toast.as_ref().map(|t| t.1)
+        let easing = self.bright.moving(now).then_some(now + BACKLIGHT_STEP_MS);
+        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due()].into_iter().flatten().min()
     }
 
-    /// Let time pass: a gliding page moves on, a page past its end springs
-    /// back, the bar and its title follow the scroll, and a message past
-    /// its deadline goes away.
+    /// When sitting idle next changes the lit panel: when it dims, or once
+    /// it is dimming, when it goes off.
+    fn idle_due(&self) -> Option<u64> {
+        let (active, after) = (self.active?, SCREEN_OFF[self.state.screen_off]?);
+        if !self.display_on {
+            return None;
+        }
+        Some(if self.bright.on { active + after - dim_span(after) } else { active + after })
+    }
+
+    /// Let time pass: the panel dims and goes off once left alone long
+    /// enough, a gliding page moves on, a page past its end springs back,
+    /// the bar and its title follow the scroll, and a message past its
+    /// deadline goes away.
     pub fn tick(&mut self, now: u64) {
+        let active = *self.active.get_or_insert(now);
+        if let (true, Some(after)) = (self.display_on, SCREEN_OFF[self.state.screen_off]) {
+            let idle = now.saturating_sub(active);
+            if idle >= after {
+                self.sleep();
+            } else if idle >= after - dim_span(after) {
+                self.bright.set(false, now);
+            }
+        }
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
             self.dirty = true;
@@ -569,6 +653,60 @@ impl App {
 
     pub fn display_on(&self) -> bool {
         self.display_on
+    }
+
+    /// The backlight at `now`: off, or this share of its full brightness.
+    pub fn panel(&self, now: u64) -> Option<f32> {
+        if !self.display_on {
+            return None;
+        }
+        let (full, level) = (self.state.brightness, self.bright.level(now));
+        Some(full * level + dim_level(full) * (1.0 - level))
+    }
+
+    /// Something was touched or pressed: the panel stays at full
+    /// brightness for the screen-off time from now.
+    fn stir(&mut self, now: u64) {
+        self.active = Some(now);
+        self.bright.set(true, now);
+    }
+
+    /// Light the panel, as if just touched.
+    fn wake(&mut self, now: u64) {
+        if !self.display_on {
+            self.display_on = true;
+            self.dirty = true;
+        }
+        self.woke_at = Some(now);
+        self.stir(now);
+    }
+
+    /// Whether the panel lit so recently that a touch or key should only
+    /// keep it awake.
+    fn just_woke(&self, now: u64) -> bool {
+        self.woke_at.is_some_and(|w| now.saturating_sub(w) < WAKE_GUARD_MS)
+    }
+
+    /// Turn the panel off. A finger on the glass lets go of what it held,
+    /// and the page stops where it is.
+    fn sleep(&mut self) {
+        self.display_on = false;
+        self.bright = full_brightness();
+        match std::mem::replace(&mut self.drag, Drag::Idle) {
+            Drag::Confirm { .. } => {
+                self.state.confirm = 0.0;
+                self.refresh();
+            }
+            Drag::Pattern => {
+                self.state.pattern.clear();
+                self.refresh();
+            }
+            _ => {}
+        }
+        self.fling = None;
+        self.bounce = None;
+        self.pull = 0.0;
+        self.cue = None;
     }
 
     /// Something laid over the page changed (the clock): compose again.
@@ -750,15 +888,19 @@ impl App {
     }
 
     /// Hear from the installer. Once the sideload page is left, only its
-    /// end matters.
-    pub fn install(&mut self, ev: Event) {
-        let install = &mut self.state.install;
-        if *install == Install::Ending {
+    /// end matters. An image waiting for its partition, and the end, light
+    /// a dark panel: both want the user.
+    pub fn install(&mut self, ev: Event, now: u64) {
+        if self.state.install == Install::Ending {
             if matches!(ev, Event::Finished(_)) {
-                *install = Install::Idle;
+                self.state.install = Install::Idle;
             }
             return;
         }
+        if matches!(ev, Event::Image { .. } | Event::Finished(_)) {
+            self.wake(now);
+        }
+        let install = &mut self.state.install;
         match ev {
             Event::Waiting => *install = Install::Waiting,
             Event::Checking { size } => *install = Install::Checking { size },
@@ -846,6 +988,10 @@ impl App {
                 }
             }
             Action::RebootTo(target) => return vec![Effect::Reboot(target)],
+            Action::ScreenOff(k) => {
+                self.state.screen_off = k;
+                self.refresh();
+            }
             Action::Unavailable(text) => self.say(text, now),
         }
         Vec::new()
@@ -853,8 +999,21 @@ impl App {
 
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
         if !self.display_on {
+            // A finger on the dark panel lights it, and does nothing else
+            // until it lifts.
+            if matches!(ev, Touch::Down(..)) {
+                self.wake(now);
+                self.drag = Drag::Waking;
+            }
             return Vec::new();
         }
+        // A finger landing just after the panel lit only keeps it awake.
+        if matches!(ev, Touch::Down(..)) && self.just_woke(now) {
+            self.stir(now);
+            self.drag = Drag::Waking;
+            return Vec::new();
+        }
+        self.stir(now);
         let t = self.theme();
         let m = t.m;
         let (slop, edge) = (m.dp(8.0), m.dp(20.0));
@@ -900,7 +1059,7 @@ impl App {
                 let action = hit.map(|h| h.0);
                 self.drag = match hit {
                     Some((Action::Brightness, track)) => {
-                        fx.push(self.set_brightness(&t, track, x));
+                        self.set_brightness(&t, track, x);
                         Drag::Slider(track)
                     }
                     Some((Action::Confirm(which), track)) if self.on_knob(track, x) => {
@@ -953,7 +1112,7 @@ impl App {
                     self.dirty = true;
                 }
                 Drag::Slider(track) => {
-                    fx.push(self.set_brightness(&t, track, x));
+                    self.set_brightness(&t, track, x);
                     self.drag = Drag::Slider(track);
                 }
                 Drag::Confirm { which, track, grab } => {
@@ -966,6 +1125,7 @@ impl App {
                     self.trace(&t, x, y + scroll);
                     self.drag = Drag::Pattern;
                 }
+                Drag::Waking => self.drag = Drag::Waking,
                 Drag::Idle => {}
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {
@@ -1026,14 +1186,22 @@ impl App {
     pub fn key(&mut self, key: Key, now: u64) -> Vec<Effect> {
         // Any button stops a gliding page.
         self.fling = None;
-        if key == Key::Power {
-            self.display_on = !self.display_on;
-            self.dirty = self.display_on;
-            return vec![Effect::Display(self.display_on)];
-        }
         if !self.display_on {
+            // Any button lights the dark panel, and does only that.
+            self.wake(now);
             return Vec::new();
         }
+        // A button pressed just after the panel lit only keeps it awake, so
+        // a power press meant to wake it does not turn it back off.
+        if self.just_woke(now) {
+            self.stir(now);
+            return Vec::new();
+        }
+        if key == Key::Power {
+            self.sleep();
+            return Vec::new();
+        }
+        self.stir(now);
         let step = self.h as f32 / 3.0;
         match key {
             Key::Back => self.act(Action::Back, now),
@@ -1104,14 +1272,13 @@ impl App {
         x >= knob_x && x <= knob_x + track.h
     }
 
-    fn set_brightness(&mut self, t: &Theme, track: Rect, x: f32) -> Effect {
-        self.state.brightness = ((x - track.x) / track.w).clamp(0.02, 1.0);
+    fn set_brightness(&mut self, t: &Theme, track: Rect, x: f32) {
+        self.state.brightness = ((x - track.x) / track.w).clamp(MIN_BRIGHTNESS, 1.0);
         if let Some(fr) = self.frame.as_mut() {
             fr.canvas.fill_rect(track.x, track.y, track.w, track.h, t.pal.card);
             widgets::slider(&mut fr.canvas, t, track.x, track.y, track.w, self.state.brightness);
         }
         self.dirty = true;
-        Effect::Backlight(self.state.brightness)
     }
 
     fn repaint_confirm(&mut self, t: &Theme, f: &Fonts, which: Confirm, track: Rect) {
@@ -1191,9 +1358,13 @@ mod tests {
     }
 
     fn tap(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action) -> Vec<Effect> {
+        tap_at(app, f, i, action, 0)
+    }
+
+    fn tap_at(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action, now: u64) -> Vec<Effect> {
         let (x, y) = spot(app, f, i, action);
-        let mut fx = app.touch(Touch::Down(x, y), f, 0);
-        fx.extend(app.touch(Touch::Up, f, 0));
+        let mut fx = app.touch(Touch::Down(x, y), f, now);
+        fx.extend(app.touch(Touch::Up, f, now));
         fx
     }
 
@@ -1271,7 +1442,7 @@ mod tests {
         assert!(!matches!(app.drag, Drag::Edge { .. }), "no cue");
         app.touch(Touch::Up, &f, 24);
         assert_eq!(app.screen(), Screen::Home);
-        assert_eq!(app.deadline(24), None, "nothing left on screen to settle");
+        assert_eq!(app.deadline(24), app.idle_due(), "nothing left on screen to settle");
     }
 
     #[test]
@@ -1288,7 +1459,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::Reboot, "pulled back in, it does not go back");
         assert_eq!(app.deadline(40), Some(0), "the cue is sinking back");
         app.tick(1000);
-        assert_eq!(app.deadline(1000), None);
+        assert_eq!(app.deadline(1000), app.idle_due());
     }
 
     #[test]
@@ -1337,7 +1508,7 @@ mod tests {
         assert!(app.overscroll(1500) > app.overscroll(1400), "on its way back");
         app.tick(3000);
         assert_eq!(app.overscroll(3000), 0.0);
-        assert_eq!(app.deadline(3000), None);
+        assert_eq!(app.deadline(3000), app.idle_due());
     }
 
     #[test]
@@ -1428,7 +1599,7 @@ mod tests {
         for ms in (100..5000).step_by(8) {
             app.tick(lift + ms);
         }
-        assert_eq!(app.deadline(lift + 5000), None, "the glide comes to rest");
+        assert_eq!(app.deadline(lift + 5000), app.idle_due(), "the glide comes to rest");
         let rest = app.top().1;
         assert!(rest > lifted + 300.0 && rest < app.max_scroll(), "{rest}");
     }
@@ -1447,7 +1618,7 @@ mod tests {
         assert_eq!(app.top().1, app.max_scroll());
         assert!(furthest > app.theme().m.dp(8.0), "it ran on past the end: {furthest}");
         assert_eq!(app.overscroll(lift + 2000), 0.0);
-        assert_eq!(app.deadline(lift + 2000), None);
+        assert_eq!(app.deadline(lift + 2000), app.idle_due());
     }
 
     #[test]
@@ -1593,10 +1764,10 @@ mod tests {
         let mut app = App::new(Screen::Settings, W, H, PPD);
         let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Brightness).unwrap().rect;
         let y = track.centre().1 - app.top().1;
-        let fx = app.touch(Touch::Down(track.x + track.w * 0.25, y), &f, 0);
-        assert_eq!(fx, vec![Effect::Backlight(0.25)]);
-        let fx = app.touch(Touch::Move(track.x + track.w * 0.75, y + 40.0), &f, 0);
-        assert_eq!(fx, vec![Effect::Backlight(0.75)]);
+        assert!(app.touch(Touch::Down(track.x + track.w * 0.25, y), &f, 0).is_empty());
+        assert_eq!(app.panel(0), Some(0.25));
+        assert!(app.touch(Touch::Move(track.x + track.w * 0.75, y + 40.0), &f, 0).is_empty());
+        assert_eq!(app.panel(0), Some(0.75));
         app.touch(Touch::Up, &f, 0);
         assert_eq!(app.state.brightness, 0.75);
     }
@@ -1634,7 +1805,7 @@ mod tests {
         tap(&mut app, &f, &i, Action::Unavailable("备份还没实现"));
         assert_eq!(app.deadline(0), Some(TOAST_MS));
         app.tick(TOAST_MS);
-        assert_eq!(app.deadline(TOAST_MS), None);
+        assert_eq!(app.deadline(TOAST_MS), app.idle_due());
     }
 
     /// The sideload page, opened from the installing page, with the
@@ -1644,7 +1815,7 @@ mod tests {
         assert_eq!(tap(&mut app, f, i, Action::Sideload), vec![Effect::Sideload]);
         assert_eq!(app.screen(), Screen::Sideload);
         assert_eq!(app.state.install, Install::Starting);
-        app.install(Event::Waiting);
+        app.install(Event::Waiting, 0);
         app
     }
 
@@ -1661,11 +1832,11 @@ mod tests {
         assert_eq!(app.screen(), Screen::Install);
         assert_eq!(app.state.install, Install::Ending);
         // Whatever the installer was in the middle of, only its end counts.
-        app.install(Event::Checking { size: 4096 });
+        app.install(Event::Checking { size: 4096 }, 0);
         assert_eq!(app.state.install, Install::Ending);
         tap(&mut app, &f, &i, Action::Sideload);
         assert_eq!(app.screen(), Screen::Install, "no second installer while the first is ending");
-        app.install(Event::Finished(Outcome::Cancelled));
+        app.install(Event::Finished(Outcome::Cancelled), 0);
         assert_eq!(app.state.install, Install::Idle);
     }
 
@@ -1673,25 +1844,27 @@ mod tests {
     fn an_image_goes_where_it_is_sent_once_swiped() {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
-        app.install(Event::Checking { size: 201_326_592 });
+        app.install(Event::Checking { size: 201_326_592 }, 0);
         let kind = ImageKind::Boot { kernel: true, ramdisk: skyward_install::Ramdisk::Recovery };
-        app.install(Event::Image { kind, size: 201_326_592, partitions: vec!["recovery", "boot"] });
-        tap(&mut app, &f, &i, Action::FlashPartition(1));
-        tap(&mut app, &f, &i, Action::FlashSlots(Pick::Both));
+        app.install(Event::Image { kind, size: 201_326_592, partitions: vec!["recovery", "boot"] }, 0);
+        // The image lit the panel, so the user looks and taps past the wake
+        // guard.
+        tap_at(&mut app, &f, &i, Action::FlashPartition(1), 1000);
+        tap_at(&mut app, &f, &i, Action::FlashSlots(Pick::Both), 1000);
         let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Flash)).unwrap().rect;
         let y = track.centre().1 - app.top().1;
-        app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
-        app.touch(Touch::Move(track.x + track.w, y), &f, 0);
-        assert_eq!(app.touch(Touch::Up, &f, 0), vec![Effect::Flash { partition: "boot", pick: Pick::Both }]);
+        app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 1000);
+        app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
+        assert_eq!(app.touch(Touch::Up, &f, 1000), vec![Effect::Flash { partition: "boot", pick: Pick::Both }]);
         assert_eq!(app.state.install, Install::Flashing { partition: "boot", stage: None });
-        app.install(Event::Progress(Stage::Flashing { done: 10, total: 40 }));
+        app.install(Event::Progress(Stage::Flashing { done: 10, total: 40 }), 1000);
         assert_eq!(app.state.install, Install::Flashing { partition: "boot", stage: Some(Stage::Flashing { done: 10, total: 40 }) });
-        app.key(Key::Back, 0);
+        app.key(Key::Back, 1000);
         assert_eq!(app.screen(), Screen::Sideload, "a partition being written keeps the page");
-        app.install(Event::Finished(Outcome::Flashed { partition: "boot", slots: vec![Slot::A, Slot::B] }));
+        app.install(Event::Finished(Outcome::Flashed { partition: "boot", slots: vec![Slot::A, Slot::B] }), 1000);
         assert!(matches!(app.state.install, Install::Finished { damage: None, .. }), "a flash that worked broke nothing");
-        assert_eq!(tap(&mut app, &f, &i, Action::RebootTo(Target::System)), vec![Effect::Reboot(Target::System)]);
-        app.key(Key::Back, 0);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), 2000), vec![Effect::Reboot(Target::System)]);
+        app.key(Key::Back, 2000);
         assert_eq!(app.screen(), Screen::Install);
         assert_eq!(app.state.install, Install::Idle);
     }
@@ -1700,20 +1873,20 @@ mod tests {
     fn an_update_shows_its_steps_and_cannot_be_left() {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
-        app.install(Event::Checking { size: 7_103_043_868 });
-        app.install(Event::Installing { version: Some("OS3.0.306.0.WMACNXM".into()) });
-        app.install(Event::Overwriting);
-        app.install(Event::Progress(Stage::Writing { done: 1 << 30, total: 7 << 30 }));
+        app.install(Event::Checking { size: 7_103_043_868 }, 0);
+        app.install(Event::Installing { version: Some("OS3.0.306.0.WMACNXM".into()) }, 0);
+        app.install(Event::Overwriting, 0);
+        app.install(Event::Progress(Stage::Writing { done: 1 << 30, total: 7 << 30 }), 0);
         assert!(matches!(app.state.install, Install::Updating { overwriting: true, stage: Some(_), .. }));
         let shown = app.frame(&f, &i, DataState::Unmounted).hits.len();
         assert_eq!(shown, 0, "nothing on the page to tap while installing");
         app.key(Key::Back, 0);
         assert_eq!(app.screen(), Screen::Sideload);
         assert_eq!(app.deadline(0), Some(TOAST_MS), "it says why");
-        app.install(Event::Finished(Outcome::Failed(Failure::Engine(9))));
+        app.install(Event::Finished(Outcome::Failed(Failure::Engine(9))), 0);
         assert!(matches!(app.state.install, Install::Finished { damage: Some(Damage::System), .. }));
-        // Sending again starts over on the same page.
-        assert_eq!(tap(&mut app, &f, &i, Action::Sideload), vec![Effect::Sideload]);
+        // Sending again starts over on the same page, past the wake guard.
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Sideload, 1000), vec![Effect::Sideload]);
         assert_eq!(app.state.install, Install::Starting);
         assert_eq!(app.screen(), Screen::Sideload);
     }
@@ -1722,13 +1895,13 @@ mod tests {
     fn a_refused_package_or_an_update_that_kept_the_system_broke_nothing() {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
-        app.install(Event::Checking { size: 10 });
-        app.install(Event::Finished(Outcome::Refused(Refusal::Unknown)));
+        app.install(Event::Checking { size: 10 }, 0);
+        app.install(Event::Finished(Outcome::Refused(Refusal::Unknown)), 0);
         assert_eq!(app.state.install, Install::Finished { outcome: Outcome::Refused(Refusal::Unknown), damage: None });
-        tap(&mut app, &f, &i, Action::Sideload);
-        app.install(Event::Waiting);
-        app.install(Event::Installing { version: None });
-        app.install(Event::Finished(Outcome::Failed(Failure::Engine(21))));
+        tap_at(&mut app, &f, &i, Action::Sideload, 1000);
+        app.install(Event::Waiting, 1000);
+        app.install(Event::Installing { version: None }, 1000);
+        app.install(Event::Finished(Outcome::Failed(Failure::Engine(21))), 1000);
         assert!(matches!(app.state.install, Install::Finished { damage: None, .. }));
     }
 
@@ -1736,10 +1909,10 @@ mod tests {
     fn an_image_that_failed_part_way_names_its_partition() {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
-        app.install(Event::Image { kind: ImageKind::Dtbo, size: 1 << 20, partitions: vec!["dtbo"] });
+        app.install(Event::Image { kind: ImageKind::Dtbo, size: 1 << 20, partitions: vec!["dtbo"] }, 0);
         app.state.install = Install::Flashing { partition: "dtbo", stage: None };
-        app.install(Event::Progress(Stage::Flashing { done: 1 << 20, total: 4 << 20 }));
-        app.install(Event::Finished(Outcome::Failed(Failure::Disconnected)));
+        app.install(Event::Progress(Stage::Flashing { done: 1 << 20, total: 4 << 20 }), 0);
+        app.install(Event::Finished(Outcome::Failed(Failure::Disconnected)), 0);
         assert!(matches!(app.state.install, Install::Finished { damage: Some(Damage::Partition("dtbo")), .. }));
     }
 
@@ -1758,8 +1931,209 @@ mod tests {
     #[test]
     fn power_key_turns_the_panel_off_and_on() {
         let mut app = App::new(Screen::Home, W, H, PPD);
-        assert_eq!(app.key(Key::Power, 0), vec![Effect::Display(false)]);
+        assert!(app.key(Key::Power, 0).is_empty());
+        assert_eq!(app.panel(0), None);
+        assert!(app.key(Key::Power, 10).is_empty());
+        assert_eq!(app.panel(10), Some(0.5));
+    }
+
+    /// With the default two minutes, when the panel dims and when it goes
+    /// off.
+    const DIMS: u64 = 113_000;
+    const OFF: u64 = 120_000;
+
+    #[test]
+    fn left_alone_the_panel_dims_then_goes_off() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.tick(0);
+        assert_eq!(app.deadline(0), Some(DIMS));
+        app.tick(DIMS - 1);
+        assert_eq!(app.panel(DIMS - 1), Some(0.5));
+        app.tick(DIMS);
+        assert_eq!(app.deadline(DIMS), Some(DIMS + BACKLIGHT_STEP_MS), "the backlight steps down a frame at a time");
+        let midway = app.panel(DIMS + 250).unwrap();
+        assert!(midway < 0.5 && midway > dim_level(0.5), "{midway}");
+        assert_eq!(app.panel(DIMS + 500), Some(dim_level(0.5)));
+        assert_eq!(app.deadline(DIMS + 500), Some(OFF), "dim until it goes off");
+        app.tick(OFF);
+        assert_eq!(app.panel(OFF), None);
         assert!(!app.display_on());
-        assert_eq!(app.key(Key::Power, 0), vec![Effect::Display(true)]);
+        assert_eq!(app.deadline(OFF), None, "nothing to wait for on a dark panel");
+    }
+
+    #[test]
+    fn time_before_the_first_tick_does_not_count_as_idle() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        // The UI started long after boot; the idle clock begins at the
+        // first tick, not at zero.
+        app.tick(5_000_000);
+        assert_eq!(app.panel(5_000_000), Some(0.5));
+        assert_eq!(app.deadline(5_000_000), Some(5_000_000 + DIMS));
+        app.tick(5_000_000 + OFF);
+        assert_eq!(app.panel(5_000_000 + OFF), None);
+    }
+
+    #[test]
+    fn the_dim_level_sits_below_the_brightness_set() {
+        assert_eq!(dim_level(1.0), DIM_CEILING);
+        assert_eq!(dim_level(0.06), MIN_BRIGHTNESS);
+        assert_eq!(dim_level(0.03), MIN_BRIGHTNESS);
+        assert_eq!(dim_level(0.01), 0.01, "never brighter than the level set");
+        assert_eq!(dim_span(15_000), 3000);
+        assert_eq!(dim_span(120_000), DIM_MS);
+    }
+
+    #[test]
+    fn a_touch_while_dim_brightens_and_still_counts() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.tick(0);
+        app.tick(DIMS);
+        assert_eq!(app.panel(DIMS + 500), Some(dim_level(0.5)));
+        let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
+        app.touch(Touch::Down(x, y), &f, DIMS + 600);
+        app.touch(Touch::Up, &f, DIMS + 650);
+        assert_eq!(app.screen(), Screen::Settings, "the tap counts");
+        assert_eq!(app.panel(DIMS + 800), Some(0.5), "back to full brightness");
+        assert_eq!(app.deadline(DIMS + 800), Some(DIMS + 650 + DIMS), "the wait starts over");
+    }
+
+    #[test]
+    fn a_touch_on_the_dark_panel_only_lights_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
+        app.key(Key::Power, 0);
+        assert!(app.touch(Touch::Down(x, y), &f, 100).is_empty());
+        assert_eq!(app.panel(100), Some(0.5));
+        assert!(app.touch(Touch::Move(x, y - 300.0), &f, 120).is_empty());
+        assert!(app.touch(Touch::Up, &f, 140).is_empty());
+        assert_eq!(app.screen(), Screen::Home, "the waking tap pressed nothing");
+        assert_eq!(app.top().1, 0.0, "nor scrolled the page");
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 600);
+        assert_eq!(app.screen(), Screen::Settings, "a tap past the guard does");
+    }
+
+    #[test]
+    fn a_key_lights_the_dark_panel_and_does_nothing_else() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Settings, &f, &i);
+        app.key(Key::Power, 0);
+        assert!(app.key(Key::Back, 10).is_empty());
+        assert!(app.display_on());
+        assert_eq!(app.screen(), Screen::Settings, "back did not go back");
+    }
+
+    #[test]
+    fn a_stray_press_just_after_the_panel_lights_only_keeps_it_awake() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        app.key(Key::Power, 0);
+        // A key wakes the panel; the next, within the guard, does not sleep
+        // it again or act.
+        app.key(Key::Power, 100);
+        assert!(app.display_on());
+        assert!(app.key(Key::Power, 300).is_empty());
+        assert!(app.display_on(), "a second power press did not turn it off");
+        assert!(app.key(Key::Back, 350).is_empty());
+        assert_eq!(app.screen(), Screen::Reboot, "back did not go back");
+        // Past the guard, power turns it off as usual.
+        app.key(Key::Power, 600);
+        assert!(!app.display_on());
+    }
+
+    #[test]
+    fn a_stray_touch_just_after_an_install_lights_the_panel_presses_nothing() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.key(Key::Power, 0);
+        app.install(Event::Finished(Outcome::Installed { slot: Slot::A }), 100);
+        assert!(app.display_on(), "the finished install lit the panel");
+        // A finger reaching for the phone lands on 重启到系统; within the
+        // guard it only keeps the panel awake.
+        assert!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), 200).is_empty());
+        assert_eq!(app.screen(), Screen::Sideload, "the stray tap did not reboot");
+        // Past the guard the same tap reboots.
+        assert_eq!(
+            tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), 700),
+            vec![Effect::Reboot(Target::System)]
+        );
+    }
+
+    #[test]
+    fn a_finger_held_as_the_panel_goes_off_lets_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Reboot, W, H, PPD);
+        let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Reboot)).unwrap().rect;
+        let y = track.centre().1;
+        app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
+        app.touch(Touch::Move(track.x + track.w * 0.6, y), &f, 10);
+        assert!(app.state.confirm > 0.0);
+        app.key(Key::Power, 20);
+        assert_eq!(app.state.confirm, 0.0, "the knob is back at the start");
+        app.touch(Touch::Move(track.x + track.w, y), &f, 30);
+        assert!(app.touch(Touch::Up, &f, 40).is_empty(), "no reboot from a dark panel");
+        assert!(!app.display_on());
+    }
+
+    #[test]
+    fn never_leaves_the_panel_on() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.screen_off = SCREEN_OFF.iter().position(Option::is_none).unwrap();
+        app.tick(0);
+        assert_eq!(app.deadline(0), None);
+        let day = 24 * 3600 * 1000;
+        app.tick(day);
+        assert_eq!(app.panel(day), Some(0.5));
+    }
+
+    #[test]
+    fn the_installer_lights_the_panel_when_it_needs_the_user() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.key(Key::Power, 0);
+        app.install(Event::Checking { size: 1 << 20 }, 10);
+        assert!(!app.display_on(), "reading the package does not light it");
+        app.install(Event::Image { kind: ImageKind::Dtbo, size: 1 << 20, partitions: vec!["dtbo"] }, 20);
+        assert!(app.display_on(), "an image waiting for its partition does");
+        assert_eq!(app.deadline(20), Some(20 + DIMS));
+        app.state.install = Install::Flashing { partition: "dtbo", stage: None };
+        app.key(Key::Power, 500);
+        app.install(Event::Progress(Stage::Flashing { done: 1, total: 2 }), 510);
+        assert!(!app.display_on(), "progress does not");
+        app.install(Event::Finished(Outcome::Flashed { partition: "dtbo", slots: vec![Slot::A] }), 520);
+        assert!(app.display_on(), "the end does");
+    }
+
+    #[test]
+    fn an_install_ending_after_its_page_was_left_keeps_the_panel_dark() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        assert_eq!(app.key(Key::Back, 0), vec![Effect::Cancel]);
+        app.key(Key::Power, 10);
+        app.install(Event::Finished(Outcome::Cancelled), 20);
+        assert!(!app.display_on());
+        assert_eq!(app.state.install, Install::Idle);
+    }
+
+    #[test]
+    fn choosing_how_long_the_screen_stays_on() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Settings, &f, &i);
+        tap(&mut app, &f, &i, Action::Open(Screen::ScreenOff));
+        assert_eq!(app.screen(), Screen::ScreenOff);
+        let frame = app.frame(&f, &i, DataState::Unmounted);
+        assert_eq!(frame.title, "息屏时间");
+        assert!(frame.back);
+        // The choices sit in order, top to bottom.
+        let actions: Vec<Action> = frame.hits.iter().map(|h| h.action).collect();
+        assert_eq!(actions, (0..SCREEN_OFF.len()).map(Action::ScreenOff).collect::<Vec<_>>());
+        tap(&mut app, &f, &i, Action::ScreenOff(0));
+        assert_eq!(app.state.screen_off, 0);
+        assert_eq!(app.screen(), Screen::ScreenOff, "the page stays");
+        // Fifteen seconds, dim for the last three.
+        assert_eq!(app.deadline(0), Some(12_000));
+        app.tick(15_000);
+        assert!(!app.display_on());
     }
 }

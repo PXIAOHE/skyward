@@ -1,4 +1,4 @@
-use crate::app::{Action, Confirm, Damage, Frame, HeroArt, Hit, Install, Pick, Screen, State, Switch, Target, TARGETS};
+use crate::app::{Action, Confirm, Damage, Frame, HeroArt, Hit, Install, Pick, Screen, State, Switch, Target, SCREEN_OFF, TARGETS};
 use crate::canvas::Canvas;
 use crate::color::Rgba;
 use crate::fmt;
@@ -40,6 +40,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Sideload => sideload(cx),
         Screen::About => about(cx),
         Screen::Specs => specs(cx),
+        Screen::ScreenOff => screen_off(cx),
     }
 }
 
@@ -163,10 +164,11 @@ pub fn settings(cx: &Ctx) -> Frame {
     let themes = widgets::theme_picker(&mut c, t, f, top + t.m.dp(8.9));
     out.extend(hits(&themes.rows, &[Action::Theme { dark: false }, Action::Theme { dark: true }]));
     let mut y = widgets::section(&mut c, t, f, themes.bottom, "亮度");
-    let slider = widgets::slider_card(&mut c, t, f, y, "屏幕亮度", s.brightness, Some(Row::new("息屏时间").trail(Trail::Value("2 分钟"))));
+    let off = fmt::screen_off(SCREEN_OFF[s.screen_off]);
+    let slider = widgets::slider_card(&mut c, t, f, y, "屏幕亮度", s.brightness, Some(Row::new("息屏时间").trail(Trail::Value(&off))));
     out.push(Hit { rect: slider.track, action: Action::Brightness });
     if let Some(r) = slider.below {
-        out.push(Hit { rect: r, action: Action::Unavailable("息屏时间还不能修改") });
+        out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
     y = widgets::section(&mut c, t, f, slider.bottom, "通用");
     let general = widgets::list(&mut c, t, f, y, &[
@@ -186,6 +188,29 @@ pub fn settings(cx: &Ctx) -> Frame {
     let about = widgets::list(&mut c, t, f, y, &[Row::new("关于本机").trail(Trail::Value(VERSION))]);
     out.extend(hits(&about.rows, &[Action::Open(Screen::About)]));
     Frame { canvas: fit(c, t, about.bottom), hits: out, title: "设置", back: true, header: true, content_top: top, hero: None, pattern: None }
+}
+
+/// How long the screen stays on with nothing touched, opened from the
+/// settings.
+pub fn screen_off(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = page(t);
+    let top = t.m.content_top;
+    let labels = SCREEN_OFF.map(fmt::screen_off);
+    let rows: Vec<Row> = labels.iter().enumerate().map(|(k, label)| Row::new(label).trail(Trail::Check(s.screen_off == k))).collect();
+    let times = widgets::list(&mut c, t, f, top, &rows);
+    let picks: Vec<Action> = (0..SCREEN_OFF.len()).map(Action::ScreenOff).collect();
+    let y = widgets::footnote(
+        &mut c,
+        t,
+        f,
+        times.bottom,
+        "超过所选时间没有操作，屏幕会先变暗，再熄灭。熄灭后轻触屏幕或按任意键即可点亮；需要选择分区或安装结束时，屏幕也会自动点亮。",
+    );
+    if SCREEN_OFF[s.screen_off].is_none() {
+        widgets::footnote(&mut c, t, f, y, "屏幕会一直亮着，同一画面显示太久会留下残影。");
+    }
+    Frame { canvas: c, hits: hits(&times.rows, &picks), title: "息屏时间", back: true, header: true, content_top: top, hero: None, pattern: None }
 }
 
 /// About this device, modelled on the stock「我的设备」: the wordmark and
