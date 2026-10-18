@@ -3,8 +3,8 @@ use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
 use skyward_ui::app::{
-    Action, App, BackupEntry, Choice, Damage, FileKind, FileRow, Install, MountFailure, MountRow, Pick, Screen, Touch, UsbLink,
-    SCREEN_OFF,
+    Action, App, Asked, BackupEntry, Choice, Damage, FileKind, FileRow, Install, MountFailure, MountRow, Part, Pick, Screen,
+    Touch, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
@@ -187,7 +187,8 @@ fn main() -> Result<()> {
         BackupEntry { made: 1_792_348_260, size: 6_214_000_000, place: 0, parts: [true, true, false, true] },
         BackupEntry { made: 1_791_830_000, size: 141_000_000, place: 1, parts: [true, false, false, false] },
     ];
-    let pages: [PageShot; 25] = [
+    let reset_asked = || Asked { reason: Some("factroy_reset(1217)".into()), ..Asked::default() };
+    let pages: [PageShot; 30] = [
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
@@ -223,6 +224,30 @@ fn main() -> Result<()> {
         ("69-fastboot-dark-unplugged", Screen::Fastboot, true, &|app| {
             app.set_fastboot(true, UsbLink::Unplugged);
             app.state.fastboot.focus = 1;
+        }),
+        ("70-erase-light", Screen::Erase, false, &|app| {
+            app.set_asked(reset_asked());
+            app.erase_started(true, vec![Part::Data, Part::Metadata]);
+            app.erase_at(Part::Metadata);
+        }),
+        ("71-erase-dark-failed", Screen::Erase, true, &|app| {
+            app.set_asked(reset_asked());
+            app.erase_started(true, vec![Part::Data, Part::Metadata]);
+            app.erase_at(Part::Metadata);
+            app.erase_ended(
+                Err("/system/bin/make_f2fs -g android -O project_quota,extra_attr /dev/block/by-name/metadata ended with exit status: 1: Error: Device size is not sufficient for F2FS volume".into()),
+                0,
+            );
+        }),
+        ("72-erase-light-no-cache", Screen::Erase, false, &|app| {
+            app.erase_started(false, Vec::new());
+            app.erase_ended(Err("这台手机没有 cache 分区，没有要清除的缓存。".into()), 0);
+        }),
+        ("73-cant-start-light", Screen::CantStart, false, &|app| {
+            app.set_asked(Asked { reason: Some("RescueParty".into()), ..Asked::default() })
+        }),
+        ("74-unhandled-dark", Screen::Unhandled, true, &|app| {
+            app.set_asked(Asked { unhandled: Some("--update_package=/data/ota_package/update.zip".into()), ..Asked::default() })
         }),
     ];
     for (name, screen, dark, set) in pages {

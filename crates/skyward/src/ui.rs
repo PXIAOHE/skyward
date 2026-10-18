@@ -1,13 +1,15 @@
 use crate::haptics::Haptics;
 use crate::input::{monotonic_ms, Event, Inputs};
 use crate::services;
+use crate::wipe::{self, Eraser, Step};
 use anyhow::{anyhow, ensure, Context, Result};
 use skyward_config::{DeviceConfig, Service};
 use skyward_info::DataState;
 use skyward_install::{Detach, Installer};
+use skyward_sys::bcb::{self, Work};
 use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
-use skyward_ui::app::{App, Effect, FileKind, FileRow, Keys, MountFailure, Screen, Target, UsbLink};
+use skyward_ui::app::{App, Asked, Effect, FileKind, FileRow, Keys, MountFailure, Part, Screen, Target, UsbLink};
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
 use std::collections::BTreeSet;
@@ -19,6 +21,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// How long init may take to hand the USB port to another function: the
 /// program behind the new one has to start and get ready first.
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the page shows that the work the system asked for is done
+/// before the phone starts the system or powers off.
+const LEAVE_AFTER_MS: u64 = 1500;
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
@@ -138,6 +144,63 @@ fn fastboot_status() -> Result<(bool, UsbLink)> {
         _ => UsbLink::Connecting,
     };
     Ok((running, link))
+}
+
+/// What a request from misc shows on the pages that answer it.
+fn asked(request: &bcb::Request) -> Asked {
+    Asked {
+        reason: request.reason.clone(),
+        shutdown_after: request.shutdown_after,
+        unhandled: match &request.work {
+            Work::Unsupported(what) => Some(what.clone()),
+            _ => None,
+        },
+    }
+}
+
+/// The page's name for a part erasing goes through.
+fn part(step: Step) -> Part {
+    match step {
+        Step::Data => Part::Data,
+        Step::Cache => Part::Cache,
+        Step::Metadata => Part::Metadata,
+    }
+}
+
+/// Start erasing all user data, its page following it; why it cannot
+/// start ends it at once, on the same page.
+fn factory_reset(app: &mut App, keep_memtag_mode: bool) -> Result<Eraser> {
+    match wipe::factory_reset() {
+        Ok(plan) => {
+            app.erase_started(true, plan.steps().into_iter().map(part).collect());
+            Eraser::start(move |at| plan.carry_out(keep_memtag_mode, at))
+        }
+        Err(e) => {
+            app.erase_started(true, Vec::new());
+            Eraser::start(move |_| Err(e))
+        }
+    }
+}
+
+/// Start erasing the cache partition, its page following it.
+fn cache_wipe(app: &mut App) -> Result<Eraser> {
+    match wipe::cache() {
+        Ok(Some(cache)) => {
+            app.erase_started(false, vec![Part::Cache]);
+            Eraser::start(move |at| {
+                at(Step::Cache);
+                wipe::remake(&cache)
+            })
+        }
+        Ok(None) => {
+            app.erase_started(false, Vec::new());
+            Eraser::start(|_| Err(anyhow!("the phone has no cache partition to erase")))
+        }
+        Err(e) => {
+            app.erase_started(false, Vec::new());
+            Eraser::start(move |_| Err(e))
+        }
+    }
 }
 
 /// What the pages act on: a touch or a key, or what a program asked on the
@@ -329,7 +392,9 @@ fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
     Ok(())
 }
 
-pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Option<&Path>) -> Result<()> {
+/// Run the pages. What `request`, read from misc, asks for decides the
+/// first of them; asking for nothing, they start at `start`.
+pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, start: Screen, dump: Option<&Path>) -> Result<()> {
     if cfg.display.density == 0 {
         return Err(anyhow!("{}: [display] density is required to lay out the UI", cfg.device.codename));
     }
@@ -343,7 +408,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
     let control = Control::open()?;
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
     let mut backlight = Backlight::open()?;
-    let mut app = App::new(start, w, h, cfg.display.density as f32 / 160.0);
+    let first = match &request.work {
+        Work::Fastboot => Screen::Fastboot,
+        Work::PromptWipeData => Screen::CantStart,
+        Work::Unsupported(_) => Screen::Unhandled,
+        Work::Menu | Work::Exit | Work::WipeData | Work::WipeCache | Work::Sideload { .. } => start,
+    };
+    let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
+    app.set_asked(asked(&request));
     // Keep the level the boot splash had, so the panel does not jump, or
     // the slider's top when it was brighter; a dark panel gets the
     // slider's default.
@@ -371,7 +443,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
     // Started for fastboot, the port goes to the phone's own fastbootd. The
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
-    let mut fastboot = start == Screen::Fastboot;
+    let mut fastboot = first == Screen::Fastboot;
     let mut port_at = Instant::now();
     if fastboot {
         if let Err(e) = usb("fastboot") {
@@ -381,8 +453,32 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
         let (running, link) = fastboot_status()?;
         app.set_fastboot(running, link);
     }
+    // Work the request asks for that goes on keeps the request in misc,
+    // so a restart halfway comes back to it, until it is done or the user
+    // leaves it for somewhere else.
+    let misc = bcb::misc();
+    let mut kept = request.work.lasts();
+    let mut eraser: Option<Eraser> = None;
+    match &request.work {
+        Work::WipeData => eraser = Some(factory_reset(&mut app, request.keep_memtag_mode)?),
+        Work::WipeCache => eraser = Some(cache_wipe(&mut app)?),
+        Work::Sideload { .. } => {
+            app.start_sideload();
+            installer = Some(Installer::start(detach(cfg.services.clone()))?);
+        }
+        Work::Menu | Work::Exit | Work::Fastboot | Work::PromptWipeData | Work::Unsupported(_) => {}
+    }
+    // Once the work the system asked for is done, the page shows it for a
+    // moment; then the phone starts the system, or powers off where the
+    // request says to.
+    let leave = if request.shutdown_after { Target::PowerOff } else { Target::System };
+    let mut leave_at: Option<u64> = None;
     loop {
         let now = monotonic_ms();
+        if leave_at.is_some_and(|at| now >= at) {
+            leave_at = None;
+            power(leave)?;
+        }
         app.tick(now);
         let time = clock()?;
         if time != shown_clock {
@@ -445,10 +541,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
         if let Some(c) = &control {
             fds.push(c.fd());
         }
+        if let Some(e) = &eraser {
+            fds.push(e.fd());
+        }
         wait(&fds, timeout)?;
         let now = monotonic_ms();
-        // What the installer told comes first, so a touch acts on the page
-        // as it now stands.
+        // What the installer and the eraser told comes first, so a touch
+        // acts on the page as it now stands.
         if let Some(i) = &installer {
             for ev in i.events() {
                 let finished = matches!(ev, skyward_install::Event::Finished(_));
@@ -456,21 +555,58 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
                 app.install(ev, now);
                 if finished {
                     installer = None;
+                    // A sideload the system asked for is done with however
+                    // it went; asked to, the phone then leaves on its own.
+                    if let Work::Sideload { auto_reboot } = request.work {
+                        if kept {
+                            bcb::clear(&misc)?;
+                            kept = false;
+                        }
+                        if auto_reboot {
+                            leave_at = Some(now + LEAVE_AFTER_MS);
+                        }
+                    }
                 }
             }
         }
+        let mut erased = false;
+        if let Some(e) = &eraser {
+            for ev in e.events() {
+                match ev {
+                    wipe::Event::At(step) => app.erase_at(part(step)),
+                    wipe::Event::Ended(outcome) => {
+                        skyward_sys::kmsg(&format!("erasing ended: {outcome:?}"))?;
+                        // As with the phone's own recovery, the request is
+                        // done with either way, so a restart starts the
+                        // system rather than erasing again.
+                        if kept {
+                            bcb::clear(&misc)?;
+                            kept = false;
+                        }
+                        if outcome.is_ok() {
+                            leave_at = Some(now + LEAVE_AFTER_MS);
+                        }
+                        app.erase_ended(outcome, now);
+                        erased = true;
+                    }
+                }
+            }
+        }
+        if erased {
+            eraser = None;
+        }
         // Then what programs asked on the recovery socket, each answered as
         // the recovery stands when its turn comes.
-        let asked = match &control {
+        let requests = match &control {
             Some(c) => c.requests()?,
             None => Vec::new(),
         };
-        let incoming = asked.into_iter().map(Incoming::Asked).chain(inputs.read()?.into_iter().map(Incoming::Input));
+        let incoming = requests.into_iter().map(Incoming::Asked).chain(inputs.read()?.into_iter().map(Incoming::Input));
         for came in incoming {
             let effects = match came {
-                Incoming::Asked(request) => {
-                    skyward_sys::kmsg(&format!("asked on the recovery socket: {request:?}"))?;
-                    answer(request, fastboot)
+                Incoming::Asked(asked) => {
+                    skyward_sys::kmsg(&format!("asked on the recovery socket: {asked:?}"))?;
+                    answer(asked, fastboot)
                 }
                 Incoming::Input(Event::Touch(t, at)) => app.touch(t, &fonts, at),
                 Incoming::Input(Event::Key(k)) => app.key(k, now),
@@ -478,7 +614,25 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, start: Screen, dump: Op
             for fx in effects {
                 eprintln!("effect {fx:?}");
                 match fx {
-                    Effect::Reboot(target) => power(target)?,
+                    // Leaving is the user's answer to whatever the request
+                    // still kept in misc asked.
+                    Effect::Reboot(target) => {
+                        if kept {
+                            bcb::clear(&misc)?;
+                            kept = false;
+                        }
+                        power(target)?
+                    }
+                    Effect::Dismiss => {
+                        if kept {
+                            bcb::clear(&misc)?;
+                            kept = false;
+                        }
+                    }
+                    Effect::FactoryReset => {
+                        ensure!(eraser.is_none(), "erasing is under way already");
+                        eraser = Some(factory_reset(&mut app, request.keep_memtag_mode)?);
+                    }
                     Effect::Haptic => {
                         if let Some(h) = &mut haptics {
                             h.click()?;

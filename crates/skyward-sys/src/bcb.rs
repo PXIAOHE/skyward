@@ -189,15 +189,6 @@ pub fn read(misc: &Path) -> Result<Bcb> {
     Bcb::parse(&raw)
 }
 
-/// Read the boot request and clear it. The caller keeps the request; any
-/// later reboot (adb reboot, the power key, a crash) then boots what its
-/// reboot reason names instead of coming back to recovery.
-pub fn take(misc: &Path) -> Result<Bcb> {
-    let bcb = read(misc)?;
-    clear(misc)?;
-    Ok(bcb)
-}
-
 /// Zero the bootloader message so the next boot follows its reboot reason
 /// instead of a pending command.
 pub fn clear(misc: &Path) -> Result<()> {
@@ -347,18 +338,5 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(after[..SIZE].iter().all(|&b| b == 0));
         assert!(after[SIZE..].iter().all(|&b| b == 0xff));
-    }
-
-    #[test]
-    fn take_returns_the_request_and_clears_it() {
-        let path = std::env::temp_dir().join(format!("skyward-bcb-take-{}", std::process::id()));
-        let mut misc = message(b"boot-recovery", b"recovery\n--fastboot\n");
-        misc.extend_from_slice(&[0xffu8; SIZE]);
-        std::fs::write(&path, &misc).unwrap();
-        let bcb = take(&path).unwrap();
-        let after = read(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(bcb, Bcb { command: "boot-recovery".into(), args: vec!["--fastboot".into()] });
-        assert_eq!(after, Bcb::default());
     }
 }

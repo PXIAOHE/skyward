@@ -61,6 +61,15 @@ pub enum Screen {
     /// the touchscreen runs from are left out while fastbootd rewrites
     /// super.
     Fastboot,
+    /// Erasing what the system asked to erase before the recovery started,
+    /// all user data or the cache alone: how far it has come, and where to
+    /// go if it stops.
+    Erase,
+    /// The system could not start Android and asks whether to erase all
+    /// user data, which may be what keeps it from starting.
+    CantStart,
+    /// Something the system asked of the recovery that it does not do.
+    Unhandled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +171,41 @@ pub enum Confirm {
     Slot,
     /// Open the data partition with the keys the phone keeps for it.
     Decrypt,
+    /// Erase all user data, as the system offered when it could not start.
+    FactoryReset,
+}
+
+/// A part of the phone that erasing goes through, in the order it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Data,
+    Cache,
+    /// /metadata, which holds the key the data partition is opened with.
+    Metadata,
+}
+
+/// Erasing as its page shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Erase {
+    /// All user data, rather than the cache alone.
+    pub reset: bool,
+    pub parts: Vec<Part>,
+    /// How many of `parts` are erased; the one after them is under way.
+    pub done: usize,
+    /// How erasing ended: done, or why it stopped.
+    pub outcome: Option<Result<(), String>>,
+}
+
+/// What the system asked of the recovery before it started, as the pages
+/// that answer it show it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Asked {
+    /// Why, as the system put it.
+    pub reason: Option<String>,
+    /// Power off once the work is done, instead of starting the system.
+    pub shutdown_after: bool,
+    /// Work the recovery does not do, as it was asked.
+    pub unhandled: Option<String>,
 }
 
 /// Which slots an image goes to, by the slot the phone runs from.
@@ -305,6 +349,9 @@ pub enum Action {
     /// Stop fastboot and bring the recovery's own pages up, without
     /// restarting.
     EnterRecovery,
+    /// Leave what the system asked of the recovery for the recovery's own
+    /// pages.
+    Dismiss,
     /// Keep the screen on for this choice in [`SCREEN_OFF`].
     ScreenOff(usize),
     /// Tick or untick a part of the backup, by its place in
@@ -508,6 +555,8 @@ pub struct State {
     /// The entry the file page describes.
     pub file: Option<FileRow>,
     pub fastboot: Fastboot,
+    pub erase: Erase,
+    pub asked: Asked,
 }
 
 impl Default for State {
@@ -546,6 +595,8 @@ impl Default for State {
             listed: 0,
             file: None,
             fastboot: Fastboot { running: false, link: UsbLink::Unplugged, focus: 0 },
+            erase: Erase::default(),
+            asked: Asked::default(),
         }
     }
 }
@@ -595,6 +646,12 @@ pub enum Effect {
     /// recovery runs from the slot's partitions, then show its pages with
     /// [`App::enter_recovery`].
     EnterRecovery,
+    /// Erase all user data, as a factory reset does, telling how it goes
+    /// with [`App::erase_at`] and [`App::erase_ended`].
+    FactoryReset,
+    /// Forget what the system asked of the recovery, so that the next start
+    /// goes where its reboot reason says.
+    Dismiss,
 }
 
 enum Drag {
@@ -1131,6 +1188,48 @@ impl App {
         self.refresh();
     }
 
+    /// The system asked for sideload before the recovery started: the page
+    /// opens over the home page, already receiving.
+    pub fn start_sideload(&mut self) {
+        self.state.install = Install::Starting;
+        self.open(Screen::Sideload);
+    }
+
+    /// What the system asked of the recovery before it started.
+    pub fn set_asked(&mut self, asked: Asked) {
+        self.state.asked = asked;
+        self.refresh();
+    }
+
+    /// Erasing has begun, going through `parts`: its page is the only one
+    /// until it ends.
+    pub fn erase_started(&mut self, reset: bool, parts: Vec<Part>) {
+        self.state.erase = Erase { reset, parts, done: 0, outcome: None };
+        self.stack = vec![(Screen::Erase, 0.0)];
+        self.settle_page();
+        self.refresh();
+    }
+
+    /// Erasing has come to `part`.
+    pub fn erase_at(&mut self, part: Part) {
+        let erase = &mut self.state.erase;
+        erase.done = erase.parts.iter().position(|&p| p == part).expect("erasing comes only to the parts it set out with");
+        self.refresh();
+    }
+
+    /// Erasing has ended; one that stopped wakes the panel, since what
+    /// comes next is the user's to choose.
+    pub fn erase_ended(&mut self, outcome: Result<(), String>, now: u64) {
+        let erase = &mut self.state.erase;
+        if outcome.is_ok() {
+            erase.done = erase.parts.len();
+        } else {
+            self.wake(now);
+        }
+        self.state.erase.outcome = Some(outcome);
+        self.refresh();
+    }
+
     /// The runtime could not mount or unmount a partition: the mount page
     /// says so, and why.
     pub fn mount_failed(&mut self, failure: MountFailure) {
@@ -1522,6 +1621,12 @@ impl App {
             }
             Action::RebootTo(target) => return vec![Effect::Reboot(target)],
             Action::EnterRecovery => return vec![Effect::EnterRecovery],
+            Action::Dismiss => {
+                self.stack = vec![(Screen::Home, 0.0)];
+                self.settle_page();
+                self.refresh();
+                return vec![Effect::Dismiss];
+            }
             Action::ScreenOff(k) => {
                 self.state.screen_off = k;
                 self.refresh();
@@ -1813,6 +1918,7 @@ impl App {
                                 Some(_) => self.say("切换槽位还没实现", now),
                             },
                             Confirm::Decrypt => fx.push(Effect::Decrypt),
+                            Confirm::FactoryReset => fx.push(Effect::FactoryReset),
                             Confirm::Flash => {
                                 if let Install::Choosing(choice) = &self.state.install {
                                     let partition = choice.partitions[choice.partition];
@@ -2768,6 +2874,60 @@ mod tests {
         assert_eq!(app.screen(), Screen::Home, "fastboot is not behind it");
         assert!(app.key(Key::Power, 0).is_empty());
         assert!(!app.display_on(), "power turns the panel off again");
+    }
+
+    #[test]
+    fn the_cant_start_page_retries_looks_around_or_erases() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::CantStart, W, H, PPD);
+        app.set_asked(Asked { reason: Some("RescueParty".into()), ..Asked::default() });
+        assert_eq!(tap(&mut app, &f, &i, Action::RebootTo(Target::System)), vec![Effect::Reboot(Target::System)]);
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::FactoryReset), vec![Effect::FactoryReset]);
+        assert_eq!(tap(&mut app, &f, &i, Action::Dismiss), vec![Effect::Dismiss]);
+        assert_eq!(app.screen(), Screen::Home);
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Home, "the system's question is not behind it");
+    }
+
+    #[test]
+    fn erasing_goes_part_by_part_and_offers_a_way_out_once_it_stops() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::CantStart, W, H, PPD);
+        app.erase_started(true, vec![Part::Data, Part::Metadata]);
+        assert_eq!(app.screen(), Screen::Erase);
+        assert!(app.frame(&f, &i, DataState::Unmounted).hits.is_empty(), "nothing is to be done while erasing");
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Erase, "there is nothing to go back to");
+        app.erase_at(Part::Metadata);
+        assert_eq!(app.state.erase.done, 1);
+        app.key(Key::Power, 0);
+        assert!(!app.display_on());
+        app.erase_ended(Err("make_f2fs ended with exit status: 1".into()), 1000);
+        assert!(app.display_on(), "what comes next is the user's to choose");
+        let later = 2000;
+        assert_eq!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::PowerOff), later), vec![Effect::Reboot(Target::PowerOff)]);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Dismiss, later), vec![Effect::Dismiss]);
+        assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn erasing_that_ends_well_leaves_nothing_to_choose() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.erase_started(false, vec![Part::Cache]);
+        app.erase_ended(Ok(()), 0);
+        assert_eq!(app.state.erase.done, 1, "every part is erased");
+        assert!(app.frame(&f, &i, DataState::Unmounted).hits.is_empty(), "the runtime starts the system at once");
+    }
+
+    #[test]
+    fn work_the_recovery_does_not_do_is_shown_with_where_to_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Unhandled, W, H, PPD);
+        app.set_asked(Asked { unhandled: Some("--update_package=/data/ota_package/update.zip".into()), ..Asked::default() });
+        assert_eq!(tap(&mut app, &f, &i, Action::RebootTo(Target::System)), vec![Effect::Reboot(Target::System)]);
+        assert_eq!(tap(&mut app, &f, &i, Action::Dismiss), vec![Effect::Dismiss]);
+        assert_eq!(app.screen(), Screen::Home);
     }
 
     /// Drag the knob of a swipe-to-confirm track all the way across.

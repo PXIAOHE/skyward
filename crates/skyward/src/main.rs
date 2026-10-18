@@ -15,6 +15,8 @@ mod secure;
 mod services;
 #[cfg(target_os = "android")]
 mod ui;
+#[cfg(target_os = "android")]
+mod wipe;
 
 #[derive(Parser)]
 #[command(name = "skyward", version, about = "Skyward recovery")]
@@ -313,7 +315,7 @@ fn main() -> Result<()> {
         Cmd::Ui { config, font, mono, unlock, dump } => {
             let cfg = DeviceConfig::load(&config)?;
             let start = if unlock { skyward_ui::app::Screen::Decrypt } else { skyward_ui::app::Screen::Home };
-            ui::run(&cfg, &font, &mono, start, dump.as_deref())
+            ui::run(&cfg, &font, &mono, bcb::Request::default(), start, dump.as_deref())
         }
     }
 }
@@ -422,21 +424,34 @@ fn adopt_installed_version(slot: skyward_vab::Slot) -> Result<()> {
 }
 
 /// The recovery service. adb comes up first so a failure later on can be
-/// inspected, then the boot request in misc is taken so that any reboot from
-/// here boots the system; failures go to the kernel log and still end the
-/// process, which init then starts again.
+/// inspected, then the boot request in misc is read. A request whose work
+/// goes on stays in misc until the work is done; any other is cleared at
+/// once, so that any reboot from here boots the system. Failures go to the
+/// kernel log and still end the process, which init then starts again.
 fn recovery() -> Result<()> {
     let run = || -> Result<()> {
         skyward_sys::set_prop("sys.usb.config", "adb")?;
-        let request = bcb::take(&bcb::misc())?;
+        let misc = bcb::misc();
+        let message = bcb::read(&misc)?;
+        let request = message.request();
+        if !request.work.lasts() {
+            bcb::clear(&misc)?;
+        }
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
         skyward_sys::kmsg(&format!(
-            "{} {} recovery up, misc command {:?} args {:?}",
+            "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,
             skyward_info::VERSION,
-            request.command,
-            request.args
+            message.command,
+            message.args,
+            request.work
         ))?;
+        if !request.unknown.is_empty() {
+            skyward_sys::kmsg(&format!("misc arguments this recovery does not know: {:?}", request.unknown))?;
+        }
+        if request.work == bcb::Work::Exit {
+            return skyward_sys::power(if request.shutdown_after { Power::Off } else { Power::System });
+        }
         // The kernel starts the clock from the RTC, days after 1970 on these
         // phones; the screen and the files written still work without the
         // real time, so a failure goes to the kernel log.
@@ -451,13 +466,11 @@ fn recovery() -> Result<()> {
             // fastbootd rewrites super, which it cannot do while the slot's
             // partitions are mapped and mounted, so fastboot runs without
             // them and without what runs from them.
-            let fastboot = request.args.iter().any(|a| a == "--fastboot");
-            if !fastboot {
+            if request.work != bcb::Work::Fastboot {
                 prepare(&cfg, booted_slot()?)?;
             }
             let root = Path::new("/");
-            let start = if fastboot { Screen::Fastboot } else { Screen::Home };
-            ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), start, None)
+            ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
         }
         #[cfg(not(target_os = "android"))]
         {

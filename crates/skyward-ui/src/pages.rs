@@ -1,6 +1,6 @@
 use crate::app::{
-    Action, Confirm, Damage, FileKind, Frame, HeroArt, Hit, Install, Keys, Pick, Screen, State, Switch, Target,
-    UsbLink, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS,
+    Action, Confirm, Damage, FileKind, Frame, HeroArt, Hit, Install, Keys, Part, Pick, Screen, State, Switch,
+    Target, UsbLink, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -63,6 +63,9 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::FontLicense => font_license(cx),
         Screen::Slot => slot(cx),
         Screen::Fastboot => fastboot(cx),
+        Screen::Erase => erase(cx),
+        Screen::CantStart => cant_start(cx),
+        Screen::Unhandled => unhandled(cx),
     }
 }
 
@@ -76,6 +79,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Restore => ("滑动以恢复", true),
         Confirm::Slot => ("滑动以切换", true),
         Confirm::Decrypt => ("滑动以解密", false),
+        Confirm::FactoryReset => ("滑动以恢复出厂设置", true),
     }
 }
 
@@ -1215,4 +1219,129 @@ pub fn fastboot(cx: &Ctx) -> Frame {
     let out = hits(&choices.rows, &actions);
     widgets::footnote(&mut c, t, f, choices.bottom, "按音量键选择，按电源键确认。");
     Frame { back: false, ..Frame::new(t, c, out, "Fastboot", top) }
+}
+
+/// What a part erasing goes through is called on its page.
+fn part_name(part: Part) -> &'static str {
+    match part {
+        Part::Data => "用户数据",
+        Part::Cache => "缓存",
+        Part::Metadata => "加密元数据",
+    }
+}
+
+/// Where to go once what the system asked for has stopped or cannot be
+/// done, in the order the pages list them.
+const AFTERWARDS: [(&str, Action); 3] = [
+    ("重启到系统", Action::RebootTo(Target::System)),
+    ("进入恢复模式", Action::Dismiss),
+    ("关机", Action::RebootTo(Target::PowerOff)),
+];
+
+/// The list of [`AFTERWARDS`] at `y`, and where it ends.
+fn afterwards(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, out: &mut Vec<Hit>) -> f32 {
+    let rows: Vec<Row> = AFTERWARDS.iter().map(|&(title, _)| Row::new(title).trail(Trail::None)).collect();
+    let choices = widgets::list(c, t, f, y, &rows);
+    out.extend(hits(&choices.rows, &AFTERWARDS.map(|(_, action)| action)));
+    choices.bottom
+}
+
+/// Erasing what the system asked to erase: each part and how far it has
+/// come, and once erasing has stopped, why, and where to go.
+pub fn erase(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let e = &s.erase;
+    let mut c = page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let failed = matches!(e.outcome, Some(Err(_)));
+    let heading = match &e.outcome {
+        None => "正在清除",
+        Some(Ok(())) => "已清除",
+        Some(Err(_)) => "清除没有完成",
+    };
+    let mut y = widgets::section_first(&mut c, t, f, top, heading);
+    if !e.parts.is_empty() {
+        let rows: Vec<Row> = e
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(k, &part)| {
+                let state = match (k.cmp(&e.done), failed) {
+                    (std::cmp::Ordering::Less, _) => "已清除",
+                    (std::cmp::Ordering::Equal, false) => "正在清除",
+                    (std::cmp::Ordering::Equal, true) => "没有完成",
+                    (std::cmp::Ordering::Greater, false) => "等待",
+                    (std::cmp::Ordering::Greater, true) => "没有清除",
+                };
+                Row::new(part_name(part)).trail(Trail::Text(state))
+            })
+            .collect();
+        y = widgets::list(&mut c, t, f, y, &rows).bottom;
+    }
+    let end = if s.asked.shutdown_after { "关机" } else { "重启" };
+    let note = match (&e.outcome, e.reset) {
+        (Some(Err(why)), _) => why.clone(),
+        (_, true) => format!("手机上的全部用户数据都会清除，清除完成后手机会自动{end}。"),
+        (_, false) => format!("清除完成后手机会自动{end}。"),
+    };
+    y = widgets::footnote(&mut c, t, f, y, &note);
+    if let Some(reason) = &s.asked.reason {
+        y = widgets::info_card(&mut c, t, f, y + t.m.dp(12.0), &[("原因", reason.clone())]);
+    }
+    if failed {
+        let y = widgets::section(&mut c, t, f, y, "接下来");
+        afterwards(&mut c, t, f, y, &mut out);
+    }
+    let title = if e.reset { "恢复出厂设置" } else { "清除缓存" };
+    Frame { back: false, ..Frame::new(t, c, out, title, top) }
+}
+
+/// The system could not start Android and asks whether to erase all user
+/// data: start it again, look around the recovery first, or erase.
+pub fn cant_start(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let mut y = widgets::paragraph(
+        &mut c,
+        t,
+        f,
+        top,
+        "Android 没能启动，手机上的数据可能已经损坏。如果每次启动都停在这里，可以恢复出厂设置，这会清除手机上的全部用户数据。",
+    );
+    if let Some(reason) = &s.asked.reason {
+        y = widgets::info_card(&mut c, t, f, y + t.m.dp(12.0), &[("原因", reason.clone())]);
+    }
+    y = widgets::section(&mut c, t, f, y, "选择");
+    let rows = [
+        Row::new("重试").subtitle("重新启动 Android").trail(Trail::None),
+        Row::new("进入恢复模式").subtitle("不清除任何内容，先用 recovery 查看手机").trail(Trail::None),
+    ];
+    let choices = widgets::list(&mut c, t, f, y, &rows);
+    out.extend(hits(&choices.rows, &[Action::RebootTo(Target::System), Action::Dismiss]));
+    let y = widgets::footnote(&mut c, t, f, choices.bottom, "恢复出厂设置后无法撤销。");
+    let (label, danger) = confirm_label(Confirm::FactoryReset);
+    let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+    out.push(Hit { rect: track, action: Action::Confirm(Confirm::FactoryReset) });
+    Frame { back: false, ..Frame::new(t, c, out, "无法启动系统", top) }
+}
+
+/// Something the system asked of the recovery that it does not do: what
+/// was asked, and where to go instead.
+pub fn unhandled(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let mut items = vec![("请求", s.asked.unhandled.clone().unwrap_or_default())];
+    if let Some(reason) = &s.asked.reason {
+        items.push(("原因", reason.clone()));
+    }
+    let y = widgets::info_card(&mut c, t, f, top, &items);
+    let y = widgets::footnote(&mut c, t, f, y, "Skyward 不处理系统的这项请求，手机上没有任何改动。");
+    let y = widgets::section(&mut c, t, f, y, "接下来");
+    afterwards(&mut c, t, f, y, &mut out);
+    Frame { back: false, ..Frame::new(t, c, out, "无法处理的请求", top) }
 }
