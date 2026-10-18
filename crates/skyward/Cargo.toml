@@ -22,6 +22,7 @@ skyward-lp = { path = "../skyward-lp" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 evdev = "0.13.2"
+skyward-binder = { path = "../skyward-binder" }
 libc = { workspace = true }
 procfs = { version = "0.18.0", default-features = false }
 skyward-ui = { path = "../skyward-ui" }

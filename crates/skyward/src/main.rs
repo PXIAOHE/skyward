@@ -103,6 +103,10 @@ enum Cmd {
     /// persist, as the recovery does when it starts, and print the time.
     #[cfg(target_os = "android")]
     Clock,
+    /// Say whether a service has registered with the phone's service
+    /// directory, such as android.hardware.security.keymint.IKeyMintDevice/default.
+    #[cfg(target_os = "android")]
+    Service { name: String },
     /// Drive the panel and touchscreen with the recovery UI.
     #[cfg(target_os = "android")]
     Ui {
@@ -195,6 +199,17 @@ fn main() -> Result<()> {
         Cmd::Clock => {
             let ms = skyward_sys::clock::set_from_rtc()?;
             println!("{}", skyward_ui::fmt::datetime((ms / 1000) as i64));
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Service { name } => {
+            let binder = skyward_binder::driver::Binder::open()?;
+            let described = if skyward_binder::service::declared(&binder, &name)? { "described" } else { "not described" };
+            let running = match skyward_binder::service::find(&binder, &name)? {
+                Some(_) => "registered",
+                None => "not registered",
+            };
+            println!("{name} is {described} and {running}");
             Ok(())
         }
         #[cfg(target_os = "android")]

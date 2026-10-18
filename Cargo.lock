@@ -966,6 +966,7 @@ dependencies = [
  "evdev",
  "libc",
  "procfs",
+ "skyward-binder",
  "skyward-block",
  "skyward-config",
  "skyward-info",
@@ -975,6 +976,14 @@ dependencies = [
  "skyward-sys",
  "skyward-ui",
  "skyward-vab",
+]
+
+[[package]]
+name = "skyward-binder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
 ]
 
 [[package]]
