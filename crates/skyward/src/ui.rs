@@ -6,9 +6,10 @@ use skyward_config::{DeviceConfig, Service};
 use skyward_info::DataState;
 use skyward_install::{Detach, Installer};
 use skyward_sys::Power;
-use skyward_ui::app::{App, Effect, Screen, Target};
+use skyward_ui::app::{App, Effect, MountFailure, Screen, Target};
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -123,6 +124,38 @@ fn data_state() -> Result<DataState> {
     Ok(if here.dev() != up.dev() { DataState::Decrypted } else { DataState::Unmounted })
 }
 
+/// The slot's logical partitions and how each shows now, for the mount page.
+/// A mounted partition is in use when a program holds it, or when one of
+/// `services` runs from it: those are started again from there whenever
+/// they end.
+fn read_mounts(services: &[Service]) -> Result<Vec<skyward_ui::app::MountRow>> {
+    use skyward_ui::app::MountRow;
+    let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    let shown = skyward_vab::mounted_partitions(slot)?;
+    let holders = skyward_block::mount::holders()?;
+    let mut rows = Vec::new();
+    for base in skyward_vab::slot_bases(slot)? {
+        let point = skyward_vab::mount_point(&base);
+        let name = format!("{base}{}", slot.suffix());
+        let mounted = shown.iter().find(|m| m.partition == name);
+        let mut using = BTreeSet::new();
+        if let Some(m) = mounted {
+            using.extend(holders.get(&skyward_block::devnum(&m.device)?).into_iter().flatten().cloned());
+            for s in services.iter().filter(|s| s.uses(&point)) {
+                let program = Path::new(&s.path).file_name().with_context(|| format!("{} names no program", s.path))?;
+                using.insert(program.to_string_lossy().into_owned());
+            }
+        }
+        rows.push(MountRow {
+            base,
+            point: point.display().to_string(),
+            mounted: mounted.is_some(),
+            holders: using.into_iter().collect(),
+        });
+    }
+    Ok(rows)
+}
+
 /// What has to happen before an update writes over the installed system's
 /// partitions: the files the phone's own programs run from stay in memory,
 /// and the booted slot's partitions come off.
@@ -169,6 +202,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
         app.state.brightness = (backlight.level as f32 / backlight.top as f32).min(1.0);
     }
     let data = data_state()?;
+    // The mount page shows the partitions as they are when it opens and
+    // after each change; why they cannot be read is the page's to say.
+    let mounts = || read_mounts(&cfg.services).map_err(|e| format!("{e:#}"));
 
     let mut screen = Canvas::new(w, h);
     let mut shown_clock = String::new();
@@ -261,6 +297,23 @@ pub fn run(cfg: &DeviceConfig, font: &Path, start: Screen, dump: Option<&Path>) 
                         installer.as_ref().context("no installer holds an image")?.flash(partition, pick.slots(slot));
                     }
                     Effect::Cancel => installer.as_ref().context("no installer to cancel")?.cancel()?,
+                    Effect::ReadMounts => app.set_mounts(mounts()),
+                    // A partition that will not mount, or is in use, is the
+                    // page's to report; the recovery carries on.
+                    Effect::Mount(base) => {
+                        let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+                        if let Err(e) = skyward_vab::mount_one(slot, &base) {
+                            app.mount_failed(MountFailure { mounting: true, base, detail: format!("{e:#}") });
+                        }
+                        app.set_mounts(mounts());
+                    }
+                    Effect::Unmount(base) => {
+                        let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+                        if let Err(e) = skyward_vab::unmount_one(slot, &base) {
+                            app.mount_failed(MountFailure { mounting: false, base, detail: format!("{e:#}") });
+                        }
+                        app.set_mounts(mounts());
+                    }
                 }
             }
         }

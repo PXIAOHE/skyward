@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
-use skyward_ui::app::{Action, App, Choice, Damage, Install, Pick, Screen, Touch, SCREEN_OFF};
+use skyward_ui::app::{Action, App, Choice, Damage, Install, MountFailure, MountRow, Pick, Screen, Touch, SCREEN_OFF};
 use skyward_ui::widgets::{self, Bar};
 use skyward_ui::{Canvas, Fonts, Theme};
 use skyward_vab::{Slot, SnapshotState};
@@ -16,6 +16,10 @@ const CLOCK: &str = "23:46";
 
 /// File name, page, dark theme, readings, userdata state, pattern drawn.
 type Shot<'a> = (&'a str, Screen, bool, &'a DeviceInfo, DataState, &'a [usize]);
+
+/// File name, dark theme, readings, a mount that failed, and the partitions
+/// left unmounted.
+type MountShot<'a> = (&'a str, bool, &'a DeviceInfo, Option<MountFailure>, &'a [&'a str]);
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -148,6 +152,30 @@ fn main() -> Result<()> {
         println!("wrote {}", path.display());
     }
 
+    // The mount page as it opens after boot, after an unmount that failed,
+    // and while an update waits to merge, with some partitions unmounted.
+    let busy = MountFailure {
+        mounting: false,
+        base: "vendor".into(),
+        detail: "unmount /vendor: Device or resource busy (os error 16)".into(),
+    };
+    let mounting: [MountShot; 3] = [
+        ("15-mount-light", false, &info, None, &[]),
+        ("16-mount-dark-unmount-failed", true, &info, Some(busy), &[]),
+        ("17-mount-light-update-pending", false, &pending, None, &["product", "system_ext"]),
+    ];
+    for (name, dark, info, failure, unmounted) in mounting {
+        let mut app = App::new(Screen::Mount, w, h, ppd);
+        app.state.dark = dark;
+        app.set_mounts(Ok(sample_mounts(unmounted)));
+        if let Some(failure) = failure {
+            app.mount_failed(failure);
+        }
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &whole_page(&mut app, &fonts, info, open))?;
+        println!("wrote {}", path.display());
+    }
+
     // The panel mid-gesture, to set beside recordings of the same moves.
     let moments: [Moment; 12] = [
         ("08-about-light", Screen::About, false, &|_, _| 2000),
@@ -224,6 +252,30 @@ fn swipe_in(app: &mut App, f: &Fonts, info: &DeviceInfo, x: f32) -> u64 {
         app.touch(Touch::Move(3.0 + (x - 3.0) * k as f32 / 8.0, 1300.0 + k as f32), f, 8 * k);
     }
     64
+}
+
+/// The slot's partitions on a Xiaomi 13 Ultra, in the order super lists
+/// them and where the recovery mounts them, all mounted but `unmounted`.
+/// The touch programs run from odm.
+fn sample_mounts(unmounted: &[&str]) -> Vec<MountRow> {
+    let partitions = [
+        ("odm", "/odm"),
+        ("product", "/mnt/product"),
+        ("system", "/mnt/system"),
+        ("system_dlkm", "/system_dlkm"),
+        ("system_ext", "/mnt/system_ext"),
+        ("vendor", "/vendor"),
+        ("vendor_dlkm", "/vendor_dlkm"),
+        ("mi_ext", "/mnt/mi_ext"),
+    ];
+    partitions
+        .iter()
+        .map(|&(base, point)| {
+            let mounted = !unmounted.contains(&base);
+            let holders = if mounted && base == "odm" { vec!["touch_report".into(), "touchsensor".into()] } else { Vec::new() };
+            MountRow { base: base.into(), point: point.into(), mounted, holders }
+        })
+        .collect()
 }
 
 /// The full length of a page with the status bar over its top, the way a

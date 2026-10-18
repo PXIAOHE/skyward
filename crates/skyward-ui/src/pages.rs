@@ -36,6 +36,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Settings => settings(cx),
         Screen::Reboot => reboot(cx),
         Screen::Wipe => wipe(cx),
+        Screen::Mount => mount(cx),
         Screen::Install => install(cx),
         Screen::Sideload => sideload(cx),
         Screen::About => about(cx),
@@ -136,7 +137,7 @@ pub fn home(cx: &Ctx) -> Frame {
         Action::Open(Screen::Install),
         Action::Unavailable("备份还没实现"),
         Action::Unavailable("恢复还没实现"),
-        Action::Unavailable("挂载还没实现"),
+        Action::Open(Screen::Mount),
     ]));
     y = tools.bottom + t.m.card_gap;
     let target = REBOOT_TARGETS[cx.state.reboot].0;
@@ -211,6 +212,67 @@ pub fn screen_off(cx: &Ctx) -> Frame {
         widgets::footnote(&mut c, t, f, y, "屏幕会一直亮着，同一画面显示太久会留下残影。");
     }
     Frame { canvas: c, hits: hits(&times.rows, &picks), title: "息屏时间", back: true, header: true, content_top: top, hero: None, pattern: None }
+}
+
+/// Mount manager: the slot's partitions, each with a switch to mount it
+/// read-only or unmount it; one that programs are using says which, and
+/// stays. While an update waits to merge, nothing more is mounted.
+pub fn mount(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = long_page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+
+    let pending = fmt::snapshot_mount_note(&cx.info.snapshot);
+    let y = match pending {
+        Some(note) => {
+            let warning = Row::new(fmt::snapshot(&cx.info.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::None);
+            let y = widgets::list(&mut c, t, f, top, &[warning]).bottom;
+            widgets::section(&mut c, t, f, y, "分区")
+        }
+        None => widgets::section_first(&mut c, t, f, top, "分区"),
+    };
+    let bottom = match &s.mounts {
+        Err(why) => {
+            let y = widgets::list(&mut c, t, f, y, &[Row::new("读不到分区").trail(Trail::None)]).bottom;
+            widgets::footnote(&mut c, t, f, y, why)
+        }
+        Ok(mounts) if mounts.is_empty() => widgets::list(&mut c, t, f, y, &[Row::new("没有可挂载的分区").trail(Trail::None)]).bottom,
+        Ok(mounts) => {
+            let subs: Vec<String> = mounts
+                .iter()
+                .map(|m| if m.holders.is_empty() { m.point.clone() } else { format!("{} · {} 正在使用", m.point, m.holders.join("、")) })
+                .collect();
+            let rows: Vec<Row> = mounts
+                .iter()
+                .zip(&subs)
+                .map(|(m, sub)| {
+                    let trail = if m.holders.is_empty() { Trail::Switch(m.mounted) } else { Trail::Text("使用中") };
+                    Row::new(&m.base).subtitle(sub).trail(trail)
+                })
+                .collect();
+            let list = widgets::list(&mut c, t, f, y, &rows);
+            out.extend(list.rows.iter().zip(mounts).enumerate().map(|(i, (&rect, m))| {
+                let action = match (m.holders.is_empty(), m.mounted, pending) {
+                    (false, _, _) => Action::Unavailable("正在使用的分区不能卸载"),
+                    (true, false, Some(note)) => Action::Unavailable(note),
+                    _ => Action::MountToggle(i),
+                };
+                Hit { rect, action }
+            }));
+            let y = match &s.mount_failure {
+                Some(failure) => widgets::footnote(&mut c, t, f, list.bottom, &fmt::mount_failure(failure)),
+                None => list.bottom,
+            };
+            let about = match cx.info.slot {
+                Some(slot) => format!("这里列出当前槽位 {} 在 super 里的分区，都以只读方式挂载。", slot.letter()),
+                None => "这里列出 super 里的分区，都以只读方式挂载。".into(),
+            };
+            widgets::footnote(&mut c, t, f, y, &about)
+        }
+    };
+
+    Frame { canvas: fit(c, t, bottom), hits: out, title: "挂载", back: true, header: true, content_top: top, hero: None, pattern: None }
 }
 
 /// About this device, modelled on the stock「我的设备」: the wordmark and

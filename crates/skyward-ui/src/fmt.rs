@@ -1,3 +1,4 @@
+use crate::app::MountFailure;
 use skyward_info::{Battery, Charge, Cpu, DataState, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
@@ -176,6 +177,17 @@ pub fn snapshot_note(s: &SnapshotState) -> Option<&'static str> {
     }
 }
 
+/// Why the mount page mounts nothing from super while an update is in
+/// flight; `None` when it is not.
+pub fn snapshot_mount_note(s: &SnapshotState) -> Option<&'static str> {
+    match s {
+        SnapshotState::None => None,
+        SnapshotState::Snapshotted | SnapshotState::Merging => Some("合并完成前不能挂载 super 里的分区"),
+        SnapshotState::MergeFailed => Some("回到系统处理完之前不能挂载 super 里的分区"),
+        SnapshotState::Unknown => Some("读到更新状态之前不能挂载 super 里的分区"),
+    }
+}
+
 pub fn data(d: DataState) -> &'static str {
     match d {
         DataState::Unmounted => "未挂载",
@@ -258,6 +270,12 @@ pub fn screen_off(after_ms: Option<u64>) -> String {
         Some(ms) if ms < 60_000 => format!("{} 秒", ms / 1000),
         Some(ms) => format!("{} 分钟", ms / 60_000),
     }
+}
+
+/// A mount or unmount that failed, with why: `挂载 vendor 失败：…`
+pub fn mount_failure(m: &MountFailure) -> String {
+    let what = if m.mounting { "挂载" } else { "卸载" };
+    format!("{what} {} 失败：{}", m.base, m.detail)
 }
 
 /// Why a package was not installed, for a phone with this codename.
@@ -395,6 +413,22 @@ mod tests {
     fn screen_off_times() {
         let labels: Vec<String> = crate::app::SCREEN_OFF.iter().map(|&ms| screen_off(ms)).collect();
         assert_eq!(labels, ["15 秒", "30 秒", "1 分钟", "2 分钟", "5 分钟", "10 分钟", "永不"]);
+    }
+
+    #[test]
+    fn mount_failures_name_the_partition_and_why() {
+        let unmounting = MountFailure {
+            mounting: false,
+            base: "vendor".into(),
+            detail: "unmount /vendor: Device or resource busy (os error 16)".into(),
+        };
+        assert_eq!(mount_failure(&unmounting), "卸载 vendor 失败：unmount /vendor: Device or resource busy (os error 16)");
+        let mounting = MountFailure {
+            mounting: true,
+            base: "odm".into(),
+            detail: "mount odm_b: /dev/block/dm-8 holds none of erofs, ext4, f2fs".into(),
+        };
+        assert_eq!(mount_failure(&mounting), "挂载 odm 失败：mount odm_b: /dev/block/dm-8 holds none of erofs, ext4, f2fs");
     }
 
     #[test]

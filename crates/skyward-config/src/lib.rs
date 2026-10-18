@@ -106,6 +106,14 @@ pub struct Service {
     pub libraries: Vec<String>,
 }
 
+impl Service {
+    /// Whether the program, or a directory it loads libraries from, is
+    /// under `dir`: without what is mounted there it cannot start again.
+    pub fn uses(&self, dir: &Path) -> bool {
+        Path::new(&self.path).starts_with(dir) || self.libraries.iter().any(|l| Path::new(l).starts_with(dir))
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Decrypt {
     #[serde(default)]
@@ -176,5 +184,16 @@ mod tests {
                 Service { path: "/odm/bin/touchsensor".into(), libraries: vec!["/odm/lib64".into(), "/system/lib64".into()] },
             ]
         );
+    }
+
+    #[test]
+    fn services_use_the_partitions_they_run_from() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        let [report, sensor] = &cfg.services[..] else { panic!("ishtar keeps two programs running") };
+        assert!(report.uses(Path::new("/odm")));
+        assert!(sensor.uses(Path::new("/odm")));
+        assert!(!report.uses(Path::new("/odm_dlkm")), "a longer name is another partition");
+        assert!(!sensor.uses(Path::new("/mnt/system")), "its /system/lib64 is the recovery's own");
+        assert!(!report.uses(Path::new("/vendor")));
     }
 }

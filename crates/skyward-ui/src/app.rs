@@ -21,6 +21,8 @@ pub enum Screen {
     Settings,
     Reboot,
     Wipe,
+    /// Mounting and unmounting the slot's partitions.
+    Mount,
     Install,
     /// Receiving what the computer sends with `adb sideload`, and
     /// installing it.
@@ -34,6 +36,30 @@ pub enum Screen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Vibrate,
+}
+
+/// A partition the mount page lists: its name, where it sits, and how it
+/// shows now. The runtime fills these in; the page draws them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountRow {
+    /// The partition's base name in super, such as `system`: the row's
+    /// title, and what the runtime acts on.
+    pub base: String,
+    pub point: String,
+    pub mounted: bool,
+    /// The programs using it, which keep it from being unmounted.
+    pub holders: Vec<String>,
+}
+
+/// A mount or unmount the runtime could not carry out. The mount page says
+/// so until the next try, or until it is left.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountFailure {
+    /// Mounting, rather than unmounting.
+    pub mounting: bool,
+    pub base: String,
+    /// The error and its causes.
+    pub detail: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +163,8 @@ pub enum Action {
     WipeItem(usize),
     /// The brightness track: touching or dragging it sets the level.
     Brightness,
+    /// Mount or unmount the mount page's partition at this index.
+    MountToggle(usize),
     /// A swipe-to-confirm track; dragging the knob to the far end confirms.
     Confirm(Confirm),
     /// The pattern grid on the unlock page.
@@ -210,6 +238,10 @@ pub struct State {
     /// How far the swipe-to-confirm knob is dragged, 0 to 1.
     pub confirm: f32,
     pub install: Install,
+    /// The mount page's partitions, as the runtime last read them, or why
+    /// it could not.
+    pub mounts: Result<Vec<MountRow>, String>,
+    pub mount_failure: Option<MountFailure>,
 }
 
 impl Default for State {
@@ -225,6 +257,8 @@ impl Default for State {
             pattern: Vec::new(),
             confirm: 0.0,
             install: Install::Idle,
+            mounts: Ok(Vec::new()),
+            mount_failure: None,
         }
     }
 }
@@ -246,7 +280,7 @@ pub enum Key {
 }
 
 /// Work the runtime carries out on the UI's behalf.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Reboot(Target),
     /// A short tap of the vibration motor.
@@ -258,6 +292,12 @@ pub enum Effect {
     Flash { partition: &'static str, pick: Pick },
     /// Stop waiting for the computer, or for where an image goes.
     Cancel,
+    /// Read the slot's partitions for the mount page, which has just opened.
+    ReadMounts,
+    /// Mount the slot's partition with this base name, such as `system`.
+    Mount(String),
+    /// Unmount the slot's partition with this base name.
+    Unmount(String),
 }
 
 enum Drag {
@@ -721,6 +761,22 @@ impl App {
         self.dirty = true;
     }
 
+    /// The runtime read the mount table again, or could not: keep it and
+    /// show it if it changed.
+    pub fn set_mounts(&mut self, mounts: Result<Vec<MountRow>, String>) {
+        if self.state.mounts != mounts {
+            self.state.mounts = mounts;
+            self.refresh();
+        }
+    }
+
+    /// The runtime could not mount or unmount a partition: the mount page
+    /// says so, and why.
+    pub fn mount_failed(&mut self, failure: MountFailure) {
+        self.state.mount_failure = Some(failure);
+        self.refresh();
+    }
+
     /// Render the current page if what it shows has changed.
     pub fn frame(&mut self, f: &Fonts, info: &DeviceInfo, data: DataState) -> &Frame {
         if self.frame.is_none() {
@@ -863,6 +919,9 @@ impl App {
         if self.stack.len() <= 1 {
             return fx;
         }
+        if self.screen() == Screen::Mount {
+            self.state.mount_failure = None;
+        }
         if self.screen() == Screen::Sideload {
             match self.state.install {
                 Install::Checking { .. } => {
@@ -937,7 +996,12 @@ impl App {
     /// Carry out a tapped control.
     fn act(&mut self, action: Action, now: u64) -> Vec<Effect> {
         match action {
-            Action::Open(s) => self.open(s),
+            Action::Open(s) => {
+                self.open(s);
+                if s == Screen::Mount {
+                    return vec![Effect::ReadMounts];
+                }
+            }
             Action::Skip => {
                 *self.top_mut() = (Screen::Home, 0.0);
                 self.settle_page();
@@ -953,6 +1017,14 @@ impl App {
             Action::Toggle(Switch::Vibrate) => {
                 self.state.vibrate = !self.state.vibrate;
                 self.refresh();
+            }
+            Action::MountToggle(i) => {
+                if self.state.mount_failure.take().is_some() {
+                    self.refresh();
+                }
+                let row = &self.state.mounts.as_ref().expect("a partition toggled is one the page lists")[i];
+                let base = row.base.clone();
+                return vec![if row.mounted { Effect::Unmount(base) } else { Effect::Mount(base) }];
             }
             Action::RebootTarget(i) => {
                 self.state.reboot = i;
@@ -1410,6 +1482,97 @@ mod tests {
         let mut app = App::new(Screen::Home, W, H, PPD);
         tap(&mut app, f, i, Action::Open(screen));
         app
+    }
+
+    #[test]
+    fn home_opens_the_mount_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Mount)), vec![Effect::ReadMounts], "the page shows the partitions as they are now");
+        assert_eq!(app.screen(), Screen::Mount);
+    }
+
+    #[test]
+    fn an_unreadable_partition_table_leaves_nothing_to_toggle() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Mount, &f, &i);
+        app.set_mounts(Err("read the metadata in super: Input/output error (os error 5)".into()));
+        assert!(app.frame(&f, &i, DataState::Unmounted).hits.is_empty());
+    }
+
+    #[test]
+    fn nothing_mounts_while_an_update_waits_to_merge() {
+        let (f, mut i) = (fonts(), info());
+        i.snapshot = SnapshotState::Snapshotted;
+        let mut app = opened(Screen::Mount, &f, &i);
+        app.set_mounts(Ok(vec![
+            MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: false, holders: Vec::new() },
+            MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: Vec::new() },
+        ]));
+        let frame = app.frame(&f, &i, DataState::Unmounted);
+        assert!(matches!(frame.hits[0].action, Action::Unavailable(_)), "vendor stays unmounted");
+        assert_eq!(frame.hits[1].action, Action::MountToggle(1), "odm can still come off");
+        let refused = frame.hits[0].action;
+        assert!(tap(&mut app, &f, &i, refused).is_empty());
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says why");
+    }
+
+    #[test]
+    fn the_mount_page_toggles_each_partition() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Mount, &f, &i);
+        app.set_mounts(Ok(vec![
+            MountRow { base: "system".into(), point: "/mnt/system".into(), mounted: true, holders: Vec::new() },
+            MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: false, holders: Vec::new() },
+        ]));
+        let frame = app.frame(&f, &i, DataState::Unmounted);
+        assert!(frame.hits.iter().any(|h| h.action == Action::MountToggle(0)), "the first partition has a toggle");
+        assert!(frame.hits.iter().any(|h| h.action == Action::MountToggle(1)), "the second partition has a toggle");
+        assert!(!frame.hits.iter().any(|h| matches!(h.action, Action::Toggle(_))), "partitions mount read-only");
+        // A mounted partition unmounts, an unmounted one mounts.
+        assert_eq!(app.act(Action::MountToggle(0), 0), vec![Effect::Unmount("system".into())]);
+        assert_eq!(app.act(Action::MountToggle(1), 0), vec![Effect::Mount("vendor".into())]);
+    }
+
+    #[test]
+    fn a_partition_in_use_cannot_be_unmounted() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Mount, &f, &i);
+        let held = vec!["touch_report".to_string(), "touchsensor".to_string()];
+        app.set_mounts(Ok(vec![
+            MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: held },
+            MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: true, holders: Vec::new() },
+        ]));
+        let frame = app.frame(&f, &i, DataState::Unmounted);
+        assert!(matches!(frame.hits[0].action, Action::Unavailable(_)), "the programs using odm keep it");
+        assert_eq!(frame.hits[1].action, Action::MountToggle(1));
+        let busy = frame.hits[0].action;
+        assert!(tap(&mut app, &f, &i, busy).is_empty());
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says why");
+    }
+
+    #[test]
+    fn a_failed_mount_stays_on_the_page_until_the_next_try() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Mount, &f, &i);
+        app.set_mounts(Ok(vec![MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: false, holders: Vec::new() }]));
+        let failure = MountFailure { mounting: true, base: "vendor".into(), detail: "mount vendor_b: no filesystem".into() };
+        app.mount_failed(failure.clone());
+        assert_eq!(app.state.mount_failure, Some(failure.clone()));
+        assert_eq!(app.act(Action::MountToggle(0), 0), vec![Effect::Mount("vendor".into())]);
+        assert_eq!(app.state.mount_failure, None, "trying again clears it");
+        app.mount_failed(failure);
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Home);
+        assert_eq!(app.state.mount_failure, None, "leaving the page clears it");
+    }
+
+    #[test]
+    fn the_mount_page_notes_when_there_is_nothing_to_mount() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Mount, &f, &i);
+        let frame = app.frame(&f, &i, DataState::Unmounted);
+        assert!(frame.hits.is_empty(), "no partition rows, and nothing else to touch");
     }
 
     #[test]
