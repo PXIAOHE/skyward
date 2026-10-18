@@ -135,6 +135,17 @@ pub struct MountFailure {
     pub detail: String,
 }
 
+/// Which control answers a user's screen lock, by the kind of lock it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Keys {
+    /// No user has set one, so none is asked for.
+    #[default]
+    None,
+    Pattern,
+    Digits,
+    Letters,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Confirm {
     Reboot,
@@ -438,6 +449,11 @@ pub struct State {
     pub logs_to: usize,
     /// The slot chosen to start from next; `None` keeps the running one.
     pub next_slot: Option<Slot>,
+    /// What is typed at the screen lock, which control answers it, and
+    /// which users' own files are still closed.
+    pub code: String,
+    pub keys: Keys,
+    pub locked: Vec<u32>,
     /// What is typed in the search field.
     pub search: String,
     /// The command line typed in the terminal.
@@ -479,6 +495,9 @@ impl Default for State {
             logs: [true, true],
             logs_to: 0,
             next_slot: None,
+            code: String::new(),
+            keys: Keys::None,
+            locked: Vec::new(),
             search: String::new(),
             command: String::new(),
             layer: Layer::Letters,
@@ -530,6 +549,8 @@ pub enum Effect {
     ReadDir(String),
     /// Open the data partition with the keys the phone keeps for it.
     Decrypt,
+    /// Let in the keys for the own files of every user this code opens.
+    Unlock(String),
 }
 
 enum Drag {
@@ -1031,6 +1052,16 @@ impl App {
 
     /// The runtime read the mount table again, or could not: keep it and
     /// show it if it changed.
+    /// Which users' own files are still closed, and which control answers
+    /// the screen lock they are closed with.
+    pub fn set_locked(&mut self, locked: Vec<u32>, keys: Keys) {
+        if self.state.locked != locked || self.state.keys != keys {
+            self.state.locked = locked;
+            self.state.keys = keys;
+            self.refresh();
+        }
+    }
+
     pub fn set_mounts(&mut self, mounts: Result<Vec<MountRow>, String>) {
         if self.state.mounts != mounts {
             self.state.mounts = mounts;
@@ -1499,6 +1530,7 @@ impl App {
         match self.screen() {
             Screen::Search => &mut self.state.search,
             Screen::Terminal => &mut self.state.command,
+            Screen::Decrypt => &mut self.state.code,
             s => panic!("{s:?} has no keyboard"),
         }
     }
@@ -1527,6 +1559,14 @@ impl App {
                     if let Some(first) = search::find(&self.state.search).first() {
                         return self.act(Action::Open(first.screen), now);
                     }
+                }
+                // The code is taken as it is sent, so the dots clear while
+                // the secure world is checking it.
+                Screen::Decrypt if self.state.code.is_empty() => self.say("先输入锁屏密码", now),
+                Screen::Decrypt => {
+                    let code = std::mem::take(&mut self.state.code);
+                    self.refresh();
+                    return vec![Effect::Unlock(code)];
                 }
                 _ => self.say("终端还没接入，命令没有执行", now),
             },
@@ -1725,10 +1765,14 @@ impl App {
                     }
                 }
                 Drag::Pattern => {
-                    let enough = self.state.pattern.len() >= 4;
-                    self.state.pattern.clear();
+                    // A pattern reads as the number of each dot it joins,
+                    // counted from one across the rows.
+                    let drawn = std::mem::take(&mut self.state.pattern);
                     self.repaint_pattern(&t);
-                    self.say(if enough { "解密还没接入手机的安全服务" } else { "至少连接 4 个点" }, now);
+                    match drawn.len() >= 4 {
+                        true => fx.push(Effect::Unlock(drawn.iter().map(|i| (b'1' + *i as u8) as char).collect())),
+                        false => self.say("至少连接 4 个点", now),
+                    }
                 }
                 _ => {}
             },
@@ -2711,6 +2755,81 @@ mod tests {
         assert_eq!(app.state.next_slot, None, "picking the running slot keeps it");
         tap(&mut app, &f, &i, Action::PickSlot(Some(Slot::A)));
         assert!(swipe(&mut app, &f, &i, Confirm::Slot).is_empty(), "switching is not done yet");
+    }
+
+    /// Tap a control of the page as it looks once the data partition is
+    /// open and the users' own files are still closed.
+    fn tap_locked(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action) -> Vec<Effect> {
+        let scroll = app.top().1;
+        let rect = app
+            .frame(f, i, DataState::Locked)
+            .hits
+            .iter()
+            .find(|h| h.action == action)
+            .expect("the control is on the page")
+            .rect;
+        let (x, y) = rect.centre();
+        let mut fx = app.touch(Touch::Down(x, y - scroll), f, 0);
+        fx.extend(app.touch(Touch::Up, f, 0));
+        fx
+    }
+
+    #[test]
+    fn the_code_typed_on_the_keypad_is_sent_once_and_the_dots_clear() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.set_locked(vec![0, 999], Keys::Digits);
+        for ch in "1234".chars() {
+            tap_locked(&mut app, &f, &i, Action::Type(Cap::Char(ch)));
+        }
+        assert_eq!(app.state.code, "1234");
+        tap_locked(&mut app, &f, &i, Action::Type(Cap::Backspace));
+        assert_eq!(app.state.code, "123");
+        let fx = tap_locked(&mut app, &f, &i, Action::Type(Cap::Enter));
+        assert!(fx.contains(&Effect::Unlock("123".into())));
+        assert_eq!(app.state.code, "", "what was typed is gone once it is sent");
+    }
+
+    #[test]
+    fn nothing_typed_is_nothing_for_the_secure_world_to_count() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.set_locked(vec![0], Keys::Digits);
+        let fx = tap_locked(&mut app, &f, &i, Action::Type(Cap::Enter));
+        assert!(!fx.iter().any(|e| matches!(e, Effect::Unlock(_))));
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "the page says to type one first");
+    }
+
+    #[test]
+    fn a_pattern_is_sent_as_the_numbers_of_the_dots_it_joins() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.set_locked(vec![0], Keys::Pattern);
+        let (cx, cy, span) = app.frame(&f, &i, DataState::Locked).pattern.expect("the grid is on the page");
+        let dots = widgets::pattern_dots(cx, cy, span);
+        let scroll = app.top().1;
+        app.touch(Touch::Down(dots[0].0, dots[0].1 - scroll), &f, 0);
+        for &which in &[1usize, 4, 7] {
+            app.touch(Touch::Move(dots[which].0, dots[which].1 - scroll), &f, 0);
+        }
+        let fx = app.touch(Touch::Up, &f, 0);
+        assert!(fx.contains(&Effect::Unlock("1258".into())), "the dots counted from one across the rows");
+        assert!(app.state.pattern.is_empty(), "the grid is cleared once it is sent");
+    }
+
+    #[test]
+    fn a_pattern_too_short_to_be_one_is_not_sent() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.set_locked(vec![0], Keys::Pattern);
+        let (cx, cy, span) = app.frame(&f, &i, DataState::Locked).pattern.expect("the grid is on the page");
+        let dots = widgets::pattern_dots(cx, cy, span);
+        let scroll = app.top().1;
+        app.touch(Touch::Down(dots[0].0, dots[0].1 - scroll), &f, 0);
+        app.touch(Touch::Move(dots[1].0, dots[1].1 - scroll), &f, 0);
+        let fx = app.touch(Touch::Up, &f, 0);
+        assert!(!fx.iter().any(|e| matches!(e, Effect::Unlock(_))));
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "the page says how many dots it takes");
     }
 
     /// Type `text` on the keyboard of the page showing, one tap a key, in

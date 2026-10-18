@@ -1,6 +1,6 @@
 use crate::app::{
-    Action, Confirm, Damage, FileKind, Frame, HeroArt, Hit, Install, Pick, Screen, State, Switch, Target, BACKUP_PARTS,
-    BACKUP_PLACES, SCREEN_OFF, TARGETS,
+    Action, Confirm, Damage, FileKind, Frame, HeroArt, Hit, Install, Keys, Pick, Screen, State, Switch, Target,
+    BACKUP_PARTS, BACKUP_PLACES, SCREEN_OFF, TARGETS,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -434,10 +434,13 @@ pub fn specs(cx: &Ctx) -> Frame {
 
 /// File-based-encryption unlock.
 pub fn decrypt(cx: &Ctx) -> Frame {
-    let (t, f) = (cx.t, cx.f);
+    let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = page(t);
     let m = &t.m;
     let x = m.w as f32 / 2.0;
+    if cx.data == DataState::Locked {
+        return code(cx, c);
+    }
     let lock_cy = m.dp(150.0);
     let open = cx.data == DataState::Decrypted;
     c.fill_circle(x, lock_cy, m.dp(30.0), t.pal.card);
@@ -450,13 +453,63 @@ pub fn decrypt(cx: &Ctx) -> Frame {
     c.text_center(&f.body, note, x, lock_cy + m.dp(98.0), m.sub_px, t.pal.subtitle);
     let mut out = Vec::new();
     if !open {
-        let track = widgets::confirm(&mut c, t, f, m.h as f32 * 0.62, confirm_label(Confirm::Decrypt).0, false, cx.state.confirm);
+        let track = widgets::confirm(&mut c, t, f, m.h as f32 * 0.62, confirm_label(Confirm::Decrypt).0, false, s.confirm);
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::Decrypt) });
     }
     let skip_cy = m.h as f32 - m.dp(64.0);
     c.text_center(&f.heading, if open { "完成" } else { "暂不解密" }, x, skip_cy, m.row_title_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
     Frame { header: false, ..Frame::new(t, c, out, "解密", 0.0) }
+}
+
+/// The partition is open and what is left is each user's own files, which
+/// only what that user types opens. The control is the one their screen
+/// lock is answered with.
+fn code(cx: &Ctx, mut c: Canvas) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let m = &t.m;
+    let x = m.w as f32 / 2.0;
+    let mut out = Vec::new();
+    let note = match &s.locked[..] {
+        [one] => format!("用户 {one} 的文件还锁着"),
+        rest => format!("用户 {} 的文件还锁着", rest.iter().map(u32::to_string).collect::<Vec<_>>().join("、")),
+    };
+    c.text_center(&f.heading, "输入锁屏密码", x, m.dp(130.0), m.dp(24.0), t.pal.text);
+    c.text_center(&f.body, &note, x, m.dp(166.0), m.sub_px, t.pal.subtitle);
+    let mut pattern = None;
+    let bottom = match s.keys {
+        Keys::Letters => {
+            let top = m.h as f32 - widgets::keyboard_height(t);
+            for (rect, cap) in widgets::keyboard(&mut c, t, f, top, s.layer, s.pressed, "解密") {
+                out.push(Hit { rect, action: Action::Type(cap) });
+            }
+            top
+        }
+        Keys::Pattern => {
+            let span = m.dp(300.0);
+            let cy = m.dp(300.0) + span / 2.0;
+            widgets::pattern_lock(&mut c, t, x, cy, span, &s.pattern);
+            out.push(Hit { rect: Rect::new(x - span, cy - span, span * 2.0, span * 2.0), action: Action::Pattern });
+            pattern = Some((x, cy, span));
+            m.h as f32 - m.dp(26.0)
+        }
+        _ => {
+            let top = m.h as f32 - widgets::keypad_height(t);
+            for (rect, cap) in widgets::keypad(&mut c, t, f, top, s.pressed) {
+                out.push(Hit { rect, action: Action::Type(cap) });
+            }
+            top
+        }
+    };
+    // The dots sit just above whatever types into them; a pattern is its
+    // own showing of what has been drawn.
+    if pattern.is_none() {
+        widgets::code_dots(&mut c, t, x, bottom - m.dp(92.0), s.code.chars().count());
+    }
+    let skip_cy = bottom - m.dp(34.0);
+    c.text_center(&f.heading, "暂不解密", x, skip_cy, m.row_title_px, t.pal.accent);
+    out.push(Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
+    Frame { header: false, pattern, ..Frame::new(t, c, out, "解密", 0.0) }
 }
 
 /// Reboot target picker with a swipe-to-confirm control.

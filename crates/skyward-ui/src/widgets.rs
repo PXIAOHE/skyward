@@ -1105,6 +1105,82 @@ pub fn pattern_lock(c: &mut Canvas, t: &Theme, cx: f32, cy: f32, span: f32, path
     }
 }
 
+/// The round keys a screen lock's code is typed on.
+const PAD_KEY_DP: f32 = 76.0;
+const PAD_GAP_X_DP: f32 = 30.0;
+const PAD_GAP_Y_DP: f32 = 18.0;
+const PAD_TOP_DP: f32 = 10.0;
+/// Room under the last row for the gesture area of the screen's edge.
+const PAD_BOTTOM_DP: f32 = 26.0;
+
+/// What each key of the keypad types, read as rows of three.
+const PAD_KEYS: [Cap; 12] = [
+    Cap::Char('1'),
+    Cap::Char('2'),
+    Cap::Char('3'),
+    Cap::Char('4'),
+    Cap::Char('5'),
+    Cap::Char('6'),
+    Cap::Char('7'),
+    Cap::Char('8'),
+    Cap::Char('9'),
+    Cap::Backspace,
+    Cap::Char('0'),
+    Cap::Enter,
+];
+
+/// How tall the keypad is on this theme's screen.
+pub fn keypad_height(t: &Theme) -> f32 {
+    t.m.dp(PAD_TOP_DP + 4.0 * PAD_KEY_DP + 3.0 * PAD_GAP_Y_DP + PAD_BOTTOM_DP)
+}
+
+/// The keypad a screen lock's code is typed on, its top at `top`: four rows
+/// of three round keys, `pressed` drawn held down, and the last row erasing
+/// and confirming. Returns where each key answers a touch.
+pub fn keypad(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, pressed: Option<Cap>) -> Vec<(Rect, Cap)> {
+    let m = &t.m;
+    let (size, gx, gy) = (m.dp(PAD_KEY_DP), m.dp(PAD_GAP_X_DP), m.dp(PAD_GAP_Y_DP));
+    let left = (m.w as f32 - (3.0 * size + 2.0 * gx)) / 2.0;
+    let mut keys = Vec::with_capacity(PAD_KEYS.len());
+    for (i, &cap) in PAD_KEYS.iter().enumerate() {
+        let (row, col) = (i / 3, i % 3);
+        let r = Rect::new(left + col as f32 * (size + gx), top + m.dp(PAD_TOP_DP) + row as f32 * (size + gy), size, size);
+        keys.push((r, cap));
+    }
+    for &(r, cap) in &keys {
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        // Erasing and confirming carry their own words, and sit on the
+        // page rather than on a key of their own.
+        let bare = matches!(cap, Cap::Backspace | Cap::Enter);
+        let base = match cap {
+            Cap::Enter => t.pal.accent,
+            _ if bare => t.pal.bg,
+            _ => t.pal.card,
+        };
+        let fill = if pressed == Some(cap) { mix(base, t.pal.text, 0.16) } else { base };
+        if !bare || cap == Cap::Enter {
+            c.fill_circle(cx, cy, r.w / 2.0, fill);
+        }
+        match cap {
+            Cap::Char(ch) => c.text_center(&f.heading, &ch.to_string(), cx, cy, m.dp(34.0), t.pal.text),
+            Cap::Backspace => c.text_center(&f.body, "删除", cx, cy, m.row_title_px, t.pal.accent),
+            _ => c.text_center(&f.heading, "解密", cx, cy, m.row_title_px, Rgba::rgb(255, 255, 255)),
+        }
+    }
+    keys
+}
+
+/// The code typed so far, as a dot for each character. Nothing is drawn
+/// for a code not started.
+pub fn code_dots(c: &mut Canvas, t: &Theme, cx: f32, cy: f32, typed: usize) {
+    let m = &t.m;
+    let pitch = m.dp(26.0);
+    let left = cx - (typed.saturating_sub(1) as f32) * pitch / 2.0;
+    for i in 0..typed {
+        c.fill_circle(left + i as f32 * pitch, cy, m.dp(7.0), t.pal.accent);
+    }
+}
+
 /// Grey line icons of the parameters page, drawn on a 24 dp grid.
 #[derive(Clone, Copy)]
 pub enum Outline {
