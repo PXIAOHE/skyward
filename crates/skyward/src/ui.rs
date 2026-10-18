@@ -140,14 +140,21 @@ fn open_data() -> Result<Vec<u32>> {
 
 /// Let in the keys for the own files of every one of `users` that
 /// `credential` opens, and give the ones whose files stay closed and why.
-/// A user who has set no screen lock opens with no credential at all.
+/// A user who has set no screen lock opens with no credential at all, and
+/// one the phone made a credential up for opens behind the owner's, so the
+/// owner is taken first and the note their credential gave is kept for the
+/// rest.
 fn open_user_files(credential: Option<&[u8]>, users: &[u32]) -> Result<Vec<(u32, String)>> {
     let binder = skyward_binder::driver::Binder::open()?;
-    let mut service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+    let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+    let mut owner = None;
     let mut closed = Vec::new();
     for &user in users {
-        match skyward_crypto::data::open_user_files(&mut service, user, credential) {
-            Ok(()) => skyward_sys::kmsg(&format!("the files of user {user} can be read"))?,
+        match skyward_crypto::data::open_user_files(&service, user, credential, owner.as_ref()) {
+            Ok(note) => {
+                skyward_sys::kmsg(&format!("the files of user {user} can be read"))?;
+                owner = owner.or(note);
+            }
             Err(e) => {
                 skyward_sys::kmsg(&format!("the files of user {user} stay closed: {e:#}"))?;
                 closed.push((user, format!("{e:#}")));

@@ -14,6 +14,7 @@ use sha2::Sha256;
 /// for two purposes never agree.
 const SECDISCARDABLE: &[u8] = b"secdiscardable-transform";
 const GATEKEEPER: &[u8] = b"user-gk-authentication";
+const SECRET_GATEKEEPER: &[u8] = b"sp-gk-authentication";
 const PROTECTOR_SECRET: &[u8] = b"application-id";
 const FILE_KEY: &[u8] = b"fbe-key";
 const CONTEXT: &[u8] = b"android-synthetic-password-personalization-context";
@@ -201,9 +202,22 @@ pub fn content(blob: &[u8]) -> Result<&[u8]> {
 /// The secret a user's own files are wrapped with, from the synthetic
 /// password the blob held.
 pub fn file_secret(synthetic_password: &[u8]) -> Vec<u8> {
+    derived(synthetic_password, FILE_KEY)
+}
+
+/// What the secure world checks the user's own secret against. The keys
+/// the phone keeps for a user are guarded by this rather than by what the
+/// user types, so this is what a note for those keys follows from.
+pub fn secret_gatekeeper_password(synthetic_password: &[u8]) -> Vec<u8> {
+    derived(synthetic_password, SECRET_GATEKEEPER)
+}
+
+/// One of the keys that follow from the user's secret, under a fixed name
+/// for what it is for.
+fn derived(synthetic_password: &[u8], purpose: &[u8]) -> Vec<u8> {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(synthetic_password).expect("HMAC takes a key of any length");
     mac.update(&1u32.to_be_bytes());
-    mac.update(FILE_KEY);
+    mac.update(purpose);
     mac.update(&[0]);
     mac.update(CONTEXT);
     mac.update(&((CONTEXT.len() * 8) as u32).to_be_bytes());

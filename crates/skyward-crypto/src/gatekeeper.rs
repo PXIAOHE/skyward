@@ -17,12 +17,6 @@ pub const INSTANCE: &str = "default";
 
 const VERIFY: u32 = 2;
 
-/// Which of the secure world's slots a user's screen lock is enrolled in.
-/// The part of the phone that enrols it counts a hundred thousand above the
-/// user's own number, keeping those enrolments apart from the ones made
-/// before the phone kept credentials this way.
-const SLOT: u32 = 100_000;
-
 /// How the service answers.
 const RIGHT: i32 = 0;
 const RIGHT_BUT_RENEW: i32 = 1;
@@ -55,14 +49,16 @@ impl<'a> Gatekeeper<'a> {
     }
 
     /// Have the secure world check `password` against what it recognises
-    /// for `user`, and give back the note it writes for a right answer.
-    /// `enrolled` is what the phone recorded when the credential was set.
+    /// in `slot`, and give back the note it writes for a right answer.
+    /// `enrolled` is what the phone recorded when that slot was enrolled.
+    /// A phone keeps more than one slot for a user: one for what they
+    /// type and one for the secret behind it.
     ///
-    /// A wrong answer is counted against the user by the secure world, so
+    /// A wrong answer is counted against the slot by the secure world, so
     /// this is not something to call twice over on a guess.
-    pub fn verify(&self, user: u32, enrolled: &[u8], password: &[u8]) -> Result<Token> {
+    pub fn verify(&self, slot: u32, enrolled: &[u8], password: &[u8]) -> Result<Token> {
         let mut call = Message::call(SERVICE);
-        call.u32(SLOT + user);
+        call.u32(slot);
         // Nothing asked for this note, so it answers no challenge.
         call.u64(0);
         call.bytes(enrolled);

@@ -271,7 +271,7 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Data { credential } => {
             let binder = skyward_binder::driver::Binder::open()?;
-            let mut service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
             let at = Path::new(skyward_crypto::data::MOUNT);
             if skyward_block::mount::is_mount_point(at)? {
                 println!("{} is open already", at.display());
@@ -283,9 +283,13 @@ fn main() -> Result<()> {
             println!("the files that belong to no one user can be read");
             let users = skyward_crypto::data::open_users(&service)?;
             println!("users whose own keys are in: {users:?}");
+            let mut owner = None;
             for user in users {
-                match skyward_crypto::data::open_user_files(&mut service, user, credential.as_deref().map(str::as_bytes)) {
-                    Ok(()) => println!("user {user}'s own files can be read"),
+                match skyward_crypto::data::open_user_files(&service, user, credential.as_deref().map(str::as_bytes), owner.as_ref()) {
+                    Ok(note) => {
+                        println!("user {user}'s own files can be read");
+                        owner = owner.or(note);
+                    }
                     Err(e) => println!("user {user}'s own files stay closed: {e:#}"),
                 }
             }

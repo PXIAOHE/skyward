@@ -7,6 +7,7 @@
 use crate::gatekeeper::Gatekeeper;
 use crate::keymint::KeyMint;
 use crate::keystore::{StoredKey, Unwrap};
+use crate::token::Token;
 use anyhow::{Context, Result};
 use skyward_binder::driver::Binder;
 use skyward_block::dm::Target;
@@ -164,7 +165,7 @@ const PROTECTORS: &str = "/data/system_de";
 /// another, and which is current is its own business, so this refuses to
 /// guess.
 pub fn protector(user: u32) -> Result<crate::user::Protector> {
-    let dir = Path::new(PROTECTORS).join(user.to_string()).join("spblob");
+    let dir = blobs(user);
     let mut ids = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
         let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
@@ -195,34 +196,99 @@ pub fn protector(user: u32) -> Result<crate::user::Protector> {
     })
 }
 
-/// Let in the key for a user's own files. `credential` is what the user
-/// would type at their screen lock; a user who has set none needs none,
-/// and has a fixed stand-in for it.
-pub fn open_user_files(service: &mut KeyMint, user: u32, credential: Option<&[u8]>) -> Result<()> {
+/// Which of the secure world's slots a user's enrolments sit in. What the
+/// user types is enrolled a hundred thousand above their own number,
+/// keeping it apart from the enrolments made before phones kept
+/// credentials this way; the secret behind it is enrolled under the
+/// number itself.
+const TYPED_SLOT: u32 = 100_000;
+
+/// What the phone calls the enrolment of a user's own secret, among the
+/// blobs it keeps for that user.
+const BLOBS: &str = "spblob";
+const SECRET_HANDLE: &str = "0000000000000000.handle";
+
+/// Where a user's blobs are.
+fn blobs(user: u32) -> PathBuf {
+    Path::new(PROTECTORS).join(user.to_string()).join(BLOBS)
+}
+
+/// Where a phone keeps the credential it made up itself for a user whose
+/// screen lock is the owner's. The file holds a nonce and then the
+/// credential, encrypted under a key the owner's own secret guards.
+const MADE_UP: &str = "/data/system/users";
+const MADE_UP_FILE: &str = "gatekeeper.profile.key";
+
+/// The name the key service keeps that key under.
+const MADE_UP_KEY: &str = "profile_key_name_decrypt_";
+
+/// The credential a phone made up for `user`, where it made one up. A
+/// phone does this for the users it keeps beside the owner's own, such as
+/// the one that holds a second copy of an app: nobody ever types their
+/// credential, so the phone writes one down for itself and keeps it behind
+/// the owner's. `owner` is the note the owner's credential gave.
+fn made_up_credential(service: &KeyMint, user: u32, owner: Option<&Token>) -> Result<Option<Vec<u8>>> {
+    let file = Path::new(MADE_UP).join(user.to_string()).join(MADE_UP_FILE);
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let stored = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
+    if stored.len() < NONCE_BYTES + TAG_BYTES {
+        anyhow::bail!("{} is {} bytes, too few to hold a credential", file.display(), stored.len());
+    }
+    let (nonce, body) = stored.split_at(NONCE_BYTES);
+    let alias = format!("{MADE_UP_KEY}{user}");
+    let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &alias)?;
+    let credential = service.gcm_decrypt(&held, &[], nonce, body, owner).with_context(|| {
+        format!("open the credential the phone made up for user {user}, which is kept behind the owner's own")
+    })?;
+    Ok(Some(credential))
+}
+
+/// How long the nonce and the check are on everything the key service
+/// encrypts.
+const NONCE_BYTES: usize = 12;
+const TAG_BYTES: usize = 16;
+
+/// Let in the key for a user's own files, and give the note the secure
+/// world wrote for the secret behind their credential, which is what the
+/// keys the phone keeps for them are guarded by. `credential` is what the
+/// user would type at their screen lock; a user who has set none needs
+/// none, and a user the phone made one up for needs `owner`, the note the
+/// owner's own secret gave.
+pub fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Option<Token>> {
     let protector = protector(user)?;
-    let stretched = match &protector.lock {
+    let (stretched, note) = match &protector.lock {
         Some(lock) => {
-            let typed = credential.with_context(|| format!("user {user} has set a screen lock, and their files do not open without it"))?;
-            let stretched = lock.stretched(typed).context("stretch what the user typed")?;
+            let typed = match made_up_credential(service, user, owner)? {
+                Some(made_up) => made_up,
+                None => credential
+                    .with_context(|| format!("user {user} has set a screen lock, and their files do not open without it"))?
+                    .to_vec(),
+            };
+            let stretched = lock.stretched(&typed).context("stretch the credential")?;
             // The key holding this user's secret is guarded by the screen
             // lock, so the secure world has to be shown the credential
             // itself before it will use that key.
             let hardware = Binder::hardware()?;
-            let note = Gatekeeper::open(&hardware)?.verify(user, &lock.enrolled, &crate::user::gatekeeper_password(&stretched))?;
-            service.vouch(note);
-            stretched
+            let note = Gatekeeper::open(&hardware)?.verify(
+                TYPED_SLOT + user,
+                &lock.enrolled,
+                &crate::user::gatekeeper_password(&stretched),
+            )?;
+            (stretched, Some(note))
         }
-        None => crate::user::stretched_without_credential(),
+        None => (crate::user::stretched_without_credential(), None),
     };
     let stretched = &stretched[..];
     let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &protector.key_alias())?;
     let content = crate::user::content(&protector.blob)?;
-    if content.len() < 12 {
+    if content.len() < NONCE_BYTES + TAG_BYTES {
         anyhow::bail!("the user's blob is too short to hold anything");
     }
-    let (nonce, body) = content.split_at(12);
+    let (nonce, body) = content.split_at(NONCE_BYTES);
     let inner = service
-        .gcm_decrypt(&held, &[], nonce, body)
+        .gcm_decrypt(&held, &[], nonce, body, note.as_ref())
         .context("open what the secure world holds the user's blob closed with")?;
     let secret = crate::user::protector_secret(stretched, &protector.secdiscardable);
     let synthetic_password = crate::user::open_inner(&secret, &inner)?;
@@ -238,7 +304,24 @@ pub fn open_user_files(service: &mut KeyMint, user: u32, credential: Option<&[u8
         false => raw,
     };
     crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
-    Ok(())
+    secret_note(user, &synthetic_password)
+}
+
+/// Have the secure world check the user's own secret, so the keys the
+/// phone keeps for that user can be used. A user whose secret the secure
+/// world knows nothing about has no note to give.
+fn secret_note(user: u32, synthetic_password: &[u8]) -> Result<Option<Token>> {
+    let handle = blobs(user).join(SECRET_HANDLE);
+    if !handle.is_file() {
+        return Ok(None);
+    }
+    let enrolled = std::fs::read(&handle).with_context(|| format!("read {}", handle.display()))?;
+    let hardware = Binder::hardware()?;
+    let password = crate::user::secret_gatekeeper_password(synthetic_password);
+    let note = Gatekeeper::open(&hardware)?
+        .verify(user, &enrolled, &password)
+        .with_context(|| format!("have the secure world check the secret behind user {user}'s credential"))?;
+    Ok(Some(note))
 }
 
 /// Build the device-mapper target that reads the partition through the

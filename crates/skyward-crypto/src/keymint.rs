@@ -119,7 +119,6 @@ pub struct Hardware {
 /// The phone's key service, as this program talks to it.
 pub struct KeyMint<'a> {
     device: Handle<'a>,
-    note: Option<Token>,
 }
 
 impl<'a> KeyMint<'a> {
@@ -127,13 +126,7 @@ impl<'a> KeyMint<'a> {
     pub fn open(binder: &'a Binder) -> Result<KeyMint<'a>> {
         let device = service::find(binder, SERVICE)?
             .with_context(|| format!("{SERVICE} is not running; the phone's key service has to be started first"))?;
-        Ok(KeyMint { device, note: None })
-    }
-
-    /// Keep the note the secure world wrote when a user answered their
-    /// screen lock, so the keys it guards can be used from here on.
-    pub fn vouch(&mut self, note: Token) {
-        self.note = Some(note);
+        Ok(KeyMint { device })
     }
 
     pub fn hardware(&self) -> Result<Hardware> {
@@ -199,9 +192,10 @@ impl<'a> KeyMint<'a> {
     /// Undo an AES-GCM encryption the key service did with `key_blob`. The
     /// service only hands back the plaintext when `app_id` is the one the
     /// key was made for, so a wrong secret fails here rather than yielding
-    /// something that looks like a key.
-    pub fn gcm_decrypt(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], body: &[u8]) -> Result<Vec<u8>> {
-        let operation = match self.begin(key_blob, app_id, nonce) {
+    /// something that looks like a key. A key guarded by a screen lock
+    /// takes the note the secure world wrote when it was answered.
+    pub fn gcm_decrypt(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], body: &[u8], note: Option<&Token>) -> Result<Vec<u8>> {
+        let operation = match self.begin(key_blob, app_id, nonce, note) {
             Ok(operation) => operation,
             Err(e) if status::refused_with(&e) == Some(KEY_REQUIRES_UPGRADE) => {
                 // The phone's firmware has moved on since this key was
@@ -209,7 +203,7 @@ impl<'a> KeyMint<'a> {
                 // now; the one on disk is left as it is, so nothing of the
                 // phone's own is changed by reading it here.
                 let renewed = self.upgrade(key_blob, app_id, nonce).context("renew the key for the firmware running now")?;
-                self.begin(&renewed, app_id, nonce)?
+                self.begin(&renewed, app_id, nonce, note)?
             }
             Err(e) => return Err(e),
         };
@@ -232,7 +226,7 @@ impl<'a> KeyMint<'a> {
     }
 
     /// Open a decryption with the key service and keep hold of it.
-    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8]) -> Result<Handle<'a>> {
+    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
         let mut call = Parcel::call(DEVICE);
         call.i32(PURPOSE_DECRYPT);
         call.blob(key_blob);
@@ -240,7 +234,7 @@ impl<'a> KeyMint<'a> {
         // A key guarded by the screen lock takes the note the secure world
         // wrote when the user answered it; one that is not guarded takes
         // nothing, and is refused nothing for carrying a note either.
-        match &self.note {
+        match note {
             Some(note) => vouched(&mut call, note),
             None => call.none(),
         }
