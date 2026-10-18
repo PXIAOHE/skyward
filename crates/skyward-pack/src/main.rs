@@ -105,17 +105,38 @@ fn main() -> Result<()> {
             // one. update_engine refuses a package built before the recovery
             // itself unless both of the last two are set; the recovery checks
             // packages against the installed system instead.
-            let mut props = rd
+            let stock_props = &rd
                 .find(paths::PROP_DEFAULT)
                 .with_context(|| format!("{} is not in the ramdisk", paths::PROP_DEFAULT))?
-                .data
-                .clone();
+                .data;
+            let mut props = without(stock_props, &BUILD_VERSION);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
             img.ramdisk = rd.encode()?;
             write(&out, &img)
         }
     }
+}
+
+/// What a recovery image says about the build it is: the version of its own
+/// ramdisk, which is older than the system installed beside it whenever the
+/// phone has taken an update. The phone's secure services read these to tell
+/// the secure world which build is running, and keys the installed system
+/// made are refused when they say the wrong one, so they are left out here
+/// for the recovery to fill in from the installed system once it has that
+/// mounted.
+const BUILD_VERSION: [&str; 2] = ["ro.build.version.release", "ro.build.version.security_patch"];
+
+/// A property file without the lines that set any of `names`.
+fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(props.len());
+    for line in props.split_inclusive(|b| *b == b'\n') {
+        let key = line.split(|b| *b == b'=').next().unwrap_or_default();
+        if !names.iter().any(|n| n.as_bytes() == key) {
+            out.extend_from_slice(line);
+        }
+    }
+    out
 }
 
 fn write(out: &Path, img: &BootImage) -> Result<()> {
@@ -143,4 +164,27 @@ fn list(image: &Path) -> Result<()> {
     }
     println!("{} entries", rd.entries.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_lines_that_set_a_name_are_the_only_ones_left_out() {
+        let props = b"ro.build.id=TQ\nro.build.version.release=13\nro.build.version.release_or_codename=13\nro.product.name=ishtar\n";
+        let out = without(props, &BUILD_VERSION);
+        let text = String::from_utf8(out).expect("property files are text");
+        assert!(!text.contains("ro.build.version.release=13"));
+        assert!(text.contains("ro.build.version.release_or_codename=13"), "a longer name is left alone");
+        assert!(text.contains("ro.build.id=TQ") && text.contains("ro.product.name=ishtar"));
+    }
+
+    #[test]
+    fn a_file_without_a_last_newline_keeps_its_last_line() {
+        let out = without(b"a=1\nro.build.version.release=13", &BUILD_VERSION);
+        assert_eq!(out, b"a=1\n");
+        let kept = without(b"a=1\nb=2", &BUILD_VERSION);
+        assert_eq!(kept, b"a=1\nb=2");
+    }
 }

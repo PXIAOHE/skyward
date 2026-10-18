@@ -137,7 +137,8 @@ impl<'a> KeyMint<'a> {
             for _ in 0..read.i32()?.max(0) {
                 let next = read.structure()?;
                 let tag = read.i32()?;
-                read.i32().context("read which kind of value the tag carries")?;
+                read.i32().context("read whether the tag has a value")?;
+                read.i32().context("read which arm of the value is set")?;
                 let value = match tag & TAG_KIND {
                     KIND_ULONG | KIND_ULONG_REP | KIND_DATE => read.i64()?,
                     KIND_BYTES | KIND_BIGNUM => read.blob()?.len() as i64,

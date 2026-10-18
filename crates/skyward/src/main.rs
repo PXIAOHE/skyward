@@ -226,13 +226,8 @@ fn main() -> Result<()> {
             let hw = service.hardware()?;
             println!("keymint {} version {} at security level {} by {}", hw.name, hw.version, hw.security_level, hw.author);
             let stored = skyward_crypto::keystore::StoredKey::load(&key)?;
-            match stored.authorizations(&service) {
-                Ok(tags) => {
-                    for (tag, value) in tags {
-                        println!("  tag {tag} = {value}");
-                    }
-                }
-                Err(e) => println!("what the key may be used for is not readable: {e:#}"),
+            for (tag, value) in stored.authorizations(&service)? {
+                println!("  tag {tag} = {value}");
             }
             let raw = stored.unwrap(skyward_crypto::keystore::Unwrap::Hardware(&service))?;
             println!("{} holds a key of {} bytes", key.display(), raw.len());
@@ -305,11 +300,33 @@ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
 /// both read from the partitions just mounted: on the 13 Ultra, the
 /// touchscreen driver and the touch processing.
 #[cfg(target_os = "android")]
-fn bring_up(cfg: &DeviceConfig) -> Result<()> {
+fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
+    let nodes = skyward_sys::ueventd::apply()?;
+    skyward_sys::kmsg(&format!("{nodes} device nodes given the owner their phone describes"))?;
+    adopt_installed_version(slot)?;
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }
     services::start(&cfg.services)
+}
+
+/// What the phone's own secure services read to tell the secure world which
+/// build is running. A recovery image carries its own, older build's values;
+/// the secure world then sees keys the installed system made as made under
+/// a build it does not know, and refuses them. The recovery's property files
+/// leave these two out so that they can be set here instead.
+#[cfg(target_os = "android")]
+const BUILD_VERSION: [&str; 2] = ["ro.build.version.release", "ro.build.version.security_patch"];
+
+#[cfg(target_os = "android")]
+fn adopt_installed_version(slot: skyward_vab::Slot) -> Result<()> {
+    let props = skyward_info::installed_props(slot)?;
+    for name in BUILD_VERSION {
+        let value = props.get(name).with_context(|| format!("the installed system says no {name}"))?;
+        skyward_sys::set_prop(name, value)?;
+        skyward_sys::kmsg(&format!("{name} is the installed system's {value}"))?;
+    }
+    Ok(())
 }
 
 /// The recovery service. adb comes up first so a failure later on can be
@@ -355,7 +372,7 @@ fn recovery() -> Result<()> {
                 // Without them the screen still shows and the keys still
                 // work, so this reason goes to the kernel log as well.
                 #[cfg(target_os = "android")]
-                if let Err(e) = bring_up(&cfg) {
+                if let Err(e) = bring_up(&cfg, slot) {
                     skyward_sys::kmsg(&format!("devices not brought up: {e:#}"))?;
                 }
             }

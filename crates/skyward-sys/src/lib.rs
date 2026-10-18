@@ -4,6 +4,7 @@ use std::io::Write;
 
 pub mod bcb;
 pub mod clock;
+pub mod ueventd;
 
 /// A system property, or `None` when it is unset.
 #[cfg(target_os = "android")]
