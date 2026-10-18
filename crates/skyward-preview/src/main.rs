@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
-use skyward_ui::app::{Action, App, Choice, Damage, Install, Pick, Screen, Touch};
+use skyward_ui::app::{Action, App, Choice, Damage, Install, Pick, Screen, Touch, SCREEN_OFF};
 use skyward_ui::widgets::{self, Bar};
 use skyward_ui::{Canvas, Fonts, Theme};
 use skyward_vab::{Slot, SnapshotState};
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     let open = DataState::Decrypted;
     // Whole pages, the way a long screenshot shows them. The About page's
     // field is drawn only on screen, so it appears among the moments below.
-    let shots: [Shot; 11] = [
+    let shots: [Shot; 12] = [
         ("01-decrypt-dark", Screen::Decrypt, true, &info, DataState::Locked, &[0, 3, 4, 5, 8]),
         ("02-home-light", Screen::Home, false, &info, open, &[]),
         ("03-home-dark-update-pending", Screen::Home, true, &pending, open, &[]),
@@ -66,6 +66,7 @@ fn main() -> Result<()> {
         ("10-specs-dark", Screen::Specs, true, &info, open, &[]),
         ("11-install-light", Screen::Install, false, &info, open, &[]),
         ("12-install-dark-update-pending", Screen::Install, true, &pending, open, &[]),
+        ("13-screen-off-light", Screen::ScreenOff, false, &info, open, &[]),
     ];
     for (name, screen, dark, info, data, pattern) in shots {
         let mut app = App::new(screen, w, h, ppd);
@@ -75,6 +76,14 @@ fn main() -> Result<()> {
         write_png(&path, &whole_page(&mut app, &fonts, info, data))?;
         println!("wrote {}", path.display());
     }
+
+    // The screen kept on, which warns about burn-in.
+    let mut app = App::new(Screen::ScreenOff, w, h, ppd);
+    app.state.dark = true;
+    app.state.screen_off = SCREEN_OFF.iter().position(Option::is_none).expect("one choice keeps the screen on");
+    let path = out.join("14-screen-off-never-dark.png");
+    write_png(&path, &whole_page(&mut app, &fonts, &info, open))?;
+    println!("wrote {}", path.display());
 
     // The sideload page through an install, as the installer tells it.
     let recovery = ImageKind::Boot { kernel: false, ramdisk: Ramdisk::Recovery };
