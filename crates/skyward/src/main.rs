@@ -10,6 +10,8 @@ mod haptics;
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
+mod secure;
+#[cfg(target_os = "android")]
 mod services;
 #[cfg(target_os = "android")]
 mod ui;
@@ -177,7 +179,7 @@ fn main() -> Result<()> {
         Cmd::Umount => skyward_vab::unmount_partitions(booted_slot()?),
         #[cfg(target_os = "android")]
         Cmd::Services { config } => {
-            services::start(&DeviceConfig::load(&config)?.services)?;
+            services::start(&DeviceConfig::load(&config)?.services, secure::libraries()?.as_deref())?;
             loop {
                 std::thread::park();
             }
@@ -307,7 +309,18 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }
-    services::start(&cfg.services)
+    // Only a program that has to register with the service directory needs
+    // the directory to know the phone describes it.
+    let registering: Vec<String> = cfg.services.iter().filter_map(|s| s.ready_service.clone()).collect();
+    if !registering.is_empty() {
+        let described = secure::publish_descriptions(&registering)?;
+        skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;
+    }
+    let libraries = secure::libraries()?;
+    if let Some(dir) = &libraries {
+        skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
+    }
+    services::start(&cfg.services, libraries.as_deref())
 }
 
 /// What the phone's own secure services read to tell the secure world which

@@ -109,6 +109,15 @@ pub struct Service {
     /// Directories for LD_LIBRARY_PATH, searched in order.
     #[serde(default)]
     pub libraries: Vec<String>,
+    /// A property the program sets once it is ready for the rest. Programs
+    /// are started in the order they are written, and one that says it has
+    /// something to wait for holds up the ones after it.
+    #[serde(default)]
+    pub ready_property: Option<String>,
+    /// A service the program registers with the phone's service directory
+    /// once it is ready.
+    #[serde(default)]
+    pub ready_service: Option<String>,
 }
 
 impl Service {
@@ -182,23 +191,34 @@ mod tests {
         assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 560));
         assert!(cfg.decrypt.weaver.is_empty());
         assert_eq!(cfg.modules.load, ["fts_touch_spi"]);
+        let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(
-            cfg.services,
+            paths,
             [
-                Service { path: "/odm/bin/touch_report".into(), libraries: Vec::new() },
-                Service { path: "/odm/bin/touchsensor".into(), libraries: vec!["/odm/lib64".into(), "/system/lib64".into()] },
+                "/odm/bin/touch_report",
+                "/odm/bin/touchsensor",
+                "/vendor/bin/qseecomd",
+                "/vendor/bin/hw/android.hardware.security.keymint-service-qti",
             ]
+        );
+        assert_eq!(cfg.services[1].libraries, ["/odm/lib64", "/system/lib64"]);
+        assert_eq!(cfg.services[0].ready_property, None, "the touch programs are ready as soon as they run");
+        assert_eq!(cfg.services[2].ready_property.as_deref(), Some("vendor.sys.listeners.registered"));
+        assert_eq!(
+            cfg.services[3].ready_service.as_deref(),
+            Some("android.hardware.security.keymint.IKeyMintDevice/default")
         );
     }
 
     #[test]
     fn services_use_the_partitions_they_run_from() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
-        let [report, sensor] = &cfg.services[..] else { panic!("ishtar keeps two programs running") };
+        let [report, sensor, listeners, ..] = &cfg.services[..] else { panic!("ishtar keeps several programs running") };
         assert!(report.uses(Path::new("/odm")));
         assert!(sensor.uses(Path::new("/odm")));
         assert!(!report.uses(Path::new("/odm_dlkm")), "a longer name is another partition");
         assert!(!sensor.uses(Path::new("/mnt/system")), "its /system/lib64 is the recovery's own");
         assert!(!report.uses(Path::new("/vendor")));
+        assert!(listeners.uses(Path::new("/vendor")));
     }
 }

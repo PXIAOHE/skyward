@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 pub mod dm;
+pub mod loopdev;
 pub mod mount;
 
 pub const BY_NAME: &str = "/dev/block/by-name";

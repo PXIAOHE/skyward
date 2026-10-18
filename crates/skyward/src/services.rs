@@ -15,19 +15,63 @@ use std::time::{Duration, Instant};
 /// before it is started again.
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 
+/// How long a program gets to become what it says it will be.
+const READY_TIMEOUT: Duration = Duration::from_secs(20);
+const READY_POLL: Duration = Duration::from_millis(100);
+
 /// Keep each program running, one thread per program: start it, and start
-/// it again whenever it exits. A program still running from an earlier
-/// instance of the recovery service is waited on instead of started twice.
-pub fn start(services: &[Service]) -> Result<()> {
+/// it again whenever it exits. They are started in the order they are
+/// written, and one that says what it will be ready with holds up those
+/// after it until it is. A program still running from an earlier instance
+/// of the recovery service is waited on instead of started twice.
+///
+/// `libraries` is a directory of shared libraries every one of them may
+/// need, searched after whatever it names itself.
+pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
     for s in services {
         if !Path::new(&s.path).is_file() {
             bail!("{} is missing; is its partition mounted?", s.path);
         }
-        let s = s.clone();
+        let mut s = s.clone();
+        if let Some(dir) = libraries {
+            s.libraries.push(dir.to_string_lossy().into_owned());
+        }
+        let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
         thread::Builder::new().name(name).spawn(move || supervise(&s)).context("start a supervising thread")?;
+        ready(&waiting)?;
     }
     Ok(())
+}
+
+/// Wait until the program has what it says it will be ready with.
+fn ready(s: &Service) -> Result<()> {
+    if s.ready_property.is_none() && s.ready_service.is_none() {
+        return Ok(());
+    }
+    let until = Instant::now() + READY_TIMEOUT;
+    loop {
+        if let Some(name) = &s.ready_property {
+            if skyward_sys::prop(name).is_some_and(|v| !v.is_empty()) {
+                return Ok(());
+            }
+        }
+        if let Some(name) = &s.ready_service {
+            // The service directory may itself be starting again, and
+            // until it answers nothing can be looked up in it.
+            if registered(name) {
+                return Ok(());
+            }
+        }
+        if Instant::now() >= until {
+            match (&s.ready_property, &s.ready_service) {
+                (Some(p), _) => bail!("{} set no {p} in {} seconds", s.path, READY_TIMEOUT.as_secs()),
+                (_, Some(n)) => bail!("{} registered no {n} in {} seconds", s.path, READY_TIMEOUT.as_secs()),
+                _ => unreachable!("one of them is set"),
+            }
+        }
+        thread::sleep(READY_POLL);
+    }
 }
 
 fn supervise(s: &Service) -> ! {
@@ -114,8 +158,27 @@ fn lock(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether a service has registered. The service directory may itself be
+/// starting again, and until it answers nothing is registered as far as
+/// anyone can tell.
+pub fn registered(name: &str) -> bool {
+    match skyward_binder::driver::Binder::open() {
+        Ok(binder) => matches!(skyward_binder::service::find(&binder, name), Ok(Some(_))),
+        Err(_) => false,
+    }
+}
+
+/// Whether the service directory takes calls. What it is asked about does
+/// not matter; that it answers does.
+pub fn reachable() -> bool {
+    match skyward_binder::driver::Binder::open() {
+        Ok(binder) => skyward_binder::service::find(&binder, "android.os.IServiceManager").is_ok(),
+        Err(_) => false,
+    }
+}
+
 /// A process already running `path`.
-fn running(path: &str) -> Option<u32> {
+pub fn running(path: &str) -> Option<u32> {
     fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
         let pid: u32 = e.file_name().to_str()?.parse().ok()?;
         (fs::read_link(e.path().join("exe")).ok()? == Path::new(path)).then_some(pid)
