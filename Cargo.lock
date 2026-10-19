@@ -1164,6 +1164,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skyward-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+]
+
+[[package]]
 name = "skyward-info"
 version = "0.1.0"
 dependencies = [
