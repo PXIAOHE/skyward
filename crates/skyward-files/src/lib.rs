@@ -405,6 +405,51 @@ pub fn delete(paths: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(P
     Ok(())
 }
 
+/// Delete every file under each of `folders`, leaving the folders and all
+/// the folders, links, pipes and sockets in them: the programs that made
+/// those keep them where they left them. A folder that is not there holds
+/// nothing to delete; one with another filesystem mounted inside it is
+/// refused before anything goes.
+pub fn delete_files(folders: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
+    let mut files = Vec::new();
+    for folder in folders {
+        if exists(folder)? {
+            files_in(folder, None, &mut files)?;
+        }
+    }
+    let total_bytes = files.iter().map(|(_, len)| len).sum();
+    let mut p = Progress { total_bytes, total_entries: files.len() as u64, ..Progress::default() };
+    progress(p);
+    for (file, len) in &files {
+        going(cancel)?;
+        fs::remove_file(file).with_context(|| format!("delete {}", file.display()))?;
+        p.bytes += len;
+        p.entries += 1;
+        progress(p);
+    }
+    Ok(())
+}
+
+/// The files under `folder` and how many bytes each holds, added to `out`;
+/// `dev` is the device of the folder it is in, which it has to be on.
+fn files_in(folder: &Path, dev: Option<u64>, out: &mut Vec<(PathBuf, u64)>) -> Result<()> {
+    let meta = fs::symlink_metadata(folder).with_context(|| format!("look at {}", folder.display()))?;
+    ensure!(meta.is_dir(), "{} is not a folder", folder.display());
+    if dev.is_some_and(|d| d != meta.dev()) {
+        bail!("another filesystem is mounted at {}; unmount it first", folder.display());
+    }
+    for entry in fs::read_dir(folder).with_context(|| format!("read {}", folder.display()))? {
+        let path = entry.with_context(|| format!("read {}", folder.display()))?.path();
+        let inside = fs::symlink_metadata(&path).with_context(|| format!("look at {}", path.display()))?;
+        if inside.is_dir() {
+            files_in(&path, Some(meta.dev()), out)?;
+        } else if inside.is_file() {
+            out.push((path, inside.len()));
+        }
+    }
+    Ok(())
+}
+
 fn remove(path: &Path, cancel: &AtomicBool, p: &mut Progress, progress: &mut dyn FnMut(Progress)) -> Result<()> {
     going(cancel)?;
     let meta = fs::symlink_metadata(path).with_context(|| format!("look at {}", path.display()))?;
@@ -786,6 +831,36 @@ mod tests {
         delete(&[root.clone(), at.join("loose.txt")], &AtomicBool::new(false), &mut |p| seen.push(p.entries)).unwrap();
         assert!(!root.exists() && !at.join("loose.txt").exists());
         assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6], "every entry is told as it goes");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn deleting_files_leaves_every_folder_link_and_pipe() {
+        let at = scratch("delete-files");
+        let root = tree(&at);
+        let pipe = std::ffi::CString::new(root.join("2026/pipe").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0, "make a pipe");
+        fs::create_dir(root.join("empty")).unwrap();
+        let mut last = Progress::default();
+        let folders = [root.clone(), at.join("absent")];
+        delete_files(&folders, &AtomicBool::new(false), &mut |p| last = p).unwrap();
+        assert!(!root.join("a.jpg").exists() && !root.join("2026/b.txt").exists(), "the files are gone");
+        assert!(root.join("2026").is_dir() && root.join("empty").is_dir(), "the folders stay");
+        assert!(fs::symlink_metadata(root.join("latest")).unwrap().file_type().is_symlink(), "the link stays");
+        assert!(fs::symlink_metadata(root.join("2026/pipe")).unwrap().file_type().is_fifo(), "the pipe stays");
+        let bytes = 3 * CHUNK as u64 + 5 + 5;
+        assert_eq!(last, Progress { bytes, total_bytes: bytes, entries: 2, total_entries: 2 }, "only files are counted");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn deleting_files_stops_when_asked() {
+        let at = scratch("delete-files-stop");
+        let root = tree(&at);
+        let stop = AtomicBool::new(true);
+        let stopped = delete_files(std::slice::from_ref(&root), &stop, &mut quiet());
+        assert!(stopped.unwrap_err().is::<Cancelled>());
+        assert!(root.join("a.jpg").exists(), "nothing went");
         fs::remove_dir_all(&at).unwrap();
     }
 
