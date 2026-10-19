@@ -249,14 +249,22 @@ pub(crate) fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> 
                 continue;
             }
             // A Latin word, file names and links among them, moves to the
-            // next line whole, unless it fills the line alone; so does an
-            // opening bracket in front of what moves.
+            // next line whole, unless it fills the line alone: then a path
+            // breaks after the last of its slashes on the line, and any
+            // other word where the line ends. An opening bracket in front of
+            // what moves goes with it.
             let word = |r: char| r.is_ascii_alphanumeric() || matches!(r, '_' | '-' | '.' | '/' | ':');
             let mut split = line.len();
             if word(ch) {
                 let start = line.char_indices().rev().take_while(|&(_, r)| word(r)).last().map(|(at, _)| at);
-                if let Some(at) = start.filter(|&at| at > 0) {
-                    split = at;
+                match start {
+                    Some(at) if at > 0 => split = at,
+                    Some(_) => {
+                        if let Some(slash) = line.rfind('/').filter(|&s| s > 0) {
+                            split = slash + 1;
+                        }
+                    }
+                    None => {}
                 }
             }
             if let Some((at, before)) = line[..split].char_indices().last() {
@@ -1806,5 +1814,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_path_too_long_for_a_line_breaks_after_a_slash() {
+        let f = crate::font::bundled();
+        let c = Canvas::new(1, 1);
+        let px = 40.0;
+        let text = "/data/dalvik-cache、/data/misc/apexdata/com.android.art/dalvik-cache、/data/ota 里预编译的代码";
+        let path = "/data/misc/apexdata/com.android.art/dalvik-cache";
+        let max_w = c.text_width(&f.body, path, px) * 0.8;
+        let lines = wrap(&c, &f.body, text, px, max_w);
+        assert_eq!(lines.concat(), text, "nothing lost: {lines:?}");
+        let broken = lines.iter().position(|l| l.ends_with("com.android.art/")).expect("the long path breaks after a slash");
+        assert!(lines[broken].starts_with("/data/misc/"), "the path starts its own line: {lines:?}");
+        assert!(lines[broken + 1].starts_with("dalvik-cache"), "and goes on with what follows the slash: {lines:?}");
     }
 }
