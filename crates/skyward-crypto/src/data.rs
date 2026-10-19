@@ -151,6 +151,90 @@ pub fn close() -> Result<()> {
     Ok(())
 }
 
+/// A user whose own files are still closed: who, the kind of screen lock
+/// they set in the phone's numbering, and whether the phone made their
+/// credential up, in which case they open behind the owner and nobody is
+/// asked for it. `why` says why such a user did not open behind the owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closed {
+    pub user: u32,
+    pub lock: i32,
+    pub made_up: bool,
+    pub why: Option<String>,
+}
+
+/// The data partition as far as it opens with nothing a user knows.
+pub struct Opening {
+    /// How it was mounted, where this mounted it rather than an earlier
+    /// run of the recovery.
+    pub mounted: Option<Opened>,
+    /// The users whose own files are still closed, the owner first.
+    pub closed: Vec<Closed>,
+}
+
+/// Open the data partition as far as it opens with nothing a user knows:
+/// mount it where it is not mounted, let in the keys of the files that
+/// belong to no one user and of each user's files readable before they
+/// sign in, and open the own files of every user who set no screen lock
+/// and, behind the owner's, of those whose credential the phone made up.
+pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
+    let mounted = match mount::is_mount_point(Path::new(MOUNT))? {
+        true => None,
+        false => Some(open(service)?),
+    };
+    open_shared(service)?;
+    let mut closed = Vec::new();
+    let mut owner = None;
+    for user in open_users(service)? {
+        match protector(user)?.lock {
+            None => {
+                let note = open_user_files(service, user, None, None)?;
+                if user == OWNER {
+                    owner = note;
+                }
+            }
+            Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user), why: None }),
+        }
+    }
+    Ok(Opening { mounted, closed: open_made_up(service, closed, owner.as_ref()) })
+}
+
+/// Open the own files of `user` with what they typed at their screen lock
+/// and, where `user` is the owner, of each of `closed` whose credential
+/// the phone made up behind theirs; give those still closed.
+pub fn unlock(service: &KeyMint, closed: &[Closed], user: u32, credential: &[u8]) -> Result<Vec<Closed>> {
+    let note = open_user_files(service, user, Some(credential), None)?;
+    let rest = closed.iter().filter(|c| c.user != user).cloned().collect();
+    Ok(match user == OWNER {
+        true => open_made_up(service, rest, note.as_ref()),
+        false => rest,
+    })
+}
+
+/// Open the own files of each of `closed` whose credential the phone made
+/// up, behind `owner`, the note the owner's own secret gave; give those
+/// still closed, a made-up one with why it did not open. With no note,
+/// none of them is tried.
+fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: Option<&Token>) -> Vec<Closed> {
+    let Some(owner) = owner else { return closed };
+    closed
+        .into_iter()
+        .filter_map(|c| match c.made_up {
+            false => Some(c),
+            true => match open_user_files(service, c.user, None, Some(owner)) {
+                Ok(_) => None,
+                Err(e) => Some(Closed { why: Some(format!("{e:#}")), ..c }),
+            },
+        })
+        .collect()
+}
+
+/// Whether the phone made up the credential of `user`, keeping it behind
+/// the owner's.
+fn made_up(user: u32) -> bool {
+    Path::new(MADE_UP).join(user.to_string()).join(MADE_UP_FILE).is_file()
+}
+
 /// Where the phone keeps the key for the files that are readable before
 /// anyone signs in, and what it says about how those files are encrypted.
 const SHARED_KEY: &str = "/data/unencrypted/key";
