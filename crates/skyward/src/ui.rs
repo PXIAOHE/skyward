@@ -11,8 +11,10 @@ use skyward_install::{Detach, Installer};
 use skyward_sys::bcb::{self, Work};
 use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
+use skyward_files::Ownership;
 use skyward_ui::app::{
-    App, Asked, ClashChoice, Effect, FileKind, FileOp, FileRow, FileTask, JobEnd, Keys, MountFailure, Part, Screen, Target, UsbLink,
+    App, Asked, ClashChoice, Effect, FileKind, FileOp, FileRow, FileTask, JobEnd, Keys, MountFailure, Part, RenameRefused, Screen,
+    Target, UsbLink,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
@@ -179,6 +181,25 @@ fn clash_rule(choice: ClashChoice) -> skyward_files::Clash {
     }
 }
 
+/// What a copy or move into the folder `into` gives the entries it makes.
+/// On the data partition each takes the owner, group and label the folder
+/// gives its own, as the system makes them there; in shared storage, the
+/// folder's permissions as well. Elsewhere each keeps what it had.
+fn ownership(into: &Path) -> Result<Ownership> {
+    use skyward_crypto::data;
+    let at = Path::new(data::MOUNT);
+    if !skyward_block::mount::is_mount_point(at)? {
+        return Ok(Ownership::Kept);
+    }
+    let here = fs::metadata(into).with_context(|| format!("look at {}", into.display()))?;
+    if here.dev() != fs::metadata(at).with_context(|| format!("look at {}", at.display()))?.dev() {
+        return Ok(Ownership::Kept);
+    }
+    let real = fs::canonicalize(into).with_context(|| format!("find {}", into.display()))?;
+    let shared = [data::SHARED_STORAGE, data::SDCARD].iter().any(|s| real.starts_with(s));
+    Ok(if shared { Ownership::Shared } else { Ownership::Folder })
+}
+
 /// The page's name for a part erasing goes through.
 fn part(step: Step) -> Part {
     match step {
@@ -251,8 +272,8 @@ fn clock() -> Result<String> {
     Ok(skyward_ui::fmt::clock(now.as_secs() as i64))
 }
 
-/// The recovery does not mount /data itself yet, so a mounted /data was
-/// mounted (and unlocked) by Android.
+/// Whether the data partition is mounted, which the recovery does only as
+/// it opens it; the mount outlives a restart of the recovery's program.
 fn data_state() -> Result<DataState> {
     let here = fs::metadata("/data").context("stat /data")?;
     let up = fs::metadata("/").context("stat /")?;
@@ -267,8 +288,16 @@ fn open_data() -> Result<Vec<u32>> {
     let binder = skyward_binder::driver::Binder::open()?;
     let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
     if !skyward_block::mount::is_mount_point(Path::new(data::MOUNT))? {
-        let (mapped, filesystem) = data::open(&service)?;
-        skyward_sys::kmsg(&format!("{} holds {filesystem} at {}", mapped.display(), data::MOUNT))?;
+        let opened = data::open(&service)?;
+        if let Some(checked) = &opened.checked {
+            skyward_sys::kmsg(&format!("the check of {} ended with {}", opened.mapped.display(), checked.status))?;
+            if checked.status != 0 {
+                for line in checked.said.lines() {
+                    skyward_sys::kmsg(line)?;
+                }
+            }
+        }
+        skyward_sys::kmsg(&format!("{} holds {} at {}", opened.mapped.display(), opened.filesystem, data::MOUNT))?;
     }
     data::open_shared(&service)?;
     data::open_users(&service)
@@ -796,10 +825,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                                 }
                             },
                         };
+                        let ownership = match ownership(Path::new(&into)) {
+                            Ok(ownership) => ownership,
+                            Err(e) => {
+                                app.report(&format!("{e:#}"), now);
+                                continue;
+                            }
+                        };
                         let (from, to) = (PathBuf::from(&path), PathBuf::from(&into));
                         let (task, shown) = match op {
-                            FileOp::Copy => (filework::Task::Copy { from, into: to, clash }, FileTask::Copy { path, into }),
-                            FileOp::Move => (filework::Task::Move { from, into: to, clash }, FileTask::Move { path, into }),
+                            FileOp::Copy => (filework::Task::Copy { from, into: to, clash, ownership }, FileTask::Copy { path, into }),
+                            FileOp::Move => (filework::Task::Move { from, into: to, clash, ownership }, FileTask::Move { path, into }),
                         };
                         worker = Some(filework::Worker::start(task)?);
                         app.file_job_started(shown);
@@ -816,7 +852,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             let folder = app.state.folder.clone();
                             list(&mut app, folder)?;
                         }
-                        Err(e) => app.renamed(Err(format!("{e:#}")), now),
+                        Err(e) if e.is::<skyward_files::Taken>() => app.renamed(Err(RenameRefused::Taken), now),
+                        Err(e) => app.renamed(Err(RenameRefused::Failed(format!("{e:#}"))), now),
                     },
                     // A partition that will not mount, or is in use, is the
                     // page's to report; the recovery carries on.

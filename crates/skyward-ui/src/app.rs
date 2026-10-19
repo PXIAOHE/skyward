@@ -116,6 +116,16 @@ pub enum FileTask {
     Delete { path: String },
 }
 
+/// Why an entry was not renamed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenameRefused {
+    /// Another entry in the folder has the name, as the folder compares
+    /// names: shared storage takes names in any case.
+    Taken,
+    /// What went wrong, as the system says it.
+    Failed(String),
+}
+
 /// How work on files ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JobEnd {
@@ -1464,7 +1474,7 @@ impl App {
 
     /// How renaming the entry the file page shows went: done, the folder
     /// comes back with the entry under its new name; refused, why.
-    pub fn renamed(&mut self, outcome: Result<(), String>, now: u64) {
+    pub fn renamed(&mut self, outcome: Result<(), RenameRefused>, now: u64) {
         match outcome {
             Ok(()) => {
                 while matches!(self.screen(), Screen::Rename | Screen::FileInfo) {
@@ -1475,8 +1485,15 @@ impl App {
                 self.refresh();
                 self.say("已重命名", now);
             }
-            Err(why) => self.report(&why, now),
+            Err(RenameRefused::Taken) => self.say_taken(now),
+            Err(RenameRefused::Failed(why)) => self.report(&why, now),
         }
+    }
+
+    /// The name typed for an entry is another entry's in the folder.
+    fn say_taken(&mut self, now: u64) {
+        let said = format!("这个文件夹里已经有「{}」", self.state.new_name);
+        self.say(&said, now);
     }
 
     /// The system asked for sideload before the recovery started: the page
@@ -2171,7 +2188,7 @@ impl App {
                         "." | ".." => self.say("名称不能是「.」或「..」", now),
                         _ if name.contains('/') => self.say("名称里不能有「/」", now),
                         _ if name == *current => return self.back(now),
-                        _ if taken => self.say(&format!("这个文件夹里已经有「{name}」"), now),
+                        _ if taken => self.say_taken(now),
                         _ => return vec![Effect::Rename { path: self.entry_path(), name }],
                     }
                 }
@@ -3784,8 +3801,11 @@ mod tests {
         type_text(&mut app, &f, &i, "b");
         let rename = Effect::Rename { path: "/sdcard/a.zip".into(), name: "ab".into() };
         assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![rename]);
-        app.renamed(Err("rename /sdcard/a.zip to ab: Read-only file system (os error 30)".into()), 0);
+        app.renamed(Err(RenameRefused::Failed("rename /sdcard/a.zip to ab: No space left on device (os error 28)".into())), 0);
         assert_eq!(app.screen(), Screen::Rename, "a name refused can be typed again");
+        app.toast = None;
+        app.renamed(Err(RenameRefused::Taken), 0);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("这个文件夹里已经有「ab」"), "as the folder compares names");
         app.renamed(Ok(()), 0);
         assert_eq!(app.screen(), Screen::Files, "renamed, the folder shows again");
     }

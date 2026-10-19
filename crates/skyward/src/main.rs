@@ -139,8 +139,9 @@ enum Cmd {
     /// credential and changes nothing.
     #[cfg(target_os = "android")]
     Gatekeeper,
-    /// Open the data partition with the key the phone keeps for it, and
-    /// mount it read-only.
+    /// Open the data partition with the key the phone keeps for it, check
+    /// it and mount it writable as the phone does, and open each user's
+    /// files that open; the owner's shared storage then shows at /sdcard.
     #[cfg(target_os = "android")]
     Data {
         /// What a user would type at their screen lock, where one is set.
@@ -296,8 +297,12 @@ fn main() -> Result<()> {
             if skyward_block::mount::is_mount_point(at)? {
                 println!("{} is open already", at.display());
             } else {
-                let (mapped, filesystem) = skyward_crypto::data::open(&service)?;
-                println!("{} holds {} at {}", mapped.display(), filesystem, at.display());
+                let opened = skyward_crypto::data::open(&service)?;
+                if let Some(checked) = &opened.checked {
+                    print!("{}", checked.said);
+                    println!("the check of {} ended with {}", opened.mapped.display(), checked.status);
+                }
+                println!("{} holds {} at {}", opened.mapped.display(), opened.filesystem, at.display());
             }
             skyward_crypto::data::open_shared(&service)?;
             println!("the files that belong to no one user can be read");

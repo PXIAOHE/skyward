@@ -3,7 +3,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use skyward_block::fstab::{self, Entry};
-use skyward_block::{dm, erase, mount};
+use skyward_block::{erase, mount};
 use skyward_sys::bcb;
 use skyward_vab::SnapshotState;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -65,7 +65,7 @@ impl Plan {
     /// memory tagging asked of the bootloader is forgotten too.
     pub fn carry_out(self, keep_memtag_mode: bool, at: &mut dyn FnMut(Step)) -> Result<()> {
         at(Step::Data);
-        close_data()?;
+        skyward_crypto::data::close()?;
         erase::discard(Path::new(&fstab::device(&self.data)?))?;
         if let Some(cache) = &self.cache {
             at(Step::Cache);
@@ -98,19 +98,6 @@ pub fn remake(entry: &Entry) -> Result<()> {
         mount::umount(at)?;
     }
     erase::make(Path::new(&fstab::device(entry)?), &entry.filesystem, &entry.extras)
-}
-
-/// Unmount the data partition and take away the device it was opened
-/// through, where the recovery opened it.
-fn close_data() -> Result<()> {
-    let at = Path::new(DATA);
-    if mount::is_mount_point(at)? {
-        mount::umount(at)?;
-    }
-    if dm::status(skyward_crypto::data::MAPPED)?.is_some() {
-        dm::remove(skyward_crypto::data::MAPPED)?;
-    }
-    Ok(())
 }
 
 /// What erasing tells the screen.

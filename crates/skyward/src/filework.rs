@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
 pub enum Task {
-    Copy { from: PathBuf, into: PathBuf, clash: Clash },
-    Move { from: PathBuf, into: PathBuf, clash: Clash },
+    Copy { from: PathBuf, into: PathBuf, clash: Clash, ownership: Ownership },
+    Move { from: PathBuf, into: PathBuf, clash: Clash, ownership: Ownership },
     Delete { path: PathBuf },
 }
 
@@ -69,11 +69,11 @@ impl Worker {
                     }
                 };
                 let ended = match task {
-                    Task::Copy { from, into, clash } => {
-                        skyward_files::copy(&[from], &into, clash, Ownership::Kept, &stop, &mut progress)
+                    Task::Copy { from, into, clash, ownership } => {
+                        skyward_files::copy(&[from], &into, clash, ownership, &stop, &mut progress)
                     }
-                    Task::Move { from, into, clash } => {
-                        skyward_files::move_into(&[from], &into, clash, Ownership::Kept, &stop, &mut progress)
+                    Task::Move { from, into, clash, ownership } => {
+                        skyward_files::move_into(&[from], &into, clash, ownership, &stop, &mut progress)
                     }
                     Task::Delete { path } => skyward_files::delete(&[path], &stop, &mut progress),
                 };

@@ -11,13 +11,24 @@ use crate::token::Token;
 use anyhow::{Context, Result};
 use skyward_binder::driver::Binder;
 use skyward_block::dm::Target;
+use skyward_block::fsck::Checked;
 use skyward_block::fstab::Entry;
+use skyward_block::{dm, mount};
 use std::path::{Path, PathBuf};
 
 /// Where the data partition is mounted, and the name its decrypted form is
 /// given among the device-mapper's devices.
 pub const MOUNT: &str = "/data";
 pub const MAPPED: &str = "userdata";
+
+/// Where the phone keeps the files its users share between apps, a folder
+/// for each user, and where the recovery shows the owner's, the way the
+/// phone shows them to apps.
+pub const SHARED_STORAGE: &str = "/data/media";
+pub const SDCARD: &str = "/sdcard";
+
+/// The phone's owner, the first of its users.
+const OWNER: u32 = 0;
 
 /// The key is in a directory of this name under the one the phone names.
 const KEY_DIR: &str = "key";
@@ -75,25 +86,69 @@ fn hardware_key(service: &KeyMint, dir: &Path, wrapped: bool) -> Result<Vec<u8>>
     }
 }
 
+/// The data partition as [`open`] leaves it.
+pub struct Opened {
+    /// The device the partition is read and written through, decrypted.
+    pub mapped: PathBuf,
+    pub filesystem: String,
+    /// How the check before mounting ended, where the phone's table asks
+    /// for one.
+    pub checked: Option<Checked>,
+}
+
 /// Open the phone's data partition: unwrap the key it is encrypted with,
-/// give that to the storage hardware, and mount what comes out read-only.
-/// The names and contents of each user's own files stay encrypted until
-/// that user's key is let in as well.
-pub fn open(service: &KeyMint) -> Result<(PathBuf, &'static str)> {
+/// give that to the storage hardware, check the filesystem where the
+/// phone's table asks for it, and mount it writable, as the phone mounts
+/// it. The names and contents of each user's own files stay encrypted
+/// until that user's key is let in as well. A partition that does not
+/// mount leaves no device behind.
+pub fn open(service: &KeyMint) -> Result<Opened> {
     let known = skyward_block::fstab::read(MOUNT)?;
     let entry = known.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
     let encryption = Encryption::of(entry)?;
     let device = skyward_block::fstab::device(entry)?;
     let key = storage_key(service, entry, &encryption)?;
     let sectors = skyward_block::size_bytes(&device)? / 512;
-    let mapped = skyward_block::dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], true)?;
-    std::fs::create_dir_all(MOUNT).with_context(|| format!("make {MOUNT}"))?;
-    // Files whose keys the storage hardware holds are decrypted as they
-    // are read, by the hardware; a filesystem not told to let it do that
-    // tries to decrypt them itself and cannot.
-    let options = if encryption.wrapped { "inlinecrypt" } else { "" };
-    let filesystem = skyward_block::mount::mount_ro_with(&mapped, Path::new(MOUNT), options)?;
-    Ok((mapped, filesystem))
+    let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
+    let mounted = (|| -> Result<Option<Checked>> {
+        let checked = match entry.extras.iter().any(|e| e == "check") {
+            true => Some(skyward_block::fsck::check(&mapped, &entry.filesystem)?),
+            false => None,
+        };
+        std::fs::create_dir_all(MOUNT).with_context(|| format!("make {MOUNT}"))?;
+        mount::mount(&mapped, Path::new(MOUNT), &entry.filesystem, &entry.options)?;
+        Ok(checked)
+    })();
+    match mounted {
+        Ok(checked) => Ok(Opened { mapped, filesystem: entry.filesystem.clone(), checked }),
+        Err(e) => match dm::remove(MAPPED) {
+            Ok(()) => Err(e),
+            Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+        },
+    }
+}
+
+/// Show the owner's shared storage at /sdcard; shown already, it stays.
+fn show_owner_storage() -> Result<()> {
+    let at = Path::new(SDCARD);
+    if mount::is_mount_point(at)? {
+        return Ok(());
+    }
+    mount::bind(&Path::new(SHARED_STORAGE).join(OWNER.to_string()), at)
+}
+
+/// Close what opening the partition opened, where the recovery opened it:
+/// /sdcard, the partition's mount, and the device it is read through.
+pub fn close() -> Result<()> {
+    for at in [SDCARD, MOUNT] {
+        if mount::is_mount_point(Path::new(at))? {
+            mount::umount(Path::new(at))?;
+        }
+    }
+    if dm::status(MAPPED)?.is_some() {
+        dm::remove(MAPPED)?;
+    }
+    Ok(())
 }
 
 /// Where the phone keeps the key for the files that are readable before
@@ -255,7 +310,8 @@ const TAG_BYTES: usize = 16;
 /// keys the phone keeps for them are guarded by. `credential` is what the
 /// user would type at their screen lock; a user who has set none needs
 /// none, and a user the phone made one up for needs `owner`, the note the
-/// owner's own secret gave.
+/// owner's own secret gave. The owner's files open, their shared storage
+/// shows at /sdcard.
 pub fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Option<Token>> {
     let protector = protector(user)?;
     let (stretched, note) = match &protector.lock {
@@ -304,6 +360,9 @@ pub fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, 
         false => raw,
     };
     crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
+    if user == OWNER {
+        show_owner_storage()?;
+    }
     secret_note(user, &synthetic_password)
 }
 
