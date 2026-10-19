@@ -1,5 +1,5 @@
-use crate::app::{FileKind, FileRow, MountFailure, BACKUP_PARTS};
-use skyward_info::{Battery, Charge, Cpu, DataState, PatchLevel, Storage};
+use crate::app::{Data, FileKind, FileRow, MountFailure, BACKUP_PARTS};
+use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
 use skyward_vab::{Slot, SnapshotState};
@@ -188,11 +188,11 @@ pub fn snapshot_mount_note(s: &SnapshotState) -> Option<&'static str> {
     }
 }
 
-pub fn data(d: DataState) -> &'static str {
+pub fn data(d: &Data) -> &'static str {
     match d {
-        DataState::Unmounted => "未挂载",
-        DataState::Locked => "未解密",
-        DataState::Decrypted => "已解密",
+        Data::Closed | Data::Opening | Data::Failed(_) => "未挂载",
+        Data::Locked { .. } => "未解密",
+        Data::Open => "已解密",
     }
 }
 

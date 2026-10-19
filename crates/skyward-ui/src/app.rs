@@ -11,7 +11,7 @@ use crate::search;
 use crate::term::{self, Term, TermKey};
 use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer};
-use skyward_info::{DataState, DeviceInfo};
+use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Stage};
 use skyward_vab::Slot;
 
@@ -226,14 +226,29 @@ pub struct MountFailure {
 }
 
 /// Which control answers a user's screen lock, by the kind of lock it is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keys {
-    /// No user has set one, so none is asked for.
-    #[default]
-    None,
     Pattern,
     Digits,
     Letters,
+}
+
+/// Where the data partition stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Data {
+    /// Not opened; the decrypt page opens it as it shows.
+    #[default]
+    Closed,
+    /// Being opened as far as it opens with nothing a user knows, which is
+    /// also when each user's screen lock is read.
+    Opening,
+    /// Open, with this user's own files waiting on their screen lock,
+    /// answered with `keys`; `checking` while what they entered is checked.
+    Locked { user: u32, keys: Keys, checking: bool },
+    /// Open, every user's own files with it.
+    Open,
+    /// Not opened, and why.
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,8 +260,6 @@ pub enum Confirm {
     Restore,
     /// Start next from the slot chosen on the slot page.
     Slot,
-    /// Open the data partition with the keys the phone keeps for it.
-    Decrypt,
     /// Erase all user data, as the system offered when it could not start.
     FactoryReset,
     /// Delete the entry the file page shows.
@@ -403,6 +416,8 @@ pub enum Action {
     Open(Screen),
     /// Leave the unlock page for the home page without keeping it behind.
     Skip,
+    /// Try opening the data partition again, after it did not open.
+    OpenData,
     Back,
     Theme { dark: bool },
     Toggle(Switch),
@@ -658,11 +673,10 @@ pub struct State {
     pub logs_to: usize,
     /// The slot chosen to start from next; `None` keeps the running one.
     pub next_slot: Option<Slot>,
-    /// What is typed at the screen lock, which control answers it, and
-    /// which users' own files are still closed.
+    /// Where the data partition stands, and what is typed at the screen
+    /// lock its users' own files wait on.
+    pub data: Data,
     pub code: String,
-    pub keys: Keys,
-    pub locked: Vec<u32>,
     /// What is typed in the search field.
     pub search: String,
     /// The on-screen keyboard's layer, and the key held down on it.
@@ -718,9 +732,8 @@ impl Default for State {
             logs: [true, true],
             logs_to: 0,
             next_slot: None,
+            data: Data::Closed,
             code: String::new(),
-            keys: Keys::None,
-            locked: Vec::new(),
             search: String::new(),
             layer: Layer::Letters,
             pressed: None,
@@ -777,10 +790,14 @@ pub enum Effect {
     Unmount(String),
     /// List the folder at this path for the file manager.
     ReadDir(String),
-    /// Open the data partition with the keys the phone keeps for it.
-    Decrypt,
-    /// Let in the keys for the own files of every user this code opens.
-    Unlock(String),
+    /// Open the data partition as far as it opens with nothing a user
+    /// knows, telling what waits with [`App::data_waiting`] or why it did
+    /// not open with [`App::data_failed`].
+    OpenData,
+    /// Open the own files of `user` with what they entered at their screen
+    /// lock, telling what still waits with [`App::data_waiting`] or why it
+    /// did not open with [`App::unlock_failed`].
+    Unlock { user: u32, code: String },
     /// Hand the USB port back from fastboot to adb, bring up what the
     /// recovery runs from the slot's partitions, then show its pages with
     /// [`App::enter_recovery`].
@@ -1341,18 +1358,36 @@ impl App {
         self.dirty = true;
     }
 
-    /// The runtime read the mount table again, or could not: keep it and
-    /// show it if it changed.
-    /// Which users' own files are still closed, and which control answers
-    /// the screen lock they are closed with.
-    pub fn set_locked(&mut self, locked: Vec<u32>, keys: Keys) {
-        if self.state.locked != locked || self.state.keys != keys {
-            self.state.locked = locked;
-            self.state.keys = keys;
-            self.refresh();
-        }
+    /// The data partition is open: every user's own files with it, or
+    /// those of `waiting`, the user and the control their screen lock is
+    /// answered with, still closed.
+    pub fn data_waiting(&mut self, waiting: Option<(u32, Keys)>) {
+        self.state.data = match waiting {
+            Some((user, keys)) => Data::Locked { user, keys, checking: false },
+            None => Data::Open,
+        };
+        self.state.code.clear();
+        self.refresh();
     }
 
+    /// The data partition did not open, and why.
+    pub fn data_failed(&mut self, why: String) {
+        self.state.data = Data::Failed(why);
+        self.refresh();
+    }
+
+    /// What the user entered did not open their own files: the page asks
+    /// again and says why.
+    pub fn unlock_failed(&mut self, why: String, now: u64) {
+        if let Data::Locked { checking, .. } = &mut self.state.data {
+            *checking = false;
+        }
+        self.refresh();
+        self.report(&why, now);
+    }
+
+    /// The runtime read the mount table again, or could not: keep it and
+    /// show it if it changed.
     pub fn set_mounts(&mut self, mounts: Result<Vec<MountRow>, String>) {
         if self.state.mounts != mounts {
             self.state.mounts = mounts;
@@ -1567,11 +1602,11 @@ impl App {
     }
 
     /// Render the current page if what it shows has changed.
-    pub fn frame(&mut self, f: &Fonts, info: &DeviceInfo, data: DataState) -> &Frame {
+    pub fn frame(&mut self, f: &Fonts, info: &DeviceInfo) -> &Frame {
         if self.frame.is_none() {
             let t = self.theme();
             let screen = self.screen();
-            let cx = Ctx { t: &t, f, info, data, state: &self.state, term: self.term.as_ref() };
+            let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref() };
             let frame = pages::render(screen, &cx);
             self.frame = Some(frame);
             self.clamp_scroll();
@@ -1599,8 +1634,8 @@ impl App {
     /// past an end if it is, its large title fading as it scrolls, the bar
     /// and its title over a scrolled page, the `<`, the status bar, any
     /// message, and the back cue while a swipe from an edge is under way.
-    pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, data: DataState, clock: &str, now: u64) {
-        self.frame(f, info, data);
+    pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+        self.frame(f, info);
         let t = self.theme();
         let m = t.m;
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
@@ -1667,7 +1702,7 @@ impl App {
                             let mut c = self.spare.pop().unwrap_or_else(|| Canvas::new(out.w, 0));
                             c.h = (rows.edges[i + 1] - rows.edges[i]) as u32;
                             c.data.resize((c.w * c.h * 4) as usize, 0);
-                            let cx = Ctx { t: &t, f, info, data, state: &self.state, term: self.term.as_ref() };
+                            let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref() };
                             pages::row(screen, &cx, i, &mut c);
                             self.drawn.push((i, c));
                             self.drawn.len() - 1
@@ -1866,27 +1901,51 @@ impl App {
         }
     }
 
+    /// What the page shown first asks of the runtime as it shows.
+    pub fn arrive(&mut self) -> Vec<Effect> {
+        self.arrive_at(self.screen())
+    }
+
+    /// What a page asks of the runtime as it opens: what it shows read, or
+    /// started. The decrypt page opens the data partition, which is also
+    /// how it learns which control a user's screen lock is answered with.
+    fn arrive_at(&mut self, s: Screen) -> Vec<Effect> {
+        match s {
+            Screen::Mount => vec![Effect::ReadMounts],
+            Screen::Files => vec![Effect::ReadDir(self.state.folder.clone())],
+            Screen::Search => {
+                self.state.search.clear();
+                self.state.layer = Layer::Letters;
+                Vec::new()
+            }
+            Screen::Terminal => {
+                self.state.layer = Layer::Letters;
+                if self.term.is_none() {
+                    vec![Effect::StartShell]
+                } else {
+                    Vec::new()
+                }
+            }
+            Screen::Decrypt if matches!(self.state.data, Data::Closed | Data::Failed(_)) => self.open_data(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Open the data partition, the decrypt page saying so meanwhile.
+    fn open_data(&mut self) -> Vec<Effect> {
+        self.state.data = Data::Opening;
+        self.refresh();
+        vec![Effect::OpenData]
+    }
+
     /// Carry out a tapped control.
     fn act(&mut self, action: Action, now: u64) -> Vec<Effect> {
         match action {
             Action::Open(s) => {
                 self.open(s);
-                match s {
-                    Screen::Mount => return vec![Effect::ReadMounts],
-                    Screen::Files => return vec![Effect::ReadDir(self.state.folder.clone())],
-                    Screen::Search => {
-                        self.state.search.clear();
-                        self.state.layer = Layer::Letters;
-                    }
-                    Screen::Terminal => {
-                        self.state.layer = Layer::Letters;
-                        if self.term.is_none() {
-                            return vec![Effect::StartShell];
-                        }
-                    }
-                    _ => {}
-                }
+                return self.arrive_at(s);
             }
+            Action::OpenData => return self.open_data(),
             Action::Skip => {
                 *self.top_mut() = (Screen::Home, 0.0);
                 self.settle_page();
@@ -2130,6 +2189,16 @@ impl App {
         }
     }
 
+    /// Send what was entered at the screen lock of the user whose own
+    /// files wait. It is taken as it is sent, so the dots clear while it is
+    /// checked, and nothing more is entered until it has been.
+    fn unlock(&mut self, code: String) -> Vec<Effect> {
+        let Data::Locked { user, keys, .. } = self.state.data else { unreachable!("only a screen lock waiting takes what is entered") };
+        self.state.data = Data::Locked { user, keys, checking: true };
+        self.refresh();
+        vec![Effect::Unlock { user, code }]
+    }
+
     /// Scroll the terminal's screen as a finger goes from `last` to `y`: a
     /// row for each row's height, and down shows what is older.
     fn scroll_history(&mut self, last: f32, y: f32, carry: f32, pitch: f32) -> Drag {
@@ -2169,13 +2238,10 @@ impl App {
                         return self.act(Action::Open(first.screen), now);
                     }
                 }
-                // The code is taken as it is sent, so the dots clear while
-                // the secure world is checking it.
                 Screen::Decrypt if self.state.code.is_empty() => self.say("先输入锁屏密码", now),
                 Screen::Decrypt => {
                     let code = std::mem::take(&mut self.state.code);
-                    self.refresh();
-                    return vec![Effect::Unlock(code)];
+                    return self.unlock(code);
                 }
                 // A name the folder cannot take is turned down here, in
                 // the user's words; an unchanged one leaves the page.
@@ -2384,7 +2450,6 @@ impl App {
                                 None => self.say("已经从这个槽位启动", now),
                                 Some(_) => self.say("切换槽位还没实现", now),
                             },
-                            Confirm::Decrypt => fx.push(Effect::Decrypt),
                             Confirm::FactoryReset => fx.push(Effect::FactoryReset),
                             Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
                             Confirm::Flash => {
@@ -2404,7 +2469,7 @@ impl App {
                     let drawn = std::mem::take(&mut self.state.pattern);
                     self.repaint_pattern(&t);
                     match drawn.len() >= 4 {
-                        true => fx.push(Effect::Unlock(drawn.iter().map(|i| (b'1' + *i as u8) as char).collect())),
+                        true => fx.extend(self.unlock(drawn.iter().map(|i| (b'1' + *i as u8) as char).collect())),
                         false => self.say("至少连接 4 个点", now),
                     }
                 }
@@ -2614,7 +2679,7 @@ mod tests {
     /// controls, on its pinned strip, or a row of its long list.
     fn spot(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action) -> (f32, f32) {
         let (t, scroll) = (app.theme(), app.top().1);
-        let fr = app.frame(f, i, DataState::Unmounted);
+        let fr = app.frame(f, i);
         if let Some(h) = fr.hits.iter().find(|h| h.action == action) {
             let (x, y) = h.rect.centre();
             return (x, y - scroll);
@@ -2650,7 +2715,7 @@ mod tests {
 
     /// Tap the `<`, which stays at the top of the screen.
     fn tap_back(app: &mut App, f: &Fonts, i: &DeviceInfo, now: u64) {
-        app.frame(f, i, DataState::Unmounted);
+        app.frame(f, i);
         let (x, y) = widgets::back_rect(&app.theme()).centre();
         app.touch(Touch::Down(x, y), f, now);
         app.touch(Touch::Up, f, now);
@@ -2673,7 +2738,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         tap(&mut app, &f, &i, Action::Open(Screen::Settings));
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         app.touch(Touch::Down(700.0, 2400.0), &f, 0);
         app.touch(Touch::Move(700.0, 2200.0), &f, 0);
         app.touch(Touch::Move(700.0, 2100.0), &f, 0);
@@ -2704,7 +2769,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Mount, &f, &i);
         app.set_mounts(Err("read the metadata in super: Input/output error (os error 5)".into()));
-        assert!(app.frame(&f, &i, DataState::Unmounted).hits.is_empty());
+        assert!(app.frame(&f, &i).hits.is_empty());
     }
 
     #[test]
@@ -2716,7 +2781,7 @@ mod tests {
             MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: false, holders: Vec::new() },
             MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: Vec::new() },
         ]));
-        let frame = app.frame(&f, &i, DataState::Unmounted);
+        let frame = app.frame(&f, &i);
         assert!(matches!(frame.hits[0].action, Action::Unavailable(_)), "vendor stays unmounted");
         assert_eq!(frame.hits[1].action, Action::MountToggle(1), "odm can still come off");
         let refused = frame.hits[0].action;
@@ -2732,7 +2797,7 @@ mod tests {
             MountRow { base: "system".into(), point: "/mnt/system".into(), mounted: true, holders: Vec::new() },
             MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: false, holders: Vec::new() },
         ]));
-        let frame = app.frame(&f, &i, DataState::Unmounted);
+        let frame = app.frame(&f, &i);
         assert!(frame.hits.iter().any(|h| h.action == Action::MountToggle(0)), "the first partition has a toggle");
         assert!(frame.hits.iter().any(|h| h.action == Action::MountToggle(1)), "the second partition has a toggle");
         assert!(!frame.hits.iter().any(|h| matches!(h.action, Action::Toggle(_))), "partitions mount read-only");
@@ -2750,7 +2815,7 @@ mod tests {
             MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: held },
             MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: true, holders: Vec::new() },
         ]));
-        let frame = app.frame(&f, &i, DataState::Unmounted);
+        let frame = app.frame(&f, &i);
         assert!(matches!(frame.hits[0].action, Action::Unavailable(_)), "the programs using odm keep it");
         assert_eq!(frame.hits[1].action, Action::MountToggle(1));
         let busy = frame.hits[0].action;
@@ -2778,7 +2843,7 @@ mod tests {
     fn the_mount_page_notes_when_there_is_nothing_to_mount() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Mount, &f, &i);
-        let frame = app.frame(&f, &i, DataState::Unmounted);
+        let frame = app.frame(&f, &i);
         assert!(frame.hits.is_empty(), "no partition rows, and nothing else to touch");
     }
 
@@ -2903,7 +2968,7 @@ mod tests {
     fn scrolling_back_down_past_the_top_pulls_from_the_top() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         app.touch(Touch::Down(700.0, 2000.0), &f, 0);
         app.touch(Touch::Move(700.0, 1700.0), &f, 100);
         assert_eq!(app.top().1, 300.0);
@@ -2960,7 +3025,7 @@ mod tests {
             ..info()
         };
         let mut app = App::new(Screen::Specs, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         let lift = flick(&mut app, &f, 1000, 20.0);
         let lifted = app.top().1;
         assert_eq!(lifted, 100.0);
@@ -2979,7 +3044,7 @@ mod tests {
     fn a_glide_into_the_end_swings_past_it_and_back() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         let lift = flick(&mut app, &f, 1000, 80.0);
         let mut furthest: f32 = 0.0;
         for ms in (8..2000).step_by(8) {
@@ -2996,7 +3061,7 @@ mod tests {
     fn a_finger_that_stops_before_lifting_leaves_the_page_still() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         app.touch(Touch::Down(700.0, 2400.0), &f, 1000);
         app.touch(Touch::Move(700.0, 2200.0), &f, 1008);
         app.touch(Touch::Move(700.0, 2000.0), &f, 1016);
@@ -3009,7 +3074,7 @@ mod tests {
     fn touching_a_gliding_page_stops_it_without_pressing() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         let lift = flick(&mut app, &f, 1000, 20.0);
         app.tick(lift + 30);
         assert!(app.fling.is_some(), "the page is gliding");
@@ -3028,7 +3093,7 @@ mod tests {
     fn an_edge_swipe_goes_back_over_a_gliding_page() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Settings, &f, &i);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         let lift = flick(&mut app, &f, 1000, 20.0);
         app.tick(lift + 30);
         app.touch(Touch::Down(10.0, 1600.0), &f, lift + 40);
@@ -3045,7 +3110,7 @@ mod tests {
     fn a_finger_dragging_from_the_edge_catches_a_gliding_page() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Settings, &f, &i);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         let lift = flick(&mut app, &f, 1000, 20.0);
         app.tick(lift + 30);
         app.touch(Touch::Down(10.0, 1600.0), &f, lift + 40);
@@ -3062,7 +3127,7 @@ mod tests {
     fn a_button_stops_a_gliding_page() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         let lift = flick(&mut app, &f, 1000, 20.0);
         assert!(app.fling.is_some(), "the page is gliding");
         app.key(Key::Back, lift + 20);
@@ -3086,7 +3151,7 @@ mod tests {
     fn the_bar_title_comes_after_the_large_title_fades_and_the_bar_once_content_slides_under() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        let fr = app.frame(&f, &i, DataState::Unmounted);
+        let fr = app.frame(&f, &i);
         let content_top = fr.content_top;
         let m = app.theme().m;
         scroll_to(&mut app, &f, m.dp(TITLE_FADE_DP) - 2.0, 0);
@@ -3108,7 +3173,7 @@ mod tests {
     fn the_about_page_brings_title_and_bar_together_once_the_version_fades() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::About, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         let t = app.theme();
         let gone = t.m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(&t);
         scroll_to(&mut app, &f, gone - 4.0, 0);
@@ -3123,7 +3188,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         tap(&mut app, &f, &i, Action::Open(Screen::Settings));
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         let end = app.max_scroll();
         scroll_to(&mut app, &f, end, 0);
         app.tick(2000);
@@ -3134,7 +3199,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::Settings);
         let mut c = Canvas::new(W, H);
         app.tick(4008);
-        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 4008);
+        app.compose(&mut c, &f, &i, "12:00", 4008);
         assert_eq!(app.top().1, end, "the page is where it was left");
         assert_eq!((app.title.level(4008), app.bar.level(4008)), (1.0, 1.0), "its bar is up from the first frame");
     }
@@ -3154,7 +3219,7 @@ mod tests {
     fn dragging_the_track_sets_brightness() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Brightness).unwrap().rect;
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Brightness).unwrap().rect;
         let y = track.centre().1 - app.top().1;
         assert!(app.touch(Touch::Down(track.x + track.w * 0.25, y), &f, 0).is_empty());
         assert_eq!(app.panel(0), Some(0.25));
@@ -3169,7 +3234,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Reboot, W, H, PPD);
         tap(&mut app, &f, &i, Action::RebootTarget(3));
-        let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Reboot)).unwrap().rect;
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Reboot)).unwrap().rect;
         let y = track.centre().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
         app.touch(Touch::Move(track.x + track.w / 2.0, y), &f, 0);
@@ -3183,7 +3248,7 @@ mod tests {
     fn letting_go_halfway_does_not_reboot() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Reboot, W, H, PPD);
-        let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Reboot)).unwrap().rect;
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Reboot)).unwrap().rect;
         let y = track.centre().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
         app.touch(Touch::Move(track.x + track.w / 2.0, y), &f, 0);
@@ -3216,7 +3281,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
         assert_eq!(app.state.install, Install::Waiting);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         app.touch(Touch::Down(10.0, 1600.0), &f, 0);
         app.touch(Touch::Move(90.0, 1600.0), &f, 8);
         app.touch(Touch::Move(400.0, 1600.0), &f, 16);
@@ -3243,7 +3308,7 @@ mod tests {
         // guard.
         tap_at(&mut app, &f, &i, Action::FlashPartition(1), 1000);
         tap_at(&mut app, &f, &i, Action::FlashSlots(Pick::Both), 1000);
-        let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Flash)).unwrap().rect;
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Flash)).unwrap().rect;
         let y = track.centre().1 - app.top().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 1000);
         app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
@@ -3270,7 +3335,7 @@ mod tests {
         app.install(Event::Overwriting, 0);
         app.install(Event::Progress(Stage::Writing { done: 1 << 30, total: 7 << 30 }), 0);
         assert!(matches!(app.state.install, Install::Updating { overwriting: true, stage: Some(_), .. }));
-        let shown = app.frame(&f, &i, DataState::Unmounted).hits.len();
+        let shown = app.frame(&f, &i).hits.len();
         assert_eq!(shown, 0, "nothing on the page to tap while installing");
         app.key(Key::Back, 0);
         assert_eq!(app.screen(), Screen::Sideload);
@@ -3322,7 +3387,7 @@ mod tests {
     fn the_fastboot_page_is_worked_with_the_keys() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Fastboot, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         assert_eq!(app.state.fastboot.focus, 0);
         assert!(app.key(Key::VolumeDown, 0).is_empty());
         assert_eq!(app.state.fastboot.focus, 1, "down moves to the next choice");
@@ -3341,7 +3406,7 @@ mod tests {
     fn the_recovery_comes_up_from_fastboot_at_the_home_page() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Fastboot, W, H, PPD);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         app.enter_recovery();
         assert_eq!(app.screen(), Screen::Home);
         app.key(Key::Back, 0);
@@ -3369,7 +3434,7 @@ mod tests {
         let mut app = App::new(Screen::CantStart, W, H, PPD);
         app.erase_started(true, vec![Part::Data, Part::Metadata]);
         assert_eq!(app.screen(), Screen::Erase);
-        assert!(app.frame(&f, &i, DataState::Unmounted).hits.is_empty(), "nothing is to be done while erasing");
+        assert!(app.frame(&f, &i).hits.is_empty(), "nothing is to be done while erasing");
         app.key(Key::Back, 0);
         assert_eq!(app.screen(), Screen::Erase, "there is nothing to go back to");
         app.erase_at(Part::Metadata);
@@ -3391,7 +3456,7 @@ mod tests {
         app.erase_started(false, vec![Part::Cache]);
         app.erase_ended(Ok(()), 0);
         assert_eq!(app.state.erase.done, 1, "every part is erased");
-        assert!(app.frame(&f, &i, DataState::Unmounted).hits.is_empty(), "the runtime starts the system at once");
+        assert!(app.frame(&f, &i).hits.is_empty(), "the runtime starts the system at once");
     }
 
     #[test]
@@ -3406,7 +3471,7 @@ mod tests {
 
     /// Drag the knob of a swipe-to-confirm track all the way across.
     fn swipe(app: &mut App, f: &Fonts, i: &DeviceInfo, which: Confirm) -> Vec<Effect> {
-        let track = app.frame(f, i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(which)).expect("the track is on the page").rect;
+        let track = app.frame(f, i).hits.iter().find(|h| h.action == Action::Confirm(which)).expect("the track is on the page").rect;
         let y = track.centre().1 - app.top().1;
         let mut fx = app.touch(Touch::Down(track.x + track.h / 2.0, y), f, 0);
         fx.extend(app.touch(Touch::Move(track.x + track.w / 2.0, y), f, 0));
@@ -3464,7 +3529,7 @@ mod tests {
     fn a_backup_found_opens_to_choose_what_to_restore() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Restore, &f, &i);
-        assert!(app.frame(&f, &i, DataState::Unmounted).hits.is_empty(), "nothing found, nothing to open");
+        assert!(app.frame(&f, &i).hits.is_empty(), "nothing found, nothing to open");
         app.state.backups = vec![
             BackupEntry { made: 1_792_348_260, size: 6_200_000_000, place: 0, parts: [true, true, false, true] },
             BackupEntry { made: 1_792_000_000, size: 120_000_000, place: 1, parts: [true, false, false, false] },
@@ -3474,7 +3539,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::RestoreBackup);
         assert_eq!(app.state.restore, Some((0, [true, true, false, true])));
         let parts: Vec<Action> =
-            app.frame(&f, &i, DataState::Unmounted).hits.iter().map(|h| h.action).filter(|a| matches!(a, Action::RestorePart(_))).collect();
+            app.frame(&f, &i).hits.iter().map(|h| h.action).filter(|a| matches!(a, Action::RestorePart(_))).collect();
         assert_eq!(parts, [Action::RestorePart(0), Action::RestorePart(1), Action::RestorePart(3)], "only what the backup holds");
         tap(&mut app, &f, &i, Action::RestorePart(1));
         assert_eq!(app.state.restore, Some((0, [true, false, false, true])));
@@ -3499,46 +3564,57 @@ mod tests {
         assert!(swipe(&mut app, &f, &i, Confirm::Slot).is_empty(), "switching is not done yet");
     }
 
-    /// Tap a control of the page as it looks once the data partition is
-    /// open and the users' own files are still closed.
-    fn tap_locked(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action) -> Vec<Effect> {
-        let scroll = app.top().1;
-        let rect = app
-            .frame(f, i, DataState::Locked)
-            .hits
-            .iter()
-            .find(|h| h.action == action)
-            .expect("the control is on the page")
-            .rect;
-        let (x, y) = rect.centre();
-        let mut fx = app.touch(Touch::Down(x, y - scroll), f, 0);
-        fx.extend(app.touch(Touch::Up, f, 0));
-        fx
+    /// Whether the page shows a key of the keypad or keyboard to tap.
+    fn keys_shown(app: &mut App, f: &Fonts, i: &DeviceInfo) -> bool {
+        app.frame(f, i).hits.iter().any(|h| matches!(h.action, Action::Type(_)))
     }
 
     #[test]
-    fn the_code_typed_on_the_keypad_is_sent_once_and_the_dots_clear() {
+    fn the_decrypt_page_opens_the_partition_and_then_asks_with_the_users_own_control() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Decrypt)), vec![Effect::OpenData], "no swipe first");
+        assert_eq!(app.state.data, Data::Opening);
+        assert!(!keys_shown(&mut app, &f, &i) && app.frame(&f, &i).pattern.is_none(), "nothing to answer yet");
+        app.data_waiting(Some((0, Keys::Pattern)));
+        assert!(app.frame(&f, &i).pattern.is_some(), "the owner set a pattern, so the grid shows");
+        app.data_waiting(Some((0, Keys::Digits)));
+        assert!(keys_shown(&mut app, &f, &i), "for a code, the keypad");
+        app.key(Key::Back, 0);
+        assert!(tap(&mut app, &f, &i, Action::Open(Screen::Decrypt)).is_empty(), "open already, it is not opened again");
+        let mut first = App::new(Screen::Decrypt, W, H, PPD);
+        assert_eq!(first.arrive(), vec![Effect::OpenData], "a recovery that starts on the page opens it as well");
+    }
+
+    #[test]
+    fn the_code_typed_on_the_keypad_is_sent_once_and_checked_before_more_is_taken() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Decrypt, W, H, PPD);
-        app.set_locked(vec![0, 999], Keys::Digits);
+        app.data_waiting(Some((0, Keys::Digits)));
         for ch in "1234".chars() {
-            tap_locked(&mut app, &f, &i, Action::Type(Cap::Char(ch)));
+            tap(&mut app, &f, &i, Action::Type(Cap::Char(ch)));
         }
         assert_eq!(app.state.code, "1234");
-        tap_locked(&mut app, &f, &i, Action::Type(Cap::Backspace));
+        tap(&mut app, &f, &i, Action::Type(Cap::Backspace));
         assert_eq!(app.state.code, "123");
-        let fx = tap_locked(&mut app, &f, &i, Action::Type(Cap::Enter));
-        assert!(fx.contains(&Effect::Unlock("123".into())));
+        let fx = tap(&mut app, &f, &i, Action::Type(Cap::Enter));
+        assert_eq!(fx, vec![Effect::Unlock { user: 0, code: "123".into() }]);
         assert_eq!(app.state.code, "", "what was typed is gone once it is sent");
+        assert_eq!(app.state.data, Data::Locked { user: 0, keys: Keys::Digits, checking: true });
+        assert!(!keys_shown(&mut app, &f, &i), "nothing more is taken while it is checked");
+        app.unlock_failed("the secure world does not recognise that credential".into(), 0);
+        assert!(keys_shown(&mut app, &f, &i), "turned down, it is asked for again");
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "with why");
+        app.data_waiting(None);
+        assert_eq!(app.state.data, Data::Open);
     }
 
     #[test]
-    fn nothing_typed_is_nothing_for_the_secure_world_to_count() {
+    fn nothing_typed_is_not_sent() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Decrypt, W, H, PPD);
-        app.set_locked(vec![0], Keys::Digits);
-        let fx = tap_locked(&mut app, &f, &i, Action::Type(Cap::Enter));
-        assert!(!fx.iter().any(|e| matches!(e, Effect::Unlock(_))));
+        app.data_waiting(Some((0, Keys::Digits)));
+        assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty());
         assert_eq!(app.deadline(0), Some(TOAST_MS), "the page says to type one first");
     }
 
@@ -3546,8 +3622,8 @@ mod tests {
     fn a_pattern_is_sent_as_the_numbers_of_the_dots_it_joins() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Decrypt, W, H, PPD);
-        app.set_locked(vec![0], Keys::Pattern);
-        let (cx, cy, span) = app.frame(&f, &i, DataState::Locked).pattern.expect("the grid is on the page");
+        app.data_waiting(Some((0, Keys::Pattern)));
+        let (cx, cy, span) = app.frame(&f, &i).pattern.expect("the grid is on the page");
         let dots = widgets::pattern_dots(cx, cy, span);
         let scroll = app.top().1;
         app.touch(Touch::Down(dots[0].0, dots[0].1 - scroll), &f, 0);
@@ -3555,23 +3631,34 @@ mod tests {
             app.touch(Touch::Move(dots[which].0, dots[which].1 - scroll), &f, 0);
         }
         let fx = app.touch(Touch::Up, &f, 0);
-        assert!(fx.contains(&Effect::Unlock("1258".into())), "the dots counted from one across the rows");
+        assert_eq!(fx, vec![Effect::Unlock { user: 0, code: "1258".into() }], "the dots counted from one across the rows");
         assert!(app.state.pattern.is_empty(), "the grid is cleared once it is sent");
+        assert!(app.frame(&f, &i).hits.iter().all(|h| h.action != Action::Pattern), "nothing more is drawn while it is checked");
     }
 
     #[test]
     fn a_pattern_too_short_to_be_one_is_not_sent() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Decrypt, W, H, PPD);
-        app.set_locked(vec![0], Keys::Pattern);
-        let (cx, cy, span) = app.frame(&f, &i, DataState::Locked).pattern.expect("the grid is on the page");
+        app.data_waiting(Some((0, Keys::Pattern)));
+        let (cx, cy, span) = app.frame(&f, &i).pattern.expect("the grid is on the page");
         let dots = widgets::pattern_dots(cx, cy, span);
         let scroll = app.top().1;
         app.touch(Touch::Down(dots[0].0, dots[0].1 - scroll), &f, 0);
         app.touch(Touch::Move(dots[1].0, dots[1].1 - scroll), &f, 0);
         let fx = app.touch(Touch::Up, &f, 0);
-        assert!(!fx.iter().any(|e| matches!(e, Effect::Unlock(_))));
+        assert!(fx.is_empty());
         assert_eq!(app.deadline(0), Some(TOAST_MS), "the page says how many dots it takes");
+    }
+
+    #[test]
+    fn a_partition_that_did_not_open_says_why_and_is_tried_again() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.arrive();
+        app.data_failed("KeyMint is not running".into());
+        assert_eq!(tap(&mut app, &f, &i, Action::OpenData), vec![Effect::OpenData]);
+        assert_eq!(app.state.data, Data::Opening);
     }
 
     /// Type `text` on the keyboard of the page showing, one tap a key, in
@@ -3588,7 +3675,7 @@ mod tests {
         let mut app = opened(Screen::Search, &f, &i);
         type_text(&mut app, &f, &i, "bf");
         assert_eq!(app.state.search, "bf");
-        let opens: Vec<Action> = app.frame(&f, &i, DataState::Unmounted).hits.iter().map(|h| h.action).filter(|a| matches!(a, Action::Open(_))).collect();
+        let opens: Vec<Action> = app.frame(&f, &i).hits.iter().map(|h| h.action).filter(|a| matches!(a, Action::Open(_))).collect();
         assert_eq!(opens, [Action::Open(Screen::Backup)]);
         tap(&mut app, &f, &i, Action::Type(Cap::Backspace));
         assert_eq!(app.state.search, "b");
@@ -3659,7 +3746,7 @@ mod tests {
         app.term_started(rows, cols);
         let many: String = (0..100).map(|n| format!("line {n}\r\n")).collect();
         app.term_output(many.as_bytes());
-        let (card, pitch) = app.frame(&f, &i, DataState::Unmounted).scrollback.expect("the terminal's screen scrolls back");
+        let (card, pitch) = app.frame(&f, &i).scrollback.expect("the terminal's screen scrolls back");
         let (x, y) = (card.x + card.w / 2.0, card.y + card.h / 3.0);
         app.touch(Touch::Down(x, y), &f, 0);
         app.touch(Touch::Move(x, y + pitch * 5.5), &f, 10);
@@ -3732,7 +3819,7 @@ mod tests {
         assert!(tap(&mut app, &f, &i, Action::PickEntry(FileOp::Copy)).is_empty());
         assert_eq!(app.screen(), Screen::Files, "back to the folders to pick one");
         assert_eq!(app.state.clip, Some(Clip { op: FileOp::Copy, path: "/sdcard/a.zip".into() }));
-        assert!(app.frame(&f, &i, DataState::Unmounted).dock.is_some(), "the bar is held at the bottom");
+        assert!(app.frame(&f, &i).dock.is_some(), "the bar is held at the bottom");
         assert_eq!(tap(&mut app, &f, &i, Action::OpenEntry(0)), vec![Effect::ReadDir("/sdcard/DCIM".into())]);
         app.set_files("/sdcard/DCIM".into(), Ok(Vec::new()), LISTED);
         let paste = Effect::Paste { op: FileOp::Copy, path: "/sdcard/a.zip".into(), into: "/sdcard/DCIM".into(), clash: None };
@@ -3835,7 +3922,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = in_sdcard(&f, &i);
         tap(&mut app, &f, &i, Action::OpenEntry(1));
-        assert!(app.frame(&f, &i, DataState::Unmounted).hits.iter().all(|h| h.action != Action::Confirm(Confirm::DeleteEntry)));
+        assert!(app.frame(&f, &i).hits.iter().all(|h| h.action != Action::Confirm(Confirm::DeleteEntry)));
         tap(&mut app, &f, &i, Action::AskDelete);
         assert_eq!(swipe(&mut app, &f, &i, Confirm::DeleteEntry), vec![Effect::Delete("/sdcard/a.zip".into())]);
         app.file_job_started(FileTask::Delete { path: "/sdcard/a.zip".into() });
@@ -3855,9 +3942,9 @@ mod tests {
         let mut app = in_sdcard(&f, &i);
         app.file_job_started(FileTask::Copy { path: "/sdcard/a.zip".into(), into: "/tmp".into() });
         let mut c = Canvas::new(W, H);
-        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 0);
+        app.compose(&mut c, &f, &i, "12:00", 0);
         app.file_job_ended(JobEnd::Stopped, 0);
-        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 16);
+        app.compose(&mut c, &f, &i, "12:00", 16);
         assert_eq!(app.titles.as_ref().map(|((title, _), _, _)| *title), Some("复制没有完成"));
     }
 
@@ -3866,7 +3953,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Files, W, H, PPD);
         app.set_files("/data".into(), Err("read /data: Permission denied (os error 13)".into()), LISTED);
-        let fr = app.frame(&f, &i, DataState::Unmounted);
+        let fr = app.frame(&f, &i);
         assert!(fr.hits.is_empty() && fr.rows.is_none());
     }
 
@@ -3876,13 +3963,13 @@ mod tests {
         let mut app = App::new(Screen::Files, W, H, PPD);
         let many: Vec<FileRow> = (0..5000).map(|k| entry(&format!("IMG_{k:05}.jpg"), FileKind::File)).collect();
         app.set_files("/sdcard/DCIM/Camera".into(), Ok(many), LISTED);
-        let rows = app.frame(&f, &i, DataState::Unmounted).rows.as_ref().expect("the entries are listed").count();
+        let rows = app.frame(&f, &i).rows.as_ref().expect("the entries are listed").count();
         assert_eq!(rows, 5000, "every entry has its row");
         let mut c = Canvas::new(W, H);
-        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 0);
+        app.compose(&mut c, &f, &i, "12:00", 0);
         let end = app.max_scroll();
         scroll_to(&mut app, &f, end, 1000);
-        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 2000);
+        app.compose(&mut c, &f, &i, "12:00", 2000);
         assert!(app.drawn.len() < 40, "only the rows near the screen are kept drawn: {}", app.drawn.len());
         assert!(app.drawn.iter().any(|(k, _)| *k == 4999), "the last row shows");
         tap_at(&mut app, &f, &i, Action::OpenEntry(4999), 3000);
@@ -3897,7 +3984,7 @@ mod tests {
         tap(&mut app, &f, &i, Action::Open(Screen::Files));
         let folders: Vec<FileRow> = (0..300).map(|k| entry(&format!("dir{k:03}"), folder(k))).collect();
         app.set_files("/".into(), Ok(folders.clone()), LISTED);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         scroll_to(&mut app, &f, 9000.0, 0);
         let (_, y) = spot(&mut app, &f, &i, Action::OpenEntry(36));
         assert!(y > 0.0 && y < H as f32, "row 36 is on screen at {y}");
@@ -3916,7 +4003,7 @@ mod tests {
         tap(&mut app, &f, &i, Action::Open(Screen::Files));
         let folders: Vec<FileRow> = (0..300).map(|k| entry(&format!("dir{k:03}"), folder(k))).collect();
         app.set_files("/".into(), Ok(folders.clone()), LISTED);
-        app.frame(&f, &i, DataState::Unmounted);
+        app.frame(&f, &i);
         scroll_to(&mut app, &f, 9000.0, 0);
         app.tick(2000);
         assert_eq!((app.title.level(2000), app.bar.level(2000)), (1.0, 1.0), "scrolled down, the bar is up");
@@ -3926,13 +4013,13 @@ mod tests {
         tap_at(&mut app, &f, &i, Action::OpenEntry(36), 3000);
         app.set_files("/dir036".into(), Ok(vec![entry("a", FileKind::File)]), LISTED);
         app.tick(3008);
-        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 3008);
+        app.compose(&mut c, &f, &i, "12:00", 3008);
         assert_eq!((app.title.level(3008), app.bar.level(3008)), (0.0, 0.0), "a folder opened at its top has only its large title");
         app.tick(4008);
         assert_eq!(app.key(Key::Back, 4100), vec![Effect::ReadDir("/".into())]);
         app.set_files("/".into(), Ok(folders), LISTED);
         app.tick(4108);
-        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 4108);
+        app.compose(&mut c, &f, &i, "12:00", 4108);
         assert_eq!((app.title.level(4108), app.bar.level(4108)), (1.0, 1.0), "back up, the list is under the bar from the first frame");
         assert_ne!(app.deadline(4108), Some(0), "nothing eases in after it");
     }
@@ -3950,7 +4037,7 @@ mod tests {
         let (_, y) = spot(&mut app, &f, &i, Action::OpenAncestor(0));
         assert!(y > widgets::bar_bottom(&t) && y < widgets::bar_bottom(&t) + t.m.dp(51.0), "the capsules stay under the bar: {y}");
         let mut c = Canvas::new(W, H);
-        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 2000);
+        app.compose(&mut c, &f, &i, "12:00", 2000);
         let (x, _) = spot(&mut app, &f, &i, Action::OpenAncestor(0));
         let px = |c: &Canvas, x: f32, y: f32| c.data[(y as usize * W as usize + x as usize) * 4..][..3].to_vec();
         assert_eq!(px(&c, x - t.m.dp(20.0), y), vec![243, 244, 247], "the root's capsule shows over the list");
@@ -4125,7 +4212,7 @@ mod tests {
     fn a_finger_held_as_the_panel_goes_off_lets_go() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Reboot, W, H, PPD);
-        let track = app.frame(&f, &i, DataState::Unmounted).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Reboot)).unwrap().rect;
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Reboot)).unwrap().rect;
         let y = track.centre().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
         app.touch(Touch::Move(track.x + track.w * 0.6, y), &f, 10);
@@ -4183,7 +4270,7 @@ mod tests {
         let mut app = opened(Screen::Settings, &f, &i);
         tap(&mut app, &f, &i, Action::Open(Screen::ScreenOff));
         assert_eq!(app.screen(), Screen::ScreenOff);
-        let frame = app.frame(&f, &i, DataState::Unmounted);
+        let frame = app.frame(&f, &i);
         assert_eq!(frame.title, "息屏时间");
         assert!(frame.back);
         // The choices sit in order, top to bottom.

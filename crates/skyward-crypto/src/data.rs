@@ -102,7 +102,7 @@ pub struct Opened {
 /// it. The names and contents of each user's own files stay encrypted
 /// until that user's key is let in as well. A partition that does not
 /// mount leaves no device behind.
-pub fn open(service: &KeyMint) -> Result<Opened> {
+fn open(service: &KeyMint) -> Result<Opened> {
     let known = skyward_block::fstab::read(MOUNT)?;
     let entry = known.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
     let encryption = Encryption::of(entry)?;
@@ -246,7 +246,7 @@ const USER_KEYS: &str = "/data/misc/vold/user_keys";
 
 /// Let in the key for the files that belong to no one user. Until it is
 /// in, most of what the data partition holds reads as scrambled names.
-pub fn open_shared(service: &KeyMint) -> Result<[u8; crate::fscrypt::NAME_BYTES]> {
+fn open_shared(service: &KeyMint) -> Result<[u8; crate::fscrypt::NAME_BYTES]> {
     let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
     let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
     let raw = hardware_key(service, Path::new(SHARED_KEY), wrapped)?;
@@ -259,7 +259,7 @@ pub fn open_shared(service: &KeyMint) -> Result<[u8; crate::fscrypt::NAME_BYTES]
 }
 
 /// Which users the phone keeps keys for, in order.
-pub fn users() -> Result<Vec<u32>> {
+fn users() -> Result<Vec<u32>> {
     let dir = Path::new(USER_KEYS).join("de");
     let mut users = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
@@ -273,7 +273,7 @@ pub fn users() -> Result<Vec<u32>> {
 
 /// Let in the keys for the files of each user that are readable before
 /// that user signs in, and give the users they belong to.
-pub fn open_users(service: &KeyMint) -> Result<Vec<u32>> {
+fn open_users(service: &KeyMint) -> Result<Vec<u32>> {
     let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
     let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
     let users = users()?;
@@ -285,17 +285,6 @@ pub fn open_users(service: &KeyMint) -> Result<Vec<u32>> {
     Ok(users)
 }
 
-/// Whether any user has set a screen lock, which is what makes a
-/// credential needed before their own files open.
-pub fn screen_lock_set() -> Result<bool> {
-    for user in users()? {
-        if protector(user)?.lock.is_some() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// Where a phone keeps what it needs to recover a user's own secret.
 const PROTECTORS: &str = "/data/system_de";
 
@@ -303,7 +292,7 @@ const PROTECTORS: &str = "/data/system_de";
 /// time; a phone part way through changing a credential may have left
 /// another, and which is current is its own business, so this refuses to
 /// guess.
-pub fn protector(user: u32) -> Result<crate::user::Protector> {
+fn protector(user: u32) -> Result<crate::user::Protector> {
     let dir = blobs(user);
     let mut ids = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
@@ -396,7 +385,7 @@ const TAG_BYTES: usize = 16;
 /// none, and a user the phone made one up for needs `owner`, the note the
 /// owner's own secret gave. The owner's files open, their shared storage
 /// shows at /sdcard.
-pub fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Option<Token>> {
+fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Option<Token>> {
     let protector = protector(user)?;
     let (stretched, note) = match &protector.lock {
         Some(lock) => {

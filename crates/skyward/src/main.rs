@@ -6,6 +6,8 @@ use skyward_vab::SnapshotState;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "android")]
+mod decrypt;
+#[cfg(target_os = "android")]
 mod filework;
 #[cfg(target_os = "android")]
 mod haptics;
@@ -291,32 +293,33 @@ fn main() -> Result<()> {
         }
         #[cfg(target_os = "android")]
         Cmd::Data { credential } => {
+            use skyward_crypto::data;
             let binder = skyward_binder::driver::Binder::open()?;
             let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
-            let at = Path::new(skyward_crypto::data::MOUNT);
-            if skyward_block::mount::is_mount_point(at)? {
-                println!("{} is open already", at.display());
-            } else {
-                let opened = skyward_crypto::data::open(&service)?;
-                if let Some(checked) = &opened.checked {
-                    print!("{}", checked.said);
-                    println!("the check of {} ended with {}", opened.mapped.display(), checked.status);
-                }
-                println!("{} holds {} at {}", opened.mapped.display(), opened.filesystem, at.display());
-            }
-            skyward_crypto::data::open_shared(&service)?;
-            println!("the files that belong to no one user can be read");
-            let users = skyward_crypto::data::open_users(&service)?;
-            println!("users whose own keys are in: {users:?}");
-            let mut owner = None;
-            for user in users {
-                match skyward_crypto::data::open_user_files(&service, user, credential.as_deref().map(str::as_bytes), owner.as_ref()) {
-                    Ok(note) => {
-                        println!("user {user}'s own files can be read");
-                        owner = owner.or(note);
+            let opening = data::open_without_credential(&service)?;
+            match &opening.mounted {
+                Some(mounted) => {
+                    if let Some(checked) = &mounted.checked {
+                        print!("{}", checked.said);
+                        println!("the check of {} ended with {}", mounted.mapped.display(), checked.status);
                     }
-                    Err(e) => println!("user {user}'s own files stay closed: {e:#}"),
+                    println!("{} holds {} at {}", mounted.mapped.display(), mounted.filesystem, data::MOUNT);
                 }
+                None => println!("{} is mounted already", data::MOUNT),
+            }
+            let mut closed = opening.closed;
+            let asked = closed.iter().find(|c| !c.made_up).map(|c| c.user);
+            if let (Some(credential), Some(user)) = (&credential, asked) {
+                closed = data::unlock(&service, &closed, user, credential.as_bytes())?;
+            }
+            for c in &closed {
+                match &c.why {
+                    Some(why) => println!("user {}'s own files stay closed: {why}", c.user),
+                    None => println!("user {}'s own files stay closed", c.user),
+                }
+            }
+            if closed.is_empty() {
+                println!("every user's own files can be read");
             }
             Ok(())
         }

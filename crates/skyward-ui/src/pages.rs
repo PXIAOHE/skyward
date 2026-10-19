@@ -1,6 +1,6 @@
 use crate::app::{
-    Action, ClashChoice, Confirm, Damage, Dock, FileKind, FileOp, FileTask, Frame, HeroArt, Hit, Install, JobEnd, Keys,
-    Part, Pick, Screen, State, Switch, Target, UsbLink, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF,
+    Action, ClashChoice, Confirm, Damage, Data, Dock, FileKind, FileOp, FileTask, Frame, HeroArt, Hit, Install, JobEnd,
+    Keys, Part, Pick, Screen, State, Switch, Target, UsbLink, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF,
     TARGETS,
 };
 use crate::canvas::Canvas;
@@ -13,7 +13,7 @@ use crate::search;
 use crate::term::{self, Term};
 use crate::theme::Theme;
 use crate::widgets::{self, Fact, Icon, Outline, Row, Spec, Tone, Trail};
-use skyward_info::{Charge, DataState, DeviceInfo, VERSION};
+use skyward_info::{Charge, DeviceInfo, VERSION};
 use skyward_install::{Outcome, Stage};
 use skyward_vab::Slot;
 use std::path::Path;
@@ -27,13 +27,13 @@ const SLATE: Rgba = Rgba::rgb(143, 156, 174);
 const ORANGE: Rgba = Rgba::rgb(255, 146, 46);
 const RED: Rgba = Rgba::rgb(242, 83, 75);
 
-/// What every page draws from: style, typefaces, the device readings, where
-/// userdata stands, and the choices made on the pages.
+/// What every page draws from: style, typefaces, the device readings, and
+/// what the pages hold, from the choices made on them to where the data
+/// partition stands.
 pub struct Ctx<'a> {
     pub t: &'a Theme,
     pub f: &'a Fonts,
     pub info: &'a DeviceInfo,
-    pub data: DataState,
     pub state: &'a State,
     /// The shell the terminal page shows, once one has started.
     pub term: Option<&'a Term>,
@@ -85,7 +85,6 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Backup => ("滑动以备份", false),
         Confirm::Restore => ("滑动以恢复", true),
         Confirm::Slot => ("滑动以切换", true),
-        Confirm::Decrypt => ("滑动以解密", false),
         Confirm::FactoryReset => ("滑动以恢复出厂设置", true),
         Confirm::DeleteEntry => ("滑动以删除", true),
     }
@@ -145,7 +144,7 @@ pub fn home(cx: &Ctx) -> Frame {
     if let Some(s) = i.slot {
         stats.push((s.letter(), "当前槽位"));
     }
-    stats.push((fmt::data(cx.data), "数据分区"));
+    stats.push((fmt::data(&cx.state.data), "数据分区"));
     if let Some(v) = &free {
         stats.push((v.as_str(), "可用空间"));
     }
@@ -169,7 +168,7 @@ pub fn home(cx: &Ctx) -> Frame {
         Row::new("备份").icon(BLUE, Icon::Backup),
         Row::new("恢复").icon(PURPLE, Icon::Restore),
         Row::new("挂载").icon(SLATE, Icon::Mount),
-        Row::new("解密").icon(BLUE, Icon::Lock).trail(Trail::Value(fmt::data(cx.data))),
+        Row::new("解密").icon(BLUE, Icon::Lock).trail(Trail::Value(fmt::data(&cx.state.data))),
     ]);
     out.extend(hits(&tools.rows, &[
         Action::Open(Screen::Install),
@@ -412,7 +411,7 @@ pub fn specs(cx: &Ctx) -> Frame {
     if let Some(v) = &i.boot.verified {
         boot.push(("验证启动", fmt::verified(v)));
     }
-    boot.push(("数据分区", fmt::data(cx.data).to_string()));
+    boot.push(("数据分区", fmt::data(&cx.state.data).to_string()));
     y = widgets::info_card(&mut c, t, f, y + gap, &boot);
 
     if let Some(b) = &i.battery {
@@ -445,56 +444,67 @@ pub fn specs(cx: &Ctx) -> Frame {
     Frame::new(t, fit(c, t, links.bottom), out, "全部参数与信息", top)
 }
 
-/// File-based-encryption unlock.
+/// The data partition and its users' own files. The page opens the
+/// partition as it shows, which is how it learns each user's screen lock;
+/// a user whose files wait on one is asked with the control that lock is
+/// answered with, from the start.
 pub fn decrypt(cx: &Ctx) -> Frame {
-    let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let c = page(cx.t);
+    match &cx.state.data {
+        Data::Locked { user, keys, checking } => code(cx, c, *user, *keys, *checking),
+        Data::Closed | Data::Opening => data_status(cx, c, Icon::Lock, "解密数据分区", Some("正在读取锁屏方式"), None),
+        Data::Open => data_status(cx, c, Icon::Folder, "数据分区已解密", Some("文件管理里可以看到手机上的文件"), None),
+        Data::Failed(why) => data_status(cx, c, Icon::Lock, "数据分区没有打开", None, Some(why)),
+    }
+}
+
+/// Where the partition stands, under its sign: a line on it, or why it
+/// did not open and a way to try again; then the way off the page.
+fn data_status(cx: &Ctx, mut c: Canvas, icon: Icon, title: &str, note: Option<&str>, why: Option<&str>) -> Frame {
+    let (t, f) = (cx.t, cx.f);
     let m = &t.m;
     let x = m.w as f32 / 2.0;
-    if cx.data == DataState::Locked {
-        return code(cx, c);
+    let sign_cy = m.dp(150.0);
+    c.fill_circle(x, sign_cy, m.dp(30.0), t.pal.card);
+    widgets::glyph(&mut c, icon, x, sign_cy, m.dp(40.0), t.pal.accent, t.pal.card);
+    c.text_center(&f.heading, title, x, sign_cy + m.dp(64.0), m.dp(24.0), t.pal.text);
+    if let Some(note) = note {
+        c.text_center(&f.body, note, x, sign_cy + m.dp(98.0), m.sub_px, t.pal.subtitle);
     }
-    let lock_cy = m.dp(150.0);
-    let open = cx.data == DataState::Decrypted;
-    c.fill_circle(x, lock_cy, m.dp(30.0), t.pal.card);
-    widgets::glyph(&mut c, if open { Icon::Folder } else { Icon::Lock }, x, lock_cy, m.dp(40.0), t.pal.accent, t.pal.card);
-    let (title, note) = match open {
-        true => ("数据分区已解密", "文件管理里可以看到手机上的文件"),
-        false => ("解密数据分区", "解开后才能看到手机上的文件"),
-    };
-    c.text_center(&f.heading, title, x, lock_cy + m.dp(64.0), m.dp(24.0), t.pal.text);
-    c.text_center(&f.body, note, x, lock_cy + m.dp(98.0), m.sub_px, t.pal.subtitle);
     let mut out = Vec::new();
-    if !open {
-        let track = widgets::confirm(&mut c, t, f, m.h as f32 * 0.62, confirm_label(Confirm::Decrypt).0, false, s.confirm);
-        out.push(Hit { rect: track, action: Action::Confirm(Confirm::Decrypt) });
+    if let Some(why) = why {
+        widgets::paragraph(&mut c, t, f, sign_cy + m.dp(88.0), why);
+        let again = widgets::button(&mut c, t, f, m.h as f32 * 0.62, "重试");
+        out.push(Hit { rect: again, action: Action::OpenData });
     }
-    let skip_cy = m.h as f32 - m.dp(64.0);
-    c.text_center(&f.heading, if open { "完成" } else { "暂不解密" }, x, skip_cy, m.row_title_px, t.pal.accent);
-    out.push(Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
+    let leave_cy = m.h as f32 - m.dp(64.0);
+    let leave = if cx.state.data == Data::Open { "完成" } else { "暂不解密" };
+    c.text_center(&f.heading, leave, x, leave_cy, m.row_title_px, t.pal.accent);
+    out.push(Hit { rect: Rect::new(x - m.dp(80.0), leave_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
     Frame { header: false, ..Frame::new(t, c, out, "解密", 0.0) }
 }
 
-/// The partition is open and what is left is each user's own files, which
-/// only what that user types opens. The control is the one their screen
-/// lock is answered with.
-fn code(cx: &Ctx, mut c: Canvas) -> Frame {
+/// A user's own files wait on their screen lock: the control it is
+/// answered with, which takes nothing while what was entered is checked.
+fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let m = &t.m;
     let x = m.w as f32 / 2.0;
     let mut out = Vec::new();
-    let note = match &s.locked[..] {
-        [one] => format!("用户 {one} 的文件还锁着"),
-        rest => format!("用户 {} 的文件还锁着", rest.iter().map(u32::to_string).collect::<Vec<_>>().join("、")),
+    let title = match user {
+        0 => "输入锁屏密码".to_string(),
+        other => format!("输入用户 {other} 的锁屏密码"),
     };
-    c.text_center(&f.heading, "输入锁屏密码", x, m.dp(130.0), m.dp(24.0), t.pal.text);
-    c.text_center(&f.body, &note, x, m.dp(166.0), m.sub_px, t.pal.subtitle);
+    let note = if checking { "正在验证" } else { "解开后才能看到手机上的文件" };
+    c.text_center(&f.heading, &title, x, m.dp(130.0), m.dp(24.0), t.pal.text);
+    c.text_center(&f.body, note, x, m.dp(166.0), m.sub_px, t.pal.subtitle);
     let mut pattern = None;
-    let bottom = match s.keys {
+    let bottom = match keys {
         Keys::Letters => {
             let top = m.h as f32 - widgets::keyboard_height(t);
-            for (rect, cap) in widgets::keyboard(&mut c, t, f, top, s.layer, s.pressed, "解密") {
-                out.push(Hit { rect, action: Action::Type(cap) });
+            let caps = widgets::keyboard(&mut c, t, f, top, s.layer, s.pressed, "解密");
+            if !checking {
+                out.extend(caps.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
             }
             top
         }
@@ -502,21 +512,24 @@ fn code(cx: &Ctx, mut c: Canvas) -> Frame {
             let span = m.dp(300.0);
             let cy = m.dp(300.0) + span / 2.0;
             widgets::pattern_lock(&mut c, t, x, cy, span, &s.pattern);
-            out.push(Hit { rect: Rect::new(x - span, cy - span, span * 2.0, span * 2.0), action: Action::Pattern });
-            pattern = Some((x, cy, span));
+            if !checking {
+                out.push(Hit { rect: Rect::new(x - span, cy - span, span * 2.0, span * 2.0), action: Action::Pattern });
+                pattern = Some((x, cy, span));
+            }
             m.h as f32 - m.dp(26.0)
         }
-        _ => {
+        Keys::Digits => {
             let top = m.h as f32 - widgets::keypad_height(t);
-            for (rect, cap) in widgets::keypad(&mut c, t, f, top, s.pressed) {
-                out.push(Hit { rect, action: Action::Type(cap) });
+            let caps = widgets::keypad(&mut c, t, f, top, s.pressed);
+            if !checking {
+                out.extend(caps.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
             }
             top
         }
     };
     // The dots sit just above whatever types into them; a pattern is its
     // own showing of what has been drawn.
-    if pattern.is_none() {
+    if keys != Keys::Pattern {
         widgets::code_dots(&mut c, t, x, bottom - m.dp(92.0), s.code.chars().count());
     }
     let skip_cy = bottom - m.dp(34.0);
@@ -860,7 +873,7 @@ pub fn backup(cx: &Ctx) -> Frame {
     let mut c = long_page(t);
     let mut out = Vec::new();
     let top = t.m.content_top;
-    let decrypted = cx.data == DataState::Decrypted;
+    let decrypted = cx.state.data == Data::Open;
     let y = widgets::section_first(&mut c, t, f, top, "备份内容");
     let data = if decrypted { "应用、账户与设置，不含照片和下载的文件" } else { "应用、账户与设置，不含照片和下载的文件；需要先解密" };
     let subs = ["boot、init_boot、vendor_boot、dtbo、vbmeta 和 recovery", "当前槽位在 super 里的分区", data, "IMEI、基带设置和传感器校准，刷坏后靠它恢复"];
@@ -1204,7 +1217,7 @@ pub fn logs(cx: &Ctx) -> Frame {
     ]);
     out.extend(hits(&parts.rows, &[Action::LogPart(0), Action::LogPart(1)]));
     let y = widgets::section(&mut c, t, f, parts.bottom, "保存到");
-    let storage = if cx.data == DataState::Decrypted { "Skyward/logs 文件夹" } else { "需要先解密数据分区" };
+    let storage = if cx.state.data == Data::Open { "Skyward/logs 文件夹" } else { "需要先解密数据分区" };
     let places = widgets::list(&mut c, t, f, y, &[
         Row::new("临时文件夹").subtitle("/tmp/skyward-logs，在电脑上用 adb pull 取走").trail(Trail::Check(s.logs_to == 0)),
         Row::new("内部存储").subtitle(storage).trail(Trail::Check(s.logs_to == 1)),

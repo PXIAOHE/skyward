@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
-use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
+use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
 use skyward_ui::app::{
-    Action, App, Asked, BackupEntry, Choice, Clip, Damage, FileKind, FileOp, FileRow, FileTask, Install, JobEnd, MountFailure,
-    MountRow, Part, Pick, Screen, Touch, UsbLink, SCREEN_OFF,
+    Action, App, Asked, BackupEntry, Choice, Clip, Damage, Data, FileKind, FileOp, FileRow, FileTask, Install, JobEnd, Keys,
+    MountFailure, MountRow, Part, Pick, Screen, Touch, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
@@ -28,8 +28,9 @@ Filesystem      Size Used Avail Use% Mounted on\r\n\
 /dev/block/sda9  59M 7.0M   52M  12% /metadata\r\n\
 ishtar:/ # ";
 
-/// File name, page, dark theme, readings, userdata state, pattern drawn.
-type Shot<'a> = (&'a str, Screen, bool, &'a DeviceInfo, DataState, &'a [usize]);
+/// File name, page, dark theme, readings, where the data partition stands,
+/// pattern drawn.
+type Shot<'a> = (&'a str, Screen, bool, &'a DeviceInfo, Data, &'a [usize]);
 
 /// File name, dark theme, readings, a mount that failed, and the partitions
 /// left unmounted.
@@ -72,38 +73,39 @@ fn main() -> Result<()> {
 
     let info = nezha(&cfg);
     let pending = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info.clone() };
-    let open = DataState::Decrypted;
+    let pattern = Data::Locked { user: 0, keys: Keys::Pattern, checking: false };
     // Whole pages, the way a long screenshot shows them. The About page's
     // field is drawn only on screen, so it appears among the moments below.
     let shots: [Shot; 12] = [
-        ("01-decrypt-dark", Screen::Decrypt, true, &info, DataState::Locked, &[0, 3, 4, 5, 8]),
-        ("02-home-light", Screen::Home, false, &info, open, &[]),
-        ("03-home-dark-update-pending", Screen::Home, true, &pending, open, &[]),
-        ("04-settings-light", Screen::Settings, false, &info, open, &[]),
-        ("05-settings-dark", Screen::Settings, true, &info, open, &[]),
-        ("06-reboot-dark", Screen::Reboot, true, &info, open, &[]),
-        ("07-wipe-light", Screen::Wipe, false, &info, open, &[]),
-        ("09-specs-light", Screen::Specs, false, &info, open, &[]),
-        ("10-specs-dark", Screen::Specs, true, &info, open, &[]),
-        ("11-install-light", Screen::Install, false, &info, open, &[]),
-        ("12-install-dark-update-pending", Screen::Install, true, &pending, open, &[]),
-        ("13-screen-off-light", Screen::ScreenOff, false, &info, open, &[]),
+        ("01-decrypt-dark", Screen::Decrypt, true, &info, pattern, &[0, 3, 4, 5, 8]),
+        ("02-home-light", Screen::Home, false, &info, Data::Open, &[]),
+        ("03-home-dark-update-pending", Screen::Home, true, &pending, Data::Open, &[]),
+        ("04-settings-light", Screen::Settings, false, &info, Data::Open, &[]),
+        ("05-settings-dark", Screen::Settings, true, &info, Data::Open, &[]),
+        ("06-reboot-dark", Screen::Reboot, true, &info, Data::Open, &[]),
+        ("07-wipe-light", Screen::Wipe, false, &info, Data::Open, &[]),
+        ("09-specs-light", Screen::Specs, false, &info, Data::Open, &[]),
+        ("10-specs-dark", Screen::Specs, true, &info, Data::Open, &[]),
+        ("11-install-light", Screen::Install, false, &info, Data::Open, &[]),
+        ("12-install-dark-update-pending", Screen::Install, true, &pending, Data::Open, &[]),
+        ("13-screen-off-light", Screen::ScreenOff, false, &info, Data::Open, &[]),
     ];
     for (name, screen, dark, info, data, pattern) in shots {
         let mut app = App::new(screen, w, h, ppd);
         app.state.dark = dark;
+        app.state.data = data;
         app.state.pattern = pattern.to_vec();
         let path = out.join(format!("{name}.png"));
-        write_png(&path, &whole_page(&mut app, &fonts, info, data))?;
+        write_png(&path, &whole_page(&mut app, &fonts, info))?;
         println!("wrote {}", path.display());
     }
 
     // The screen kept on, which warns about burn-in.
-    let mut app = App::new(Screen::ScreenOff, w, h, ppd);
+    let mut app = opened(Screen::ScreenOff, w, h, ppd);
     app.state.dark = true;
     app.state.screen_off = SCREEN_OFF.iter().position(Option::is_none).expect("one choice keeps the screen on");
     let path = out.join("14-screen-off-never-dark.png");
-    write_png(&path, &whole_page(&mut app, &fonts, &info, open))?;
+    write_png(&path, &whole_page(&mut app, &fonts, &info))?;
     println!("wrote {}", path.display());
 
     // The sideload page through an install, as the installer tells it.
@@ -161,11 +163,11 @@ fn main() -> Result<()> {
         ),
     ];
     for (name, dark, install) in installing {
-        let mut app = App::new(Screen::Sideload, w, h, ppd);
+        let mut app = opened(Screen::Sideload, w, h, ppd);
         app.state.dark = dark;
         app.state.install = install;
         let path = out.join(format!("{name}.png"));
-        write_png(&path, &whole_page(&mut app, &fonts, &info, open))?;
+        write_png(&path, &whole_page(&mut app, &fonts, &info))?;
         println!("wrote {}", path.display());
     }
 
@@ -182,14 +184,14 @@ fn main() -> Result<()> {
         ("17-mount-light-update-pending", false, &pending, None, &["product", "system_ext"]),
     ];
     for (name, dark, info, failure, unmounted) in mounting {
-        let mut app = App::new(Screen::Mount, w, h, ppd);
+        let mut app = opened(Screen::Mount, w, h, ppd);
         app.state.dark = dark;
         app.set_mounts(Ok(sample_mounts(unmounted)));
         if let Some(failure) = failure {
             app.mount_failed(failure);
         }
         let path = out.join(format!("{name}.png"));
-        write_png(&path, &whole_page(&mut app, &fonts, info, open))?;
+        write_png(&path, &whole_page(&mut app, &fonts, info))?;
         println!("wrote {}", path.display());
     }
 
@@ -205,7 +207,7 @@ fn main() -> Result<()> {
     };
     let ota = "/sdcard/Download/OTA_ishtar_OS3.0.305.0.WMACNXM_20260412_full_package_signed_for_recovery_install.zip";
     let copying = || FileTask::Copy { path: ota.into(), into: "/sdcard/Skyward".into() };
-    let pages: [PageShot; 40] = [
+    let pages: [PageShot; 46] = [
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
@@ -309,13 +311,26 @@ fn main() -> Result<()> {
             app.file_progress((0, 18_000), (0, 1));
             app.file_job_ended(JobEnd::Failed("make /sdcard/Download/skyward.log: Read-only file system (os error 30)".into()), 0);
         }),
+        ("85-decrypt-light-opening", Screen::Decrypt, false, &|app| app.state.data = Data::Opening),
+        ("86-decrypt-light-digits", Screen::Decrypt, false, &|app| {
+            app.data_waiting(Some((0, Keys::Digits)));
+            app.state.code = "123".into();
+        }),
+        ("87-decrypt-dark-letters", Screen::Decrypt, true, &|app| app.data_waiting(Some((10, Keys::Letters)))),
+        ("88-decrypt-light-checking", Screen::Decrypt, false, &|app| {
+            app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: true };
+        }),
+        ("89-decrypt-light-open", Screen::Decrypt, false, &|app| app.data_waiting(None)),
+        ("90-decrypt-dark-failed", Screen::Decrypt, true, &|app| {
+            app.data_failed("android.hardware.security.keymint.IKeyMintDevice/default is not running".into())
+        }),
     ];
     for (name, screen, dark, set) in pages {
-        let mut app = App::new(screen, w, h, ppd);
+        let mut app = opened(screen, w, h, ppd);
         app.state.dark = dark;
         set(&mut app);
         let path = out.join(format!("{name}.png"));
-        write_png(&path, &whole_page(&mut app, &fonts, &info, open))?;
+        write_png(&path, &whole_page(&mut app, &fonts, &info))?;
         println!("wrote {}", path.display());
     }
 
@@ -335,19 +350,19 @@ fn main() -> Result<()> {
         ("29-about-scrolled", Screen::About, false, &|app, f| drag(app, f, 1900.0, 1500.0)),
         ("64-files-scrolled", Screen::Files, false, &|app, f| {
             app.set_files("/system/bin".into(), Ok(sample_bin()), LISTED);
-            app.frame(f, &info, open);
+            app.frame(f, &info);
             drag(app, f, 2000.0, 700.0)
         }),
         ("65-files-scrolled-dark", Screen::Files, true, &|app, f| {
             app.set_files("/system/bin".into(), Ok(sample_bin()), LISTED);
-            app.frame(f, &info, open);
+            app.frame(f, &info);
             drag(app, f, 2000.0, 700.0)
         }),
     ];
     for (name, screen, dark, act) in moments {
-        let mut app = App::new(screen, w, h, ppd);
+        let mut app = opened(screen, w, h, ppd);
         app.state.dark = dark;
-        app.frame(&fonts, &info, open);
+        app.frame(&fonts, &info);
         app.tick(0);
         let now = act(&mut app, &fonts);
         // Time passes frame by frame, as on the panel.
@@ -356,7 +371,7 @@ fn main() -> Result<()> {
         }
         app.tick(now);
         let mut c = Canvas::new(w, h);
-        app.compose(&mut c, &fonts, &info, open, CLOCK, now);
+        app.compose(&mut c, &fonts, &info, CLOCK, now);
         let path = out.join(format!("{name}.png"));
         write_png(&path, &c)?;
         println!("wrote {}", path.display());
@@ -418,7 +433,7 @@ fn hold(app: &mut App, f: &Fonts, y0: f32, y1: f32) -> u64 {
 /// to, then swipe in from the left edge at y = 1300 to `x` and keep the
 /// finger down, the way the 17U recordings were made.
 fn swipe_in(app: &mut App, f: &Fonts, info: &DeviceInfo, x: f32) -> u64 {
-    let hits = &app.frame(f, info, DataState::Decrypted).hits;
+    let hits = &app.frame(f, info).hits;
     let (rx, ry) = hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("the home page opens the reboot page").rect.centre();
     app.touch(Touch::Down(rx, ry), f, 0);
     app.touch(Touch::Up, f, 0);
@@ -544,18 +559,26 @@ fn sample_bin() -> Vec<FileRow> {
     rows
 }
 
+/// A page as most previews show it: on a phone whose data partition is
+/// open, its owner's own files with it.
+fn opened(screen: Screen, w: u32, h: u32, ppd: f32) -> App {
+    let mut app = App::new(screen, w, h, ppd);
+    app.state.data = Data::Open;
+    app
+}
+
 /// The full length of a page with the status bar over its top, the way a
 /// long screenshot shows it: a long list's rows and a pinned strip in the
 /// places an unscrolled page gives them.
-fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo, data: DataState) -> Canvas {
+fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo) -> Canvas {
     let t = app.theme();
     let (screen, state) = (app.screen(), app.state.clone());
-    let frame = app.frame(f, info, data);
+    let frame = app.frame(f, info);
     let mut c = Canvas::new(frame.canvas.w, frame.height(&t) as u32);
     c.clear(frame.bg);
     c.put(&frame.canvas, 0);
     if let Some(rows) = &frame.rows {
-        let cx = Ctx { t: &t, f, info, data, state: &state, term: None };
+        let cx = Ctx { t: &t, f, info, state: &state, term: None };
         for k in 0..rows.count() {
             let mut row = Canvas::new(c.w, (rows.edges[k + 1] - rows.edges[k]) as u32);
             pages::row(screen, &cx, k, &mut row);

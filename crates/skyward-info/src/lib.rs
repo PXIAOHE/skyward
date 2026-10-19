@@ -124,15 +124,6 @@ pub struct Boot {
     pub verified: Option<String>,
 }
 
-/// Where userdata stands in the unlock flow. The recovery sets this itself:
-/// only the code that installed the CE keys knows whether it did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DataState {
-    Unmounted,
-    Locked,
-    Decrypted,
-}
-
 pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
     let d = &cfg.display;
     let unlocked = match skyward_block::boot_param("androidboot.vbmeta.device_state")?.as_deref() {

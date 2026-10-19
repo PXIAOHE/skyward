@@ -1,3 +1,4 @@
+use crate::decrypt::{self, Decryptor};
 use crate::filework;
 use crate::haptics::Haptics;
 use crate::input::{monotonic_ms, Event, Inputs};
@@ -6,7 +7,7 @@ use crate::services;
 use crate::wipe::{self, Eraser, Step};
 use anyhow::{anyhow, ensure, Context, Result};
 use skyward_config::{DeviceConfig, Service};
-use skyward_info::DataState;
+use skyward_crypto::data::{Closed, Opened};
 use skyward_install::{Detach, Installer};
 use skyward_sys::bcb::{self, Work};
 use skyward_sys::control::{Control, Request};
@@ -248,6 +249,8 @@ fn cache_wipe(app: &mut App) -> Result<Eraser> {
 /// What the pages act on: a touch or a key, or what a program asked on the
 /// recovery socket.
 enum Incoming {
+    /// The page shown first, which may ask for work as it shows.
+    Arrived,
     Input(Event),
     Asked(Request),
 }
@@ -272,72 +275,44 @@ fn clock() -> Result<String> {
     Ok(skyward_ui::fmt::clock(now.as_secs() as i64))
 }
 
-/// Whether the data partition is mounted, which the recovery does only as
-/// it opens it; the mount outlives a restart of the recovery's program.
-fn data_state() -> Result<DataState> {
-    let here = fs::metadata("/data").context("stat /data")?;
-    let up = fs::metadata("/").context("stat /")?;
-    Ok(if here.dev() != up.dev() { DataState::Decrypted } else { DataState::Unmounted })
-}
-
-/// Open the data partition and let in every key the phone keeps for it
-/// that needs nothing a user knows, and give the users the phone keeps
-/// keys for.
-fn open_data() -> Result<Vec<u32>> {
-    use skyward_crypto::data;
-    let binder = skyward_binder::driver::Binder::open()?;
-    let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
-    if !skyward_block::mount::is_mount_point(Path::new(data::MOUNT))? {
-        let opened = data::open(&service)?;
-        if let Some(checked) = &opened.checked {
-            skyward_sys::kmsg(&format!("the check of {} ended with {}", opened.mapped.display(), checked.status))?;
-            if checked.status != 0 {
-                for line in checked.said.lines() {
-                    skyward_sys::kmsg(line)?;
-                }
-            }
-        }
-        skyward_sys::kmsg(&format!("{} holds {} at {}", opened.mapped.display(), opened.filesystem, data::MOUNT))?;
-    }
-    data::open_shared(&service)?;
-    data::open_users(&service)
-}
-
-/// Let in the keys for the own files of every one of `users` that
-/// `credential` opens, and give the ones whose files stay closed and why.
-/// A user who has set no screen lock opens with no credential at all, and
-/// one the phone made a credential up for opens behind the owner's, so the
-/// owner is taken first and the note their credential gave is kept for the
-/// rest.
-fn open_user_files(credential: Option<&[u8]>, users: &[u32]) -> Result<Vec<(u32, String)>> {
-    let binder = skyward_binder::driver::Binder::open()?;
-    let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
-    let mut owner = None;
-    let mut closed = Vec::new();
-    for &user in users {
-        match skyward_crypto::data::open_user_files(&service, user, credential, owner.as_ref()) {
-            Ok(note) => {
-                skyward_sys::kmsg(&format!("the files of user {user} can be read"))?;
-                owner = owner.or(note);
-            }
-            Err(e) => {
-                skyward_sys::kmsg(&format!("the files of user {user} stay closed: {e:#}"))?;
-                closed.push((user, format!("{e:#}")));
+/// Tell the kernel log how the data partition was mounted, where opening
+/// it mounted it: the check made first, in full where it found something,
+/// and the device it is read through.
+fn log_mounted(mounted: &Opened) -> Result<()> {
+    if let Some(checked) = &mounted.checked {
+        skyward_sys::kmsg(&format!("the check of {} ended with {}", mounted.mapped.display(), checked.status))?;
+        if checked.status != 0 {
+            for line in checked.said.lines() {
+                skyward_sys::kmsg(line)?;
             }
         }
     }
-    Ok(closed)
+    skyward_sys::kmsg(&format!("{} holds {} at {}", mounted.mapped.display(), mounted.filesystem, skyward_crypto::data::MOUNT))
 }
 
-/// Which control answers the screen lock the first of these users set.
-fn keys_for(users: &[u32]) -> Result<Keys> {
+/// Show what the data partition still keeps closed: the first user whose
+/// own files wait on a screen lock they set themselves, with the control
+/// that lock is answered with, or nothing. Users whose credential the phone
+/// made up open behind the owner and are never asked; one that did not
+/// open goes to the kernel log with why.
+fn show_closed(app: &mut App, closed: &[Closed]) -> Result<()> {
     use skyward_crypto::user::Lock;
-    let Some(&user) = users.first() else { return Ok(Keys::None) };
-    Ok(match skyward_crypto::data::protector(user)?.lock.map(|l| l.kind) {
-        Some(Lock::PATTERN) => Keys::Pattern,
-        Some(Lock::PIN) => Keys::Digits,
-        _ => Keys::Letters,
-    })
+    skyward_sys::kmsg(&format!("the users whose own files are still closed: {:?}", closed.iter().map(|c| c.user).collect::<Vec<_>>()))?;
+    for c in closed {
+        if let Some(why) = &c.why {
+            skyward_sys::kmsg(&format!("the files of user {} stay closed: {why}", c.user))?;
+        }
+    }
+    let waiting = closed.iter().find(|c| !c.made_up).map(|c| {
+        let keys = match c.lock {
+            Lock::PATTERN => Keys::Pattern,
+            Lock::PIN => Keys::Digits,
+            _ => Keys::Letters,
+        };
+        (c.user, keys)
+    });
+    app.data_waiting(waiting);
+    Ok(())
 }
 
 /// What the file manager lists for a folder: its entries, folders and
@@ -472,10 +447,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     if backlight.level > 0 {
         app.state.brightness = (backlight.level as f32 / backlight.top as f32).min(1.0);
     }
-    let mut data = data_state()?;
-    // Which users' own files are still closed, once the partition itself
-    // is open. Each is closed with what that user types.
-    let mut locked: Vec<u32> = Vec::new();
+    // Opening the data partition, or a user's own files in it, under way,
+    // and the users whose own files are still closed once it is open.
+    let mut decryptor: Option<Decryptor> = None;
+    let mut closed: Vec<Closed> = Vec::new();
+    let mut arriving = Some(Incoming::Arrived);
     // The mount page shows the partitions as they are when it opens and
     // after each change; why they cannot be read is the page's to say.
     let mounts = || read_mounts(&cfg.services).map_err(|e| format!("{e:#}"));
@@ -572,7 +548,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if panel.is_some() {
             if app.take_dirty() {
                 let t0 = Instant::now();
-                app.compose(&mut screen, &fonts, &info, data, &shown_clock, now);
+                app.compose(&mut screen, &fonts, &info, &shown_clock, now);
                 surface.present(&screen)?;
                 eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
                 if let Some(path) = dump {
@@ -612,6 +588,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(w) = &worker {
             fds.push(w.fd());
+        }
+        if let Some(d) = &decryptor {
+            fds.push(d.fd());
         }
         wait(&fds, timeout)?;
         let now = monotonic_ms();
@@ -687,6 +666,30 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             let folder = app.state.folder.clone();
             list(&mut app, folder)?;
         }
+        if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
+            decryptor = None;
+            match ended {
+                decrypt::Ended::Opened(Ok(opening)) => {
+                    if let Some(mounted) = &opening.mounted {
+                        log_mounted(mounted)?;
+                    }
+                    closed = opening.closed;
+                    show_closed(&mut app, &closed)?;
+                }
+                decrypt::Ended::Opened(Err(why)) => {
+                    skyward_sys::kmsg(&format!("the data partition stays closed: {why}"))?;
+                    app.data_failed(why);
+                }
+                decrypt::Ended::Unlocked(Ok(still)) => {
+                    closed = still;
+                    show_closed(&mut app, &closed)?;
+                }
+                decrypt::Ended::Unlocked(Err(why)) => {
+                    skyward_sys::kmsg(&format!("what was entered did not open the user's files: {why}"))?;
+                    app.unlock_failed(why, now);
+                }
+            }
+        }
         if let Some(sh) = &mut shell {
             let wrote = sh.read()?;
             if !wrote.is_empty() {
@@ -708,9 +711,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             Some(c) => c.requests()?,
             None => Vec::new(),
         };
-        let incoming = requests.into_iter().map(Incoming::Asked).chain(inputs.read()?.into_iter().map(Incoming::Input));
+        let incoming = arriving.take().into_iter().chain(requests.into_iter().map(Incoming::Asked)).chain(inputs.read()?.into_iter().map(Incoming::Input));
         for came in incoming {
             let effects = match came {
+                Incoming::Arrived => app.arrive(),
                 Incoming::Asked(asked) => {
                     skyward_sys::kmsg(&format!("asked on the recovery socket: {asked:?}"))?;
                     answer(asked, fastboot)
@@ -777,34 +781,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::Cancel => installer.as_ref().context("no installer to cancel")?.cancel()?,
                     Effect::ReadMounts => app.set_mounts(mounts()),
-                    Effect::Decrypt => match open_data().and_then(|users| open_user_files(None, &users)) {
-                        Ok(closed) => {
-                            locked = closed.iter().map(|(user, _)| *user).collect();
-                            data = if locked.is_empty() { DataState::Decrypted } else { DataState::Locked };
-                            app.set_locked(locked.clone(), keys_for(&locked)?);
-                            app.refresh();
-                            skyward_sys::kmsg(&format!("the data partition is open, with users {locked:?} still closed"))?;
-                        }
-                        Err(e) => {
-                            skyward_sys::kmsg(&format!("the data partition stays closed: {e:#}"))?;
-                            app.report(&format!("{e:#}"), now);
-                        }
-                    },
-                    Effect::Unlock(code) => match open_user_files(Some(code.as_bytes()), &locked) {
-                        Ok(closed) => {
-                            locked = closed.iter().map(|(user, _)| *user).collect();
-                            data = if locked.is_empty() { DataState::Decrypted } else { DataState::Locked };
-                            app.set_locked(locked.clone(), keys_for(&locked)?);
-                            app.refresh();
-                            if let Some((_, why)) = closed.first() {
-                                app.report(why, now);
-                            }
-                        }
-                        Err(e) => {
-                            skyward_sys::kmsg(&format!("the files of the phone's users stay closed: {e:#}"))?;
-                            app.report(&format!("{e:#}"), now);
-                        }
-                    },
+                    // The decrypt page shows meanwhile that the work is
+                    // under way, and takes nothing more until it is done.
+                    Effect::OpenData => {
+                        ensure!(decryptor.is_none(), "the data partition is being opened already");
+                        decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
+                    }
+                    Effect::Unlock { user, code } => {
+                        ensure!(decryptor.is_none(), "the data partition is being opened already");
+                        let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential: code.into_bytes() };
+                        decryptor = Some(Decryptor::start(job)?);
+                    }
                     Effect::ReadDir(folder) => list(&mut app, folder)?,
                     // A name taken where an entry goes is the user's to
                     // decide on before anything is written.
@@ -878,7 +865,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
                         crate::prepare(cfg, slot)?;
                         info = skyward_info::collect(cfg)?;
-                        data = data_state()?;
                         fastboot = false;
                         app.enter_recovery();
                     }
