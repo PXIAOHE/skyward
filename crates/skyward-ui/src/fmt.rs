@@ -388,14 +388,14 @@ pub fn parts(held: &[bool; 4]) -> String {
 /// What an image is, and what it holds.
 pub fn image_kind(kind: ImageKind) -> (&'static str, &'static str) {
     match kind {
-        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::Recovery } => ("恢复模式镜像", "内核和恢复模式 ramdisk"),
-        ImageKind::Boot { kernel: false, ramdisk: Ramdisk::Recovery } => ("恢复模式镜像", "恢复模式 ramdisk"),
-        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::Generic } => ("启动镜像", "内核和通用 ramdisk"),
-        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::None } => ("启动镜像", "只有内核"),
-        ImageKind::Boot { kernel: false, .. } => ("启动镜像", "只有通用 ramdisk"),
-        ImageKind::VendorBoot => ("vendor_boot 镜像", "厂商 ramdisk 和设备树"),
-        ImageKind::Dtbo => ("dtbo 镜像", "设备树叠加层"),
-        ImageKind::Vbmeta => ("vbmeta 镜像", "启动验证数据"),
+        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::Recovery } => ("恢复模式镜像", "包含内核和恢复模式 ramdisk"),
+        ImageKind::Boot { kernel: false, ramdisk: Ramdisk::Recovery } => ("恢复模式镜像", "仅包含恢复模式 ramdisk"),
+        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::Generic } => ("启动镜像", "包含内核和通用 ramdisk"),
+        ImageKind::Boot { kernel: true, ramdisk: Ramdisk::None } => ("启动镜像", "仅包含内核"),
+        ImageKind::Boot { kernel: false, .. } => ("启动镜像", "仅包含通用 ramdisk"),
+        ImageKind::VendorBoot => ("vendor_boot 镜像", "包含厂商 ramdisk 和设备树"),
+        ImageKind::Dtbo => ("dtbo 镜像", "包含设备树叠加层"),
+        ImageKind::Vbmeta => ("vbmeta 镜像", "包含启动验证数据"),
     }
 }
 
@@ -439,24 +439,24 @@ pub fn mount_failure(m: &MountFailure) -> String {
 /// Why a package was not installed, for a phone with this codename.
 pub fn refusal(r: &Refusal, codename: &str) -> String {
     match r {
-        Refusal::Unknown => "无法识别这个文件。能安装的是 A/B 系统更新包和分区镜像。".into(),
-        Refusal::Script => "这是需要运行安装脚本的刷机包，这里只安装 A/B 系统更新包和分区镜像。".into(),
-        Refusal::NotAb(kind) if kind.is_empty() => "这不是 A/B 系统更新包，包里没有注明类型。".into(),
-        Refusal::NotAb(kind) => format!("这不是 A/B 系统更新包，包里注明的类型是 {kind}。"),
-        Refusal::OtherDevice(devices) => format!("这个包适用于 {devices}，这台手机是 {codename}。"),
-        Refusal::OtherSerial => "这个包只能安装在指定的几台手机上，不包括这台。".into(),
-        Refusal::Incremental => "这是增量更新包，只能在系统里安装。请改用完整包。".into(),
+        Refusal::Unknown => "无法识别该文件，请发送 A/B 完整更新包或分区镜像。".into(),
+        Refusal::Script => "无法安装刷机包，请发送 A/B 完整更新包或分区镜像。".into(),
+        Refusal::NotAb(kind) if kind.is_empty() => "该更新包未注明类型，请发送 A/B 完整更新包。".into(),
+        Refusal::NotAb(kind) => format!("该更新包的类型为 {kind}，请发送 A/B 完整更新包。"),
+        Refusal::OtherDevice(devices) => format!("该更新包适用于 {devices}，本机为 {codename}。"),
+        Refusal::OtherSerial => "该更新包仅适用于指定序列号的设备，不包括本机。".into(),
+        Refusal::Incremental => "无法安装增量更新包，请发送完整更新包。".into(),
         Refusal::Older { package, installed } => {
-            format!("这个包的构建日期（{}）早于手机上的系统（{}）。", date(*package), date(*installed))
+            format!("该更新包的构建日期为 {}，早于当前系统的 {}。", date(*package), date(*installed))
         }
         Refusal::OlderPatch { package, installed } => {
-            format!("这个包的安全补丁（{package}）早于手机上的（{installed}），安装后会无法读取数据分区。")
+            format!("该更新包的安全补丁为 {package}，早于当前系统的 {installed}。")
         }
-        Refusal::NoPartition => "这台手机没有能写入这个镜像的分区。".into(),
-        Refusal::Battery { level, charging: true } => format!("电量只有 {level}%，充电时至少需要 15%。"),
-        Refusal::Battery { level, charging: false } => format!("电量只有 {level}%，没有充电时至少需要 20%。"),
-        Refusal::Pending(state) => format!("{}。请先回到系统完成上一次更新，再来安装。", snapshot(state)),
-        Refusal::OldHost => "电脑上的 adb 版本过旧，无法分块发送。请更新 Android SDK Platform-Tools。".into(),
+        Refusal::NoPartition => "本机没有可刷入该镜像的分区。".into(),
+        Refusal::Battery { level, charging: true } => format!("电量仅剩 {level}%，请充电至 15% 以上后重试。"),
+        Refusal::Battery { level, charging: false } => format!("电量仅剩 {level}%，请充电至 20% 以上后重试。"),
+        Refusal::Pending(state) => format!("{}。请重启到系统，完成上一次更新后重试。", snapshot(state)),
+        Refusal::OldHost => "电脑上的 adb 版本过低，请更新 Android SDK Platform-Tools 后重试。".into(),
     }
 }
 
@@ -465,22 +465,22 @@ pub fn failure(f: &Failure) -> (String, Option<String>) {
     match f {
         Failure::Engine(code) => {
             let what = match Trouble::of(*code) {
-                Trouble::Signature => "安装包的签名不匹配，这台手机只接受官方签名的包。",
-                Trouble::Damaged => "安装包已经损坏，请重新下载。",
-                Trouble::Older => "安装包早于恢复模式允许的版本。",
-                Trouble::NoSpace => "super 分区的空间不够存放新系统。",
-                Trouble::Transfer => "读取安装包失败，数据线可能断开了。",
+                Trouble::Signature => "更新包签名验证失败，请发送官方更新包。",
+                Trouble::Damaged => "更新包已损坏，请重新下载。",
+                Trouble::Older => "更新包的版本过旧。",
+                Trouble::NoSpace => "super 分区空间不足。",
+                Trouble::Transfer => "读取更新包失败，请检查数据线连接后重新发送。",
                 Trouble::Write => "写入分区失败。",
-                Trouble::Verify => "写入的分区没有通过校验。",
-                Trouble::PostInstall => "安装包最后的步骤失败了。",
-                Trouble::Unsupported => "这个包的格式比手机上的更新程序新，无法识别。",
-                Trouble::Other => "更新程序报错。",
+                Trouble::Verify => "分区校验失败。",
+                Trouble::PostInstall => "完成安装失败。",
+                Trouble::Unsupported => "暂不支持该更新包的格式。",
+                Trouble::Other => "更新程序出错。",
             };
-            (what.into(), Some(format!("update_engine 错误代码 {code}")))
+            (what.into(), Some(format!("错误代码：{code}")))
         }
-        Failure::Disconnected => ("电脑停止了发送：数据线断开了，或者 adb sideload 被中断。".into(), None),
-        Failure::Changed => ("电脑上的文件在发送途中被改动了，请重新发送。".into(), None),
-        Failure::Error(detail) => ("出现了意外的错误。".into(), Some(detail.clone())),
+        Failure::Disconnected => ("电脑已停止发送，请检查数据线连接后重新发送。".into(), None),
+        Failure::Changed => ("文件在发送过程中被修改，请重新发送。".into(), None),
+        Failure::Error(detail) => ("发生意外错误。".into(), Some(detail.clone())),
     }
 }
 
@@ -653,16 +653,17 @@ mod tests {
 
     #[test]
     fn reasons_read_as_sentences() {
-        assert_eq!(refusal(&Refusal::OtherDevice("nezha".into()), "ishtar"), "这个包适用于 nezha，这台手机是 ishtar。");
+        assert_eq!(refusal(&Refusal::OtherDevice("nezha".into()), "ishtar"), "该更新包适用于 nezha，本机为 ishtar。");
         assert_eq!(
             refusal(&Refusal::Older { package: 1_770_000_000, installed: 1_778_243_655 }, "ishtar"),
-            "这个包的构建日期（2026年2月2日）早于手机上的系统（2026年5月8日）。"
+            "该更新包的构建日期为 2026年2月2日，早于当前系统的 2026年5月8日。"
         );
-        assert_eq!(refusal(&Refusal::Battery { level: 12, charging: true }, "ishtar"), "电量只有 12%，充电时至少需要 15%。");
+        assert_eq!(refusal(&Refusal::Battery { level: 12, charging: true }, "ishtar"), "电量仅剩 12%，请充电至 15% 以上后重试。");
         assert_eq!(
-            failure(&Failure::Engine(26)),
-            ("安装包的签名不匹配，这台手机只接受官方签名的包。".into(), Some("update_engine 错误代码 26".into()))
+            refusal(&Refusal::Pending(SnapshotState::Snapshotted), "ishtar"),
+            "更新已写入，等待合并。请重启到系统，完成上一次更新后重试。"
         );
+        assert_eq!(failure(&Failure::Engine(26)), ("更新包签名验证失败，请发送官方更新包。".into(), Some("错误代码：26".into())));
         assert_eq!(failure(&Failure::Error("open ep0: busy".into())).1.as_deref(), Some("open ep0: busy"));
     }
 

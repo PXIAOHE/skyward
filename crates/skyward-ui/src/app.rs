@@ -1934,11 +1934,15 @@ impl App {
         if self.screen() == Screen::Sideload {
             match self.state.install {
                 Install::Checking { .. } => {
-                    self.say("正在读取安装包，读取完成后才能返回", now);
+                    self.say("正在读取文件，请稍后再试", now);
                     return fx;
                 }
-                Install::Updating { .. } | Install::Flashing { .. } => {
-                    self.say("正在安装，安装完成后才能返回", now);
+                Install::Updating { .. } => {
+                    self.say("正在安装，请等待安装完成", now);
+                    return fx;
+                }
+                Install::Flashing { .. } => {
+                    self.say("正在刷入，请等待刷入完成", now);
                     return fx;
                 }
                 Install::Starting | Install::Waiting | Install::Choosing(_) | Install::Confirming { .. } => {
@@ -2111,7 +2115,7 @@ impl App {
                     }
                     return vec![Effect::Sideload];
                 }
-                _ => self.say("上一次安装还在收尾，请稍后再尝试", now),
+                _ => self.say("上一次安装尚未结束，请稍后再试", now),
             },
             Action::FlashPartition(k) => {
                 if let Install::Choosing(choice) = &mut self.state.install {
