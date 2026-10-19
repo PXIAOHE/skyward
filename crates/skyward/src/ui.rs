@@ -1,5 +1,6 @@
 use crate::haptics::Haptics;
 use crate::input::{monotonic_ms, Event, Inputs};
+use crate::pty;
 use crate::services;
 use crate::wipe::{self, Eraser, Step};
 use anyhow::{anyhow, ensure, Context, Result};
@@ -473,6 +474,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // request says to.
     let leave = if request.shutdown_after { Target::PowerOff } else { Target::System };
     let mut leave_at: Option<u64> = None;
+    // The terminal page's shell, from when the page first asks for one.
+    let mut shell: Option<pty::Shell> = None;
     loop {
         let now = monotonic_ms();
         if leave_at.is_some_and(|at| now >= at) {
@@ -544,6 +547,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(e) = &eraser {
             fds.push(e.fd());
         }
+        if let Some(sh) = &shell {
+            fds.extend(sh.fds());
+        }
         wait(&fds, timeout)?;
         let now = monotonic_ms();
         // What the installer and the eraser told comes first, so a touch
@@ -595,6 +601,21 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if erased {
             eraser = None;
         }
+        if let Some(sh) = &mut shell {
+            let wrote = sh.read()?;
+            if !wrote.is_empty() {
+                app.term_output(&wrote);
+            }
+            if let Some(status) = sh.ended()? {
+                // What it wrote last shows before its end does.
+                let last = sh.read()?;
+                if !last.is_empty() {
+                    app.term_output(&last);
+                }
+                app.term_ended(&pty::how(status));
+                shell = None;
+            }
+        }
         // Then what programs asked on the recovery socket, each answered as
         // the recovery stands when its turn comes.
         let requests = match &control {
@@ -632,6 +653,28 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::FactoryReset => {
                         ensure!(eraser.is_none(), "erasing is under way already");
                         eraser = Some(factory_reset(&mut app, request.keep_memtag_mode)?);
+                    }
+                    // A shell that will not start, or will not take keys,
+                    // is the page's to report; the recovery carries on.
+                    Effect::StartShell => {
+                        ensure!(shell.is_none(), "a shell runs already");
+                        let (rows, cols) = app.term_size(&fonts);
+                        match pty::Shell::start(rows, cols, &cfg.device.codename) {
+                            Ok(sh) => {
+                                shell = Some(sh);
+                                app.term_started(rows, cols);
+                            }
+                            Err(e) => {
+                                skyward_sys::kmsg(&format!("no shell for the terminal: {e:#}"))?;
+                                app.report(&format!("{e:#}"), now);
+                            }
+                        }
+                    }
+                    Effect::TermInput(bytes) => {
+                        let sh = shell.as_mut().context("keys went to a shell that has ended")?;
+                        if let Err(e) = sh.write(&bytes) {
+                            app.report(&format!("{e:#}"), now);
+                        }
                     }
                     Effect::Haptic => {
                         if let Some(h) = &mut haptics {

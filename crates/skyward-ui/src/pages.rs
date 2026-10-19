@@ -9,6 +9,7 @@ use crate::fmt;
 use crate::font::Fonts;
 use crate::geom::Rect;
 use crate::search;
+use crate::term::{self, Term};
 use crate::theme::Theme;
 use crate::widgets::{self, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DataState, DeviceInfo, VERSION};
@@ -33,6 +34,8 @@ pub struct Ctx<'a> {
     pub info: &'a DeviceInfo,
     pub data: DataState,
     pub state: &'a State,
+    /// The shell the terminal page shows, once one has started.
+    pub term: Option<&'a Term>,
 }
 
 pub fn render(screen: Screen, cx: &Ctx) -> Frame {
@@ -1012,20 +1015,19 @@ pub fn file_info(cx: &Ctx) -> Frame {
     Frame::new(t, fit(c, t, actions.bottom), out, "文件信息", top)
 }
 
-/// A shell: what it printed, the command being typed after the prompt,
-/// and the keyboard.
+/// A shell on a terminal: the screen it writes, the keys a phone keyboard
+/// lacks, and the keyboard, every key of which goes to the shell.
 pub fn terminal(cx: &Ctx) -> Frame {
-    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
-    let m = &t.m;
+    let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = page(t);
     let mut out = Vec::new();
-    let top = m.content_top;
-    let kb_top = keyboard_hits(&mut c, t, f, s, "执行", &mut out);
-    let bottom = kb_top - m.dp(12.0);
-    c.fill_round_rect(m.margin, top, m.w as f32 - m.margin * 2.0, bottom - top, m.card_radius, t.pal.card);
-    let lines = [format!("Skyward {VERSION}"), String::new(), format!("{}:/ # {}", i.codename, s.command)];
-    widgets::mono_text(&mut c, t, f, top + m.inner, &lines, true);
-    Frame::new(t, c, out, "终端", top)
+    let top = t.m.content_top;
+    keyboard_hits(&mut c, t, f, s, "回车", &mut out);
+    let l = term::layout(t, f, top);
+    term::draw(&mut c, t, f, &l, cx.term);
+    let held = cx.term.is_some_and(|term| term.ctrl);
+    out.extend(term::keys(&mut c, t, f, &l, held).into_iter().map(|(rect, key)| Hit { rect, action: Action::TermKey(key) }));
+    Frame { scrollback: Some((l.card, l.pitch)), ..Frame::new(t, c, out, "终端", top) }
 }
 
 /// The interface's languages; only Simplified Chinese is written yet.

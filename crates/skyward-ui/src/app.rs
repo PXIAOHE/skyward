@@ -8,6 +8,7 @@ use crate::motion::{self, Spring};
 use crate::pages::{self, Ctx};
 use crate::sprite::{Blurs, Sprite};
 use crate::search;
+use crate::term::{self, Term, TermKey};
 use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer};
 use skyward_info::{DataState, DeviceInfo};
@@ -371,6 +372,8 @@ pub enum Action {
     PickSlot(Option<Slot>),
     /// A key of the on-screen keyboard.
     Type(Cap),
+    /// A key of the terminal's own row, above the keyboard.
+    TermKey(TermKey),
     /// Empty the search field.
     ClearSearch,
     /// Open the file manager's entry at this place in the folder.
@@ -413,6 +416,9 @@ pub struct Frame {
     /// A strip that scrolls with the page until it reaches the bar, then
     /// stays under it.
     pub pinned: Option<Pinned>,
+    /// A terminal's screen and the height of its rows: a drag on it scrolls
+    /// back through what the shell wrote, rather than moving the page.
+    pub scrollback: Option<(Rect, f32)>,
 }
 
 /// The rows of a list drawn as they come into view, the way a list view
@@ -476,7 +482,20 @@ impl Frame {
     /// A page of cards on the grey page colour that opens with its title in
     /// large type and goes back with `<`.
     pub fn new(t: &Theme, canvas: Canvas, hits: Vec<Hit>, title: &'static str, content_top: f32) -> Frame {
-        Frame { canvas, hits, title, back: true, header: true, content_top, hero: None, pattern: None, bg: t.pal.bg, rows: None, pinned: None }
+        Frame {
+            canvas,
+            hits,
+            title,
+            back: true,
+            header: true,
+            content_top,
+            hero: None,
+            pattern: None,
+            bg: t.pal.bg,
+            rows: None,
+            pinned: None,
+            scrollback: None,
+        }
     }
 
     /// The topmost control under a point in page coordinates.
@@ -541,8 +560,6 @@ pub struct State {
     pub locked: Vec<u32>,
     /// What is typed in the search field.
     pub search: String,
-    /// The command line typed in the terminal.
-    pub command: String,
     /// The on-screen keyboard's layer, and the key held down on it.
     pub layer: Layer,
     pub pressed: Option<Cap>,
@@ -587,7 +604,6 @@ impl Default for State {
             keys: Keys::None,
             locked: Vec::new(),
             search: String::new(),
-            command: String::new(),
             layer: Layer::Letters,
             pressed: None,
             folder: "/".into(),
@@ -652,6 +668,11 @@ pub enum Effect {
     /// Forget what the system asked of the recovery, so that the next start
     /// goes where its reboot reason says.
     Dismiss,
+    /// Start a shell for the terminal page, on a screen of the size
+    /// [`App::term_size`] gives, telling of it with [`App::term_started`].
+    StartShell,
+    /// Send these bytes to the shell, as typed.
+    TermInput(Vec<u8>),
 }
 
 enum Drag {
@@ -666,6 +687,9 @@ enum Drag {
     Edge { start: f32, from_left: bool, armed: bool, x: f32, cy: f32 },
     Slider(Rect),
     Confirm { which: Confirm, track: Rect, grab: f32 },
+    /// Scrolling a terminal's screen back through what the shell wrote,
+    /// `carry` being the part of a row not yet scrolled.
+    History { last: f32, carry: f32, pitch: f32 },
     Pattern,
     /// The finger that lit the dark panel; nothing it does counts until it
     /// lifts.
@@ -872,6 +896,9 @@ pub struct App {
     snap: bool,
     /// The About page's moving field, while that page shows.
     glow: Option<GlowClock>,
+    /// The terminal page's shell, from when it is first opened; it goes on
+    /// while other pages show.
+    term: Option<Term>,
     display_on: bool,
     /// When the screen was last touched or a key pressed; set on the first
     /// tick, so the time before the UI started does not count.
@@ -911,6 +938,7 @@ impl App {
             bar: bar_fade(start == Screen::About),
             snap: false,
             glow: None,
+            term: None,
             display_on: true,
             active: None,
             woke_at: None,
@@ -1188,6 +1216,40 @@ impl App {
         self.refresh();
     }
 
+    /// How many rows and columns the terminal's screen holds.
+    pub fn term_size(&self, f: &Fonts) -> (u16, u16) {
+        let t = self.theme();
+        let l = term::layout(&t, f, t.m.content_top);
+        (l.rows, l.cols)
+    }
+
+    /// A shell has started for the terminal page, on a blank screen of
+    /// `rows` by `cols`.
+    pub fn term_started(&mut self, rows: u16, cols: u16) {
+        self.term = Some(Term::new(rows, cols));
+        self.refresh();
+    }
+
+    /// What the shell wrote.
+    pub fn term_output(&mut self, bytes: &[u8]) {
+        let term = self.term.as_mut().expect("only a shell that started writes");
+        term.feed(bytes);
+        if self.screen() == Screen::Terminal {
+            self.refresh();
+        }
+    }
+
+    /// The shell has ended, `how` saying how; its screen says so, and that
+    /// Enter starts another.
+    pub fn term_ended(&mut self, how: &str) {
+        let term = self.term.as_mut().expect("only a shell that started ends");
+        term.feed(format!("\r\n[shell 已结束，{how}。按回车重新开始]\r\n").as_bytes());
+        term.running = false;
+        if self.screen() == Screen::Terminal {
+            self.refresh();
+        }
+    }
+
     /// The system asked for sideload before the recovery started: the page
     /// opens over the home page, already receiving.
     pub fn start_sideload(&mut self) {
@@ -1263,7 +1325,7 @@ impl App {
         if self.frame.is_none() {
             let t = self.theme();
             let screen = self.screen();
-            let cx = Ctx { t: &t, f, info, data, state: &self.state };
+            let cx = Ctx { t: &t, f, info, data, state: &self.state, term: self.term.as_ref() };
             let frame = pages::render(screen, &cx);
             self.frame = Some(frame);
             self.clamp_scroll();
@@ -1359,7 +1421,7 @@ impl App {
                             let mut c = self.spare.pop().unwrap_or_else(|| Canvas::new(out.w, 0));
                             c.h = (rows.edges[i + 1] - rows.edges[i]) as u32;
                             c.data.resize((c.w * c.h * 4) as usize, 0);
-                            let cx = Ctx { t: &t, f, info, data, state: &self.state };
+                            let cx = Ctx { t: &t, f, info, data, state: &self.state, term: self.term.as_ref() };
                             pages::row(screen, &cx, i, &mut c);
                             self.drawn.push((i, c));
                             self.drawn.len() - 1
@@ -1552,7 +1614,12 @@ impl App {
                         self.state.search.clear();
                         self.state.layer = Layer::Letters;
                     }
-                    Screen::Terminal => self.state.layer = Layer::Letters,
+                    Screen::Terminal => {
+                        self.state.layer = Layer::Letters;
+                        if self.term.is_none() {
+                            return vec![Effect::StartShell];
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1660,7 +1727,17 @@ impl App {
                 self.state.next_slot = slot;
                 self.refresh();
             }
+            Action::Type(cap) if self.screen() == Screen::Terminal => return self.term_typed(cap),
             Action::Type(cap) => return self.type_key(cap, now),
+            Action::TermKey(key) => {
+                let Some(term) = self.term.as_mut() else { return Vec::new() };
+                let bytes = term.key(key);
+                let running = term.running;
+                self.refresh();
+                if running && !bytes.is_empty() {
+                    return vec![Effect::TermInput(bytes)];
+                }
+            }
             Action::ClearSearch => {
                 self.state.search.clear();
                 self.refresh();
@@ -1697,10 +1774,49 @@ impl App {
     fn typing(&mut self) -> &mut String {
         match self.screen() {
             Screen::Search => &mut self.state.search,
-            Screen::Terminal => &mut self.state.command,
             Screen::Decrypt => &mut self.state.code,
-            s => panic!("{s:?} has no keyboard"),
+            s => panic!("{s:?} has no text field"),
         }
+    }
+
+    /// A key of the keyboard on the terminal page. The layer keys change
+    /// the keyboard; every other key goes to the shell, and once the shell
+    /// has ended, Enter starts another.
+    fn term_typed(&mut self, cap: Cap) -> Vec<Effect> {
+        match cap {
+            Cap::Shift => self.state.layer = if self.state.layer == Layer::Shifted { Layer::Letters } else { Layer::Shifted },
+            Cap::Show(layer) => self.state.layer = layer,
+            _ => {}
+        }
+        let shifted = self.state.layer == Layer::Shifted;
+        if shifted && matches!(cap, Cap::Char(_)) {
+            self.state.layer = Layer::Letters;
+        }
+        self.refresh();
+        let Some(term) = self.term.as_mut() else { return Vec::new() };
+        if !term.running {
+            return if cap == Cap::Enter { vec![Effect::StartShell] } else { Vec::new() };
+        }
+        let bytes = term.typed(cap, shifted);
+        if bytes.is_empty() {
+            Vec::new()
+        } else {
+            vec![Effect::TermInput(bytes)]
+        }
+    }
+
+    /// Scroll the terminal's screen as a finger goes from `last` to `y`: a
+    /// row for each row's height, and down shows what is older.
+    fn scroll_history(&mut self, last: f32, y: f32, carry: f32, pitch: f32) -> Drag {
+        let carry = carry + (y - last);
+        let rows = (carry / pitch).trunc();
+        if rows != 0.0 {
+            if let Some(term) = self.term.as_mut() {
+                term.scroll(rows as isize);
+                self.refresh();
+            }
+        }
+        Drag::History { last: y, carry: carry - rows * pitch, pitch }
     }
 
     /// A key of the on-screen keyboard. A capital lasts one letter; return
@@ -1736,7 +1852,7 @@ impl App {
                     self.refresh();
                     return vec![Effect::Unlock(code)];
                 }
-                _ => self.say("终端还没接入，命令没有执行", now),
+                other => unreachable!("{other:?} shows no keyboard"),
             },
         }
         self.refresh();
@@ -1835,13 +1951,18 @@ impl App {
                             Drag::Edge { start: x0, from_left, armed: false, x, cy: y0 - m.dp(CUE_LIFT_DP) }
                         }
                         _ if dy.abs() > slop => {
-                            // A page still gliding or springing back is caught
-                            // where it has got to; one at rest follows the
-                            // finger from where it came down.
-                            if !self.catch(now) {
-                                self.drag_by(y0 - y);
+                            let history = self.frame.as_ref().and_then(|fr| fr.scrollback).filter(|(r, _)| r.contains(x0, y0 + scroll));
+                            if let Some((_, pitch)) = history {
+                                self.scroll_history(y0, y, 0.0, pitch)
+                            } else {
+                                // A page still gliding or springing back is
+                                // caught where it has got to; one at rest
+                                // follows the finger from where it came down.
+                                if !self.catch(now) {
+                                    self.drag_by(y0 - y);
+                                }
+                                Drag::Scroll { last: y }
                             }
-                            Drag::Scroll { last: y }
                         }
                         _ => Drag::Press { x: x0, y: y0, action, edge: at_edge },
                     };
@@ -1876,6 +1997,7 @@ impl App {
                     self.trace(&t, x, y + scroll);
                     self.drag = Drag::Pattern;
                 }
+                Drag::History { last, carry, pitch } => self.drag = self.scroll_history(last, y, carry, pitch),
                 Drag::Waking => self.drag = Drag::Waking,
                 Drag::Idle => {}
             },
@@ -3157,15 +3279,41 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_takes_a_command_it_cannot_run_yet() {
+    fn the_terminal_sends_every_key_to_its_shell() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        tap(&mut app, &f, &i, Action::Open(Screen::Terminal));
-        type_text(&mut app, &f, &i, "ls");
-        assert_eq!(app.state.command, "ls");
-        tap(&mut app, &f, &i, Action::Type(Cap::Enter));
-        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says commands do not run yet");
-        assert_eq!(app.state.command, "ls", "what was typed stays");
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Terminal)), vec![Effect::StartShell], "the page asks for a shell the first time");
+        let (rows, cols) = app.term_size(&f);
+        assert!(rows >= 20 && cols >= 40, "a screen of {rows} rows by {cols}");
+        app.term_started(rows, cols);
+        assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Char('l'))), vec![Effect::TermInput(b"l".to_vec())]);
+        assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![Effect::TermInput(b"\r".to_vec())]);
+        assert!(tap(&mut app, &f, &i, Action::TermKey(TermKey::Ctrl)).is_empty());
+        assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Char('c'))), vec![Effect::TermInput(vec![0x03])]);
+        assert_eq!(tap(&mut app, &f, &i, Action::TermKey(TermKey::Up)), vec![Effect::TermInput(b"\x1b[A".to_vec())]);
+        app.term_output(b"ishtar:/ # ");
+        tap_back(&mut app, &f, &i, 0);
+        assert!(tap(&mut app, &f, &i, Action::Open(Screen::Terminal)).is_empty(), "the same shell goes on");
+        app.term_ended("退出码 0");
+        assert!(tap(&mut app, &f, &i, Action::Type(Cap::Char('l'))).is_empty(), "nothing runs to take the keys");
+        assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![Effect::StartShell]);
+    }
+
+    #[test]
+    fn a_drag_on_the_terminal_scrolls_back_through_what_the_shell_wrote() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Terminal, W, H, PPD);
+        let (rows, cols) = app.term_size(&f);
+        app.term_started(rows, cols);
+        let many: String = (0..100).map(|n| format!("line {n}\r\n")).collect();
+        app.term_output(many.as_bytes());
+        let (card, pitch) = app.frame(&f, &i, DataState::Unmounted).scrollback.expect("the terminal's screen scrolls back");
+        let (x, y) = (card.x + card.w / 2.0, card.y + card.h / 3.0);
+        app.touch(Touch::Down(x, y), &f, 0);
+        app.touch(Touch::Move(x, y + pitch * 5.5), &f, 10);
+        app.touch(Touch::Up, &f, 20);
+        assert_eq!(app.term.as_ref().expect("the shell started").screen().scrollback(), 5, "down shows five older rows");
+        assert_eq!(app.top().1, 0.0, "the page itself stays put");
     }
 
     fn entry(name: &str, kind: FileKind) -> FileRow {

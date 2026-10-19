@@ -17,6 +17,17 @@ mod matcher;
 
 const CLOCK: &str = "23:46";
 
+/// What a shell in the recovery writes for a few commands, colours and all.
+const SHELL_SAMPLE: &[u8] = b"ishtar:/ # getprop ro.product.device\r\nishtar\r\n\
+ishtar:/ # ls --color=always /\r\n\
+\x1b[1;34macct\x1b[0m  \x1b[1;34mapex\x1b[0m  \x1b[1;36mbin\x1b[0m  \x1b[1;34mconfig\x1b[0m  \x1b[1;34mdata\x1b[0m  \x1b[1;34mdev\x1b[0m\r\n\
+\x1b[1;36metc\x1b[0m  \x1b[1;32minit\x1b[0m  \x1b[1;34mmetadata\x1b[0m  \x1b[1;34mmnt\x1b[0m  \x1b[1;34modm\x1b[0m\r\n\
+\x1b[1;34mproc\x1b[0m  \x1b[1;34msys\x1b[0m  \x1b[1;34msystem\x1b[0m  \x1b[1;34mtmp\x1b[0m  \x1b[1;34mvendor\x1b[0m\r\n\
+ishtar:/ # df -h /metadata\r\n\
+Filesystem      Size Used Avail Use% Mounted on\r\n\
+/dev/block/sda9  59M 7.0M   52M  12% /metadata\r\n\
+ishtar:/ # ";
+
 /// File name, page, dark theme, readings, userdata state, pattern drawn.
 type Shot<'a> = (&'a str, Screen, bool, &'a DeviceInfo, DataState, &'a [usize]);
 
@@ -188,7 +199,7 @@ fn main() -> Result<()> {
         BackupEntry { made: 1_791_830_000, size: 141_000_000, place: 1, parts: [true, false, false, false] },
     ];
     let reset_asked = || Asked { reason: Some("factroy_reset(1217)".into()), ..Asked::default() };
-    let pages: [PageShot; 30] = [
+    let pages: [PageShot; 31] = [
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
@@ -209,10 +220,22 @@ fn main() -> Result<()> {
         ("63-files-unreadable-dark", Screen::Files, true, &|app| {
             app.set_files("/sys/kernel/debug".into(), Err("read /sys/kernel/debug: Permission denied (os error 13)".into()), LISTED)
         }),
-        ("53-terminal-light", Screen::Terminal, false, &|app| app.state.command = "ls -l /vendor".into()),
+        ("53-terminal-light", Screen::Terminal, false, &|app| {
+            let (rows, cols) = app.term_size(&fonts);
+            app.term_started(rows, cols);
+            app.term_output(SHELL_SAMPLE);
+        }),
         ("54-terminal-dark-symbols", Screen::Terminal, true, &|app| {
-            app.state.command = "cat /proc/mounts | grep erofs".into();
+            let (rows, cols) = app.term_size(&fonts);
+            app.term_started(rows, cols);
+            app.term_output(SHELL_SAMPLE);
             app.state.layer = Layer::Symbols;
+        }),
+        ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
+            let (rows, cols) = app.term_size(&fonts);
+            app.term_started(rows, cols);
+            app.term_output(b"ishtar:/ # exit\r\n");
+            app.term_ended("退出码 0");
         }),
         ("55-language-light", Screen::Language, false, &|_| {}),
         ("56-time-zone-light", Screen::TimeZone, false, &|_| {}),
@@ -495,7 +518,7 @@ fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo, data: DataState) -> C
     c.clear(frame.bg);
     c.put(&frame.canvas, 0);
     if let Some(rows) = &frame.rows {
-        let cx = Ctx { t: &t, f, info, data, state: &state };
+        let cx = Ctx { t: &t, f, info, data, state: &state, term: None };
         for k in 0..rows.count() {
             let mut row = Canvas::new(c.w, (rows.edges[k + 1] - rows.edges[k]) as u32);
             pages::row(screen, &cx, k, &mut row);
