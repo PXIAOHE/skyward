@@ -208,7 +208,7 @@ fn main() -> Result<()> {
     };
     let ota = "/sdcard/Download/OTA_ishtar_OS3.0.305.0.WMACNXM_20260412_full_package_signed_for_recovery_install.zip";
     let copying = || FileTask::Copy { path: ota.into(), into: "/sdcard/Skyward".into() };
-    let pages: [PageShot; 53] = [
+    let pages: [PageShot; 54] = [
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
@@ -328,13 +328,15 @@ fn main() -> Result<()> {
         ("90-decrypt-dark-failed", Screen::Decrypt, true, &|app| {
             app.data_failed("android.hardware.security.keymint.IKeyMintDevice/default is not running".into())
         }),
-        ("91-wipe-light-all", Screen::Wipe, false, &|app| app.state.wipe = [true, false, false, false]),
+        ("91-wipe-light-all", Screen::Wipe, false, &|app| app.state.wipe[0] = true),
         ("92-wipe-dark-parts-cache", Screen::Wipe, true, &|app| {
             app.state.cache_partition = true;
-            app.state.wipe = [false, true, true, true];
+            app.state.phone_logs = 7;
+            app.state.wipe = [false, false, true, true, true, false, true, false, true];
         }),
         ("93-erase-light-media", Screen::Erase, false, &|app| {
-            app.erase_started(false, false, vec![Part::Media, Part::Art]);
+            app.erase_started(false, false, vec![Part::Media, Part::AppCaches, Part::SystemCaches, Part::Logs]);
+            app.erase_at(Part::AppCaches);
             app.erase_progress(41_380, 128_906);
         }),
         ("94-erase-light-reset-done", Screen::Erase, false, &|app| {
@@ -349,6 +351,10 @@ fn main() -> Result<()> {
         ("98-erase-light-closed", Screen::Erase, false, &|app| {
             app.erase_started(false, false, vec![Part::Art]);
             app.erase_ended(Err(EraseStop::Closed("android.hardware.security.keymint.IKeyMintDevice/default is not running".into())), 0);
+        }),
+        ("99-erase-dark-locked", Screen::Erase, true, &|app| {
+            app.erase_started(false, false, vec![Part::AppData, Part::AppCaches]);
+            app.erase_ended(Err(EraseStop::Locked(vec![0, 999])), 0);
         }),
     ];
     for (name, screen, dark, set) in pages {

@@ -203,8 +203,13 @@ pub fn part(p: Part) -> &'static str {
         Part::Data => "data 分区",
         Part::Cache => "cache 分区",
         Part::Metadata => "metadata 分区",
+        Part::AppData => "应用数据",
         Part::Media => "内部存储",
+        Part::AppCaches => "应用缓存",
+        Part::SystemCaches => "系统缓存",
         Part::Art => "ART 缓存",
+        Part::Logs => "日志",
+        Part::Updates => "下载的更新包",
     }
 }
 
@@ -215,6 +220,12 @@ fn spaced(before: &str, inner: &str, after: &str) -> String {
     let open = if inner.starts_with(|c: char| c.is_ascii()) && !before.ends_with(|c: char| c.is_ascii()) { " " } else { "" };
     let close = if inner.ends_with(|c: char| c.is_ascii()) && !after.starts_with(|c: char| c.is_ascii()) { " " } else { "" };
     format!("{before}{open}{inner}{close}{after}")
+}
+
+/// Users by how the pages call them: the owner, then the others by number,
+/// as「机主、用户 999」.
+pub fn users(users: &[u32]) -> String {
+    users.iter().map(|&u| if u == 0 { "机主".to_string() } else { format!("用户 {u}") }).collect::<Vec<_>>().join("、")
 }
 
 /// Why erasing did not start or stopped short, and what the system said of
@@ -231,6 +242,9 @@ pub fn erase_stop(s: &EraseStop) -> (String, Option<String>) {
         EraseStop::NoCache => ("本机没有 cache 分区。".into(), None),
         EraseStop::Erased => ("data 分区已清空，下次开机时将重新建立，暂无可清除的内容。".into(), None),
         EraseStop::Closed(why) => ("无法打开 data 分区，未清除任何内容。".into(), Some(why.clone())),
+        EraseStop::Locked(locked) => {
+            (spaced("", &users(locked), "的数据尚未解密，未清除任何内容。请先在「解密」中输入锁屏密码后重试。"), None)
+        }
         EraseStop::Failed(p, why) => (spaced("清除", part(*p), "失败。"), Some(why.clone())),
     }
 }
@@ -654,7 +668,12 @@ mod tests {
 
     #[test]
     fn erasing_that_stops_says_what_was_left_and_why() {
+        assert_eq!(users(&[0]), "机主");
+        assert_eq!(users(&[0, 999]), "机主、用户 999");
+        assert!(erase_stop(&EraseStop::Locked(vec![0, 999])).0.starts_with("机主、用户 999 的数据尚未解密，"));
+        assert!(erase_stop(&EraseStop::Locked(vec![0])).0.starts_with("机主的数据尚未解密，"));
         assert_eq!(erase_stop(&EraseStop::Failed(Part::Art, "x".into())).0, "清除 ART 缓存失败。", "a Latin name stands apart");
         assert_eq!(erase_stop(&EraseStop::Failed(Part::Data, "x".into())).0, "清除 data 分区失败。");
+        assert_eq!(erase_stop(&EraseStop::Failed(Part::Logs, "x".into())), ("清除日志失败。".into(), Some("x".into())));
     }
 }

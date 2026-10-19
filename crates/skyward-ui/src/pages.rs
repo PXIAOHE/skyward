@@ -820,7 +820,10 @@ fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Optio
 
 /// What the wipe page lists of [`WIPES`] beyond everything, under the
 /// partition each is in.
-const WIPE_GROUPS: [(&str, &[Wipe]); 2] = [("data 分区", &[Wipe::Media, Wipe::Art]), ("cache 分区", &[Wipe::Cache])];
+const WIPE_GROUPS: [(&str, &[Wipe]); 2] = [
+    ("data 分区", &[Wipe::AppData, Wipe::Media, Wipe::AppCaches, Wipe::SystemCaches, Wipe::Art, Wipe::Logs, Wipe::Updates]),
+    ("cache 分区", &[Wipe::Cache]),
+];
 
 /// A choice of the wipe page as it lists it: its title, and exactly what it
 /// erases.
@@ -830,11 +833,25 @@ fn wipe_row(w: Wipe, s: &State) -> (&'static str, String) {
             let also = if s.cache_partition { "metadata 和 cache 分区" } else { "metadata 分区" };
             ("全部数据", format!("清空 data 分区，并格式化 {also}，包括应用、账户、设置和内部存储"))
         }
+        Wipe::AppData => (
+            "应用数据",
+            "/data/data、/data/user、/data/user_de，以及内部存储中的 Android/data、Android/media，应用将恢复到初始状态".into(),
+        ),
         Wipe::Media => ("内部存储", "/data/media，即 /sdcard 中的照片、视频和文件".into()),
+        Wipe::AppCaches => ("应用缓存", "各应用数据中的 cache、code_cache，以及 Android/data 中的 cache，应用将按需重新生成".into()),
+        Wipe::SystemCaches => ("系统缓存", "/data/system/package_cache、/data/resource-cache、/data/cache，下次开机时重新生成".into()),
         Wipe::Art => (
             "ART 缓存",
-            "/data/dalvik-cache、/data/misc/apexdata/com.android.art/dalvik-cache，下次开机时重新编译，启动时间较长".into(),
+            "/data/dalvik-cache、/data/misc/apexdata/com.android.art/dalvik-cache、/data/ota，下次开机时重新编译，启动时间较长".into(),
         ),
+        Wipe::Logs => {
+            let own = match s.phone_logs {
+                0 => String::new(),
+                n => format!("，以及本机的 {n} 个日志文件夹"),
+            };
+            ("日志", format!("/data/tombstones、/data/anr、/data/system/dropbox、/data/misc/logd 等系统日志和崩溃记录，各用户的错误报告{own}"))
+        }
+        Wipe::Updates => ("下载的更新包", "/data/ota_package 中的系统更新安装包".into()),
         Wipe::Cache => ("全部内容", "格式化 cache 分区，保留 recovery 文件夹中的日志".into()),
     }
 }
@@ -866,7 +883,7 @@ pub fn wipe(cx: &Ctx) -> Frame {
         out.extend(hits(&list.rows, &shown.iter().map(|&w| Action::WipeItem(w)).collect::<Vec<_>>()));
         y = list.bottom;
     }
-    let y = widgets::footnote(&mut c, t, f, y, "清除后无法恢复。");
+    let y = widgets::footnote(&mut c, t, f, y, "清除应用数据和应用缓存前，需先完成「解密」。清除后无法恢复。");
     let (label, danger) = confirm_label(Confirm::Wipe);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Wipe) });

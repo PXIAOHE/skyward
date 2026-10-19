@@ -207,8 +207,29 @@ fn part(step: Step) -> Part {
         Step::Data => Part::Data,
         Step::Cache => Part::Cache,
         Step::Metadata => Part::Metadata,
+        Step::AppData => Part::AppData,
         Step::Media => Part::Media,
+        Step::AppCaches => Part::AppCaches,
+        Step::SystemCaches => Part::SystemCaches,
         Step::Art => Part::Art,
+        Step::Logs => Part::Logs,
+        Step::Updates => Part::Updates,
+    }
+}
+
+/// The part of the phone a choice of the wipe page other than everything
+/// erases.
+fn step(choice: Wipe) -> Step {
+    match choice {
+        Wipe::AppData => Step::AppData,
+        Wipe::Media => Step::Media,
+        Wipe::AppCaches => Step::AppCaches,
+        Wipe::SystemCaches => Step::SystemCaches,
+        Wipe::Art => Step::Art,
+        Wipe::Cache => Step::Cache,
+        Wipe::Logs => Step::Logs,
+        Wipe::Updates => Step::Updates,
+        Wipe::All => unreachable!("everything is a factory reset, not a part of one"),
     }
 }
 
@@ -219,6 +240,7 @@ fn erase_stop(stop: wipe::Stop) -> EraseStop {
         wipe::Stop::Refused(wipe::Refusal::NotRebuilt) => EraseStop::NotRebuilt,
         wipe::Stop::Refused(wipe::Refusal::NoCache) => EraseStop::NoCache,
         wipe::Stop::Closed(why) => EraseStop::Closed(why),
+        wipe::Stop::Locked(users) => EraseStop::Locked(users),
         wipe::Stop::Failed(step, e) => EraseStop::Failed(part(step), format!("{e:#}")),
     }
 }
@@ -239,11 +261,11 @@ fn factory_reset(app: &mut App, keep_memtag_mode: bool, asked: bool) -> Result<E
     }
 }
 
-/// Start erasing parts on their own, its page following it: the shared
-/// storage and ART's cache in the data partition, and the cache partition.
-/// `asked` when the system asked for it.
-fn parts_wipe(app: &mut App, media: bool, art: bool, cache: bool, asked: bool) -> Result<Eraser> {
-    match wipe::parts(media, art, cache) {
+/// Start erasing parts on their own, its page following it: parts of the
+/// data partition, and the cache partition; `logs` are the phone's own log
+/// folders. `asked` when the system asked for it.
+fn parts_wipe(app: &mut App, steps: Vec<Step>, logs: &[String], asked: bool) -> Result<Eraser> {
+    match wipe::parts(steps, logs) {
         Ok(parts) => {
             app.erase_started(false, asked, parts.steps().into_iter().map(part).collect());
             Eraser::start(move |tell| parts.carry_out(tell))
@@ -503,6 +525,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             false
         }
     };
+    app.state.phone_logs = cfg.wipe.logs.len();
     let mut eraser: Option<Eraser> = None;
     // Erasing the system asked for leaves on its own once it is done, as
     // does erasing an update asked for, sideloaded with a restart after it;
@@ -514,7 +537,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             erase_leaves = true;
         }
         Work::WipeCache => {
-            eraser = Some(parts_wipe(&mut app, false, false, true, true)?);
+            eraser = Some(parts_wipe(&mut app, vec![Step::Cache], &cfg.wipe.logs, true)?);
             erase_leaves = true;
         }
         Work::Sideload { .. } => {
@@ -807,15 +830,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             app.report("正在打开 data 分区，请稍后再试", now);
                             continue;
                         }
-                        let has = |w: Wipe| chosen.contains(&w);
                         erase_leaves = false;
-                        if has(Wipe::All) {
+                        if chosen.contains(&Wipe::All) {
                             eraser = Some(factory_reset(&mut app, false, false)?);
-                        } else if (has(Wipe::Media) || has(Wipe::Art)) && app.state.data == Data::Erased {
+                        } else if chosen.iter().any(|&w| w != Wipe::Cache) && app.state.data == Data::Erased {
                             app.erase_started(false, false, Vec::new());
                             app.erase_ended(Err(EraseStop::Erased), now);
                         } else {
-                            eraser = Some(parts_wipe(&mut app, has(Wipe::Media), has(Wipe::Art), has(Wipe::Cache), false)?);
+                            let steps = chosen.into_iter().map(step).collect();
+                            eraser = Some(parts_wipe(&mut app, steps, &cfg.wipe.logs, false)?);
                         }
                     }
                     Effect::Install => installer.as_ref().context("no installer holds an update")?.install(),

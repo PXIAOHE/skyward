@@ -22,11 +22,59 @@ const DATA: &str = "/data";
 const CACHE: &str = "/cache";
 const METADATA: &str = "/metadata";
 
+/// Where the system keeps each user's apps' own data: the owner's apps
+/// in their own folder, every other user's in one named by number; then
+/// the part that reads before the user signs in.
+const OWNER_APPS: &str = "/data/data";
+const USER_APPS: &str = "/data/user";
+const USER_APPS_EARLY: &str = "/data/user_de";
+
+/// In each app's own data, the folders it keeps caches in: of what it
+/// fetched or worked out, and of code it compiled itself.
+const APP_CACHES: [&str; 2] = ["cache", "code_cache"];
+
+/// Where the system notes the inode of each, on the folder of the app's
+/// own data, so the folders are found while the user's names are locked.
+/// Clearing an app's data takes the folders with it, and the notes too.
+const CACHE_INODES: [&str; 2] = ["user.inode_cache", "user.inode_code_cache"];
+
+/// In each user's shared storage, the folders apps keep their own files
+/// in, one for each app; the first also holds each app's cache folder.
+const SHARED_APP_FOLDERS: [&str; 2] = ["Android/data", "Android/media"];
+
+/// The caches the system keeps for itself: the apps it has parsed, the
+/// resources of the overlays it applies, and /cache, which on phones with
+/// no cache partition is this folder.
+const SYSTEM_CACHES: [&str; 3] = ["/data/system/package_cache", "/data/resource-cache", "/data/cache"];
+
 /// Where ART keeps on the data partition what it compiles ahead of time:
-/// the system's own apps, then what the ART module compiles for the boot
-/// classpath and the system server. The system compiles both again as it
-/// needs them.
-const ART_CACHES: [&str; 2] = ["/data/dalvik-cache", "/data/misc/apexdata/com.android.art/dalvik-cache"];
+/// the system's own apps, what the ART module compiles for the boot
+/// classpath and the system server, and what is compiled for the slot an
+/// update was installed to. The system compiles all of it again as it
+/// needs it.
+const ART_CACHES: [&str; 3] = ["/data/dalvik-cache", "/data/misc/apexdata/com.android.art/dalvik-cache", "/data/ota"];
+
+/// Where every Android phone keeps logs and dumps: crashes, programs that
+/// stopped answering, the system's dropbox of reports, logcat kept across
+/// starts, traces, the recovery's logs copied into the system, the update
+/// engine's logs, and the system server's heap dumps.
+const LOGS: [&str; 8] = [
+    "/data/tombstones",
+    "/data/anr",
+    "/data/system/dropbox",
+    "/data/misc/logd",
+    "/data/misc/perfetto-traces",
+    "/data/misc/recovery",
+    "/data/misc/update_engine_log",
+    "/data/system/heapdump",
+];
+
+/// Where each user's bug reports are: in the data of the shell, which takes
+/// them, under the part read before the user signs in.
+const BUG_REPORTS: &str = "com.android.shell/files/bugreports";
+
+/// Where the system downloads an update before it installs it.
+const UPDATES: &str = "/data/ota_package";
 
 /// The folder on the cache partition the recovery's logs are kept in, and
 /// the most of each one kept while the partition is made afresh, as
@@ -47,10 +95,25 @@ pub enum Step {
     Cache,
     /// /metadata, which holds the key the data partition is opened with.
     Metadata,
+    /// Each app's own data, for every user.
+    AppData,
     /// The files users share between apps.
     Media,
+    /// Each app's caches, for every user.
+    AppCaches,
+    SystemCaches,
     /// What ART compiled ahead of time.
     Art,
+    Logs,
+    /// The updates the system downloaded.
+    Updates,
+}
+
+impl Step {
+    /// Whether the part is found only in folders users' own keys lock.
+    fn needs_users(self) -> bool {
+        matches!(self, Step::AppData | Step::AppCaches)
+    }
 }
 
 /// Why erasing does not start.
@@ -72,6 +135,9 @@ pub enum Stop {
     Refused(Refusal),
     /// The data partition did not open, for the parts in it.
     Closed(String),
+    /// These users' own files are still locked, and the parts chosen are
+    /// partly in them: nothing was erased.
+    Locked(Vec<u32>),
     /// Erasing this part went wrong.
     Failed(Step, anyhow::Error),
 }
@@ -158,56 +224,240 @@ impl Plan {
     }
 }
 
-/// Parts erased on their own: the users' shared storage and ART's cache in
-/// the data partition, and the cache partition.
+/// Parts erased on their own: what the data partition holds, each part as
+/// the wipe page names it, and the cache partition.
 pub struct Parts {
-    media: bool,
-    art: bool,
+    steps: Vec<Step>,
     cache: Option<Entry>,
+    /// The phone's own log folders in the data partition.
+    logs: Vec<PathBuf>,
 }
 
-/// Find the parts to erase on their own; the cache partition only where the
-/// phone has one.
-pub fn parts(media: bool, art: bool, cache_partition: bool) -> Result<Parts, Stop> {
-    let cache = match cache_partition {
+/// Find the parts to erase on their own, in the order given: the cache
+/// partition only where the phone has one. `logs` are the phone's own log
+/// folders in the data partition.
+pub fn parts(steps: Vec<Step>, logs: &[String]) -> Result<Parts, Stop> {
+    assert!(
+        steps.iter().all(|s| !matches!(s, Step::Data | Step::Metadata)),
+        "the data partition and /metadata are erased whole only by a factory reset, not {steps:?}"
+    );
+    let cache = match steps.contains(&Step::Cache) {
         false => None,
         true => Some(cache().map_err(failed(Step::Cache))?.ok_or(Stop::Refused(Refusal::NoCache))?),
     };
-    Ok(Parts { media, art, cache })
+    Ok(Parts { steps, cache, logs: logs.iter().map(PathBuf::from).collect() })
 }
 
 impl Parts {
     /// The parts, in the order they are erased.
     pub fn steps(&self) -> Vec<Step> {
-        [(self.media, Step::Media), (self.art, Step::Art), (self.cache.is_some(), Step::Cache)]
-            .into_iter()
-            .filter_map(|(on, step)| on.then_some(step))
-            .collect()
+        self.steps.clone()
     }
 
     /// Erase each part, telling `tell` of each as it begins and how far it
     /// has come. The data partition opens first where it is not open, as
-    /// far as it opens without any user's credential: what users keep to
-    /// themselves is deleted under the names it shows without their keys.
+    /// far as it opens without any user's credential. What users keep to
+    /// themselves is deleted under the names it shows without their keys;
+    /// the parts found only by name in users' own files wait for every
+    /// user's files to be open, and until they are, nothing is erased.
     pub fn carry_out(self, tell: &mut dyn FnMut(Event)) -> Result<(), Stop> {
-        if (self.media || self.art) && !mount::is_mount_point(Path::new(DATA)).map_err(|e| Stop::Closed(format!("{e:#}")))? {
+        let in_data = self.steps.iter().any(|&s| s != Step::Cache);
+        if in_data && !mount::is_mount_point(Path::new(DATA)).map_err(|e| Stop::Closed(format!("{e:#}")))? {
             let opening = crate::decrypt::with_key_service(data::open_without_credential).map_err(Stop::Closed)?;
             tell(Event::Opened(opening));
         }
-        if self.media {
-            tell(Event::At(Step::Media));
-            shared_storage().and_then(|paths| clear(&paths, tell)).map_err(failed(Step::Media))?;
+        let users = Users::of_the_phone();
+        if self.steps.iter().any(|s| s.needs_users()) {
+            let locked = users.locked().map_err(|e| Stop::Closed(format!("{e:#}")))?;
+            if !locked.is_empty() {
+                return Err(Stop::Locked(locked));
+            }
         }
-        if self.art {
-            tell(Event::At(Step::Art));
-            art_caches().and_then(|paths| clear(&paths, tell)).map_err(failed(Step::Art))?;
-        }
-        if let Some(cache) = &self.cache {
-            tell(Event::At(Step::Cache));
-            remake_cache(cache).map_err(failed(Step::Cache))?;
+        for &step in &self.steps {
+            tell(Event::At(step));
+            let erased = match step {
+                Step::AppData => users.app_data().and_then(|(paths, folders)| {
+                    clear(&paths, tell)?;
+                    forget_cache_inodes(&folders)
+                }),
+                Step::Media => shared_storage(&users.storage).and_then(|paths| clear(&paths, tell)),
+                Step::AppCaches => users.app_caches().and_then(|paths| clear(&paths, tell)),
+                Step::SystemCaches => clear_files(&SYSTEM_CACHES.map(PathBuf::from), tell),
+                Step::Art => clear_files(&ART_CACHES.map(PathBuf::from), tell),
+                Step::Logs => users.logs(&self.logs).and_then(|folders| clear_files(&folders, tell)),
+                Step::Updates => clear_files(&[PathBuf::from(UPDATES)], tell),
+                Step::Cache => remake_cache(self.cache.as_ref().expect("the cache partition was found as the parts were")),
+                Step::Data | Step::Metadata => unreachable!("only a factory reset erases {step:?}"),
+            };
+            erased.map_err(failed(step))?;
         }
         Ok(())
     }
+}
+
+/// Where the data partition keeps each user's apps' data and shared
+/// storage.
+struct Users {
+    /// The owner's apps' own data, where the system has kept it since
+    /// before phones had more users.
+    owner_apps: PathBuf,
+    /// Every user's apps' own data, in folders named by the user's number;
+    /// the owner's is there too where the folder above is not.
+    apps: PathBuf,
+    /// The part of each user's apps' data that reads before they sign in.
+    apps_early: PathBuf,
+    /// Each user's shared storage.
+    storage: PathBuf,
+}
+
+impl Users {
+    fn of_the_phone() -> Users {
+        Users {
+            owner_apps: PathBuf::from(OWNER_APPS),
+            apps: PathBuf::from(USER_APPS),
+            apps_early: PathBuf::from(USER_APPS_EARLY),
+            storage: PathBuf::from(data::SHARED_STORAGE),
+        }
+    }
+
+    /// The users there is apps' data for, in order: each has a folder of
+    /// it that reads before they sign in.
+    fn list(&self) -> Result<Vec<u32>> {
+        let mut users: Vec<u32> = contents(&self.apps_early)?
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse().ok()))
+            .collect();
+        users.sort_unstable();
+        Ok(users)
+    }
+
+    /// Where `user`'s apps keep their own data, locked by the user's own
+    /// key.
+    fn apps(&self, user: u32) -> PathBuf {
+        if user == 0 && fs::symlink_metadata(&self.owner_apps).is_ok_and(|m| m.is_dir()) {
+            return self.owner_apps.clone();
+        }
+        self.apps.join(user.to_string())
+    }
+
+    /// Where `user`'s apps keep the part of their data that reads before
+    /// the user signs in.
+    fn apps_early(&self, user: u32) -> PathBuf {
+        self.apps_early.join(user.to_string())
+    }
+
+    fn storage(&self, user: u32) -> PathBuf {
+        self.storage.join(user.to_string())
+    }
+
+    /// The users whose own files are locked: their apps' data reads only
+    /// as scrambled names until their key is let in.
+    fn locked(&self) -> Result<Vec<u32>> {
+        let mut locked = Vec::new();
+        for user in self.list()? {
+            let own = self.apps(user);
+            if own.exists() && !skyward_crypto::fscrypt::unlocked(&own)? {
+                locked.push(user);
+            }
+        }
+        Ok(locked)
+    }
+
+    /// What clearing every app's data deletes, as the system clears one
+    /// app's: all that the folders of each app's own data hold, for every
+    /// user, both parts of it, and what each app keeps in its folders in
+    /// shared storage. The folders stay as the system made them. The
+    /// folders the system notes the caches of come with it, as the notes
+    /// go too.
+    fn app_data(&self) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+        let (mut paths, mut own) = (Vec::new(), Vec::new());
+        for user in self.list()? {
+            for app in folders(&self.apps(user))? {
+                paths.extend(contents(&app)?);
+                own.push(app);
+            }
+            for app in folders(&self.apps_early(user))? {
+                paths.extend(contents(&app)?);
+            }
+            for shared in SHARED_APP_FOLDERS {
+                for app in folders(&self.storage(user).join(shared))? {
+                    paths.extend(contents(&app)?);
+                }
+            }
+        }
+        Ok((paths, own))
+    }
+
+    /// What clearing every app's caches deletes, as the system clears one
+    /// app's: all its cache folders hold, in both parts of its own data and
+    /// in its folder in shared storage, for every user. The folders stay.
+    fn app_caches(&self) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for user in self.list()? {
+            for app in folders(&self.apps(user))?.into_iter().chain(folders(&self.apps_early(user))?) {
+                for cache in APP_CACHES {
+                    paths.extend(folder_contents(&app.join(cache))?);
+                }
+            }
+            for app in folders(&self.storage(user).join(SHARED_APP_FOLDERS[0]))? {
+                paths.extend(folder_contents(&app.join(APP_CACHES[0]))?);
+            }
+        }
+        Ok(paths)
+    }
+
+    /// The folders the logs and crash records are in: every phone's, each
+    /// user's bug reports, and the phone's own `extra`.
+    fn logs(&self, extra: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        let mut out: Vec<PathBuf> = LOGS.iter().map(PathBuf::from).collect();
+        for user in self.list()? {
+            out.push(self.apps_early(user).join(BUG_REPORTS));
+        }
+        out.extend(extra.iter().cloned());
+        Ok(out)
+    }
+}
+
+/// The folders a folder holds, each by its full path; links and other
+/// entries left out, and nothing for a folder that is not there.
+fn folders(folder: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in contents(folder)? {
+        if fs::symlink_metadata(&entry).with_context(|| format!("look at {}", entry.display()))?.is_dir() {
+            out.push(entry);
+        }
+    }
+    Ok(out)
+}
+
+/// What `path` holds where it is a folder; nothing where it is not there,
+/// or is something an app made in the folder's place.
+fn folder_contents(path: &Path) -> Result<Vec<PathBuf>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => contents(path),
+        Ok(_) => Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e).with_context(|| format!("look at {}", path.display())),
+    }
+}
+
+/// Forget the inodes noted on each of `folders` for the cache folders that
+/// clearing an app's data took away; the app notes the new ones as it makes
+/// them again.
+fn forget_cache_inodes(folders: &[PathBuf]) -> Result<()> {
+    for folder in folders {
+        let path = path_cstr(folder)?;
+        for name in CACHE_INODES {
+            let name = cstr(name);
+            if unsafe { libc::lremovexattr(path.as_ptr(), name.as_ptr()) } != 0 {
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() != Some(libc::ENODATA) {
+                    return Err(e).with_context(|| format!("forget the caches noted on {}", folder.display()));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The cache partition, where the phone has one.
@@ -281,13 +531,13 @@ fn contents(folder: &Path) -> Result<Vec<PathBuf>> {
     }
 }
 
-/// What erasing the shared storage deletes: all that each user's folder in
-/// it holds, and the folder apps share their large files in, the folders
-/// themselves staying as the system made them, with their owners, labels
-/// and encryption.
-fn shared_storage() -> Result<Vec<PathBuf>> {
+/// What erasing the shared storage at `root` deletes: all that each user's
+/// folder in it holds, and the folder apps share their large files in, the
+/// folders themselves staying as the system made them, with their owners,
+/// labels and encryption.
+fn shared_storage(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    for entry in contents(Path::new(data::SHARED_STORAGE))? {
+    for entry in contents(root)? {
         let meta = fs::symlink_metadata(&entry).with_context(|| format!("look at {}", entry.display()))?;
         match meta.is_dir() {
             true => out.extend(contents(&entry)?),
@@ -297,32 +547,37 @@ fn shared_storage() -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// What erasing ART's cache deletes: all its folders hold, the folders
-/// staying.
-fn art_caches() -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    for folder in ART_CACHES {
-        out.extend(contents(Path::new(folder))?);
-    }
-    Ok(out)
-}
-
 /// Delete `paths`, folders with all they hold, telling `tell` how many
 /// entries are gone of how many.
 fn clear(paths: &[PathBuf], tell: &mut dyn FnMut(Event)) -> Result<()> {
-    let mut told = Instant::now() - PROGRESS_EVERY;
+    told(tell, |cancel, progress| skyward_files::delete(paths, cancel, progress))
+}
+
+/// Delete every file under `folders`, leaving each folder in them as the
+/// system made it, telling `tell` how many files are gone of how many.
+fn clear_files(folders: &[PathBuf], tell: &mut dyn FnMut(Event)) -> Result<()> {
+    told(tell, |cancel, progress| skyward_files::delete_files(folders, cancel, progress))
+}
+
+/// Do `work`, telling `tell` how far it has come at most every
+/// [`PROGRESS_EVERY`], and once more as it ends.
+fn told(
+    tell: &mut dyn FnMut(Event),
+    work: impl FnOnce(&AtomicBool, &mut dyn FnMut(skyward_files::Progress)) -> Result<()>,
+) -> Result<()> {
+    let mut since = Instant::now() - PROGRESS_EVERY;
     let mut last = None;
-    let deleted = skyward_files::delete(paths, &AtomicBool::new(false), &mut |p| {
+    let done = work(&AtomicBool::new(false), &mut |p| {
         last = Some((p.entries, p.total_entries));
-        if told.elapsed() >= PROGRESS_EVERY {
-            told = Instant::now();
+        if since.elapsed() >= PROGRESS_EVERY {
+            since = Instant::now();
             tell(Event::Progress(p.entries, p.total_entries));
         }
     });
     if let Some((done, total)) = last {
         tell(Event::Progress(done, total));
     }
-    deleted
+    done
 }
 
 /// A log kept from the cache partition while it is made afresh: its name
@@ -532,6 +787,7 @@ pub fn said(stop: &Stop) -> String {
     match stop {
         Stop::Refused(r) => format!("refused: {r:?}"),
         Stop::Closed(why) => format!("the data partition did not open: {why}"),
+        Stop::Locked(users) => format!("the own files of users {users:?} are locked"),
         Stop::Failed(step, e) => format!("{step:?} failed: {e:#}"),
     }
 }
@@ -604,6 +860,126 @@ mod tests {
         .unwrap();
         assert!(contents(&locked).unwrap().is_empty(), "all of it is gone, the folder staying");
         assert_eq!(told.last(), Some(&(4, 4)), "the folder, the one in it, and two files");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The folders of users' apps' data and shared storage, made the way
+    /// the system makes them, under `root`: the owner and user 10, each
+    /// with an app that keeps files, caches and a folder in shared storage.
+    fn users_at(root: &Path) -> Users {
+        let users = Users {
+            owner_apps: root.join("data"),
+            apps: root.join("user"),
+            apps_early: root.join("user_de"),
+            storage: root.join("media"),
+        };
+        fs::create_dir_all(&users.owner_apps).unwrap();
+        for user in [0, 10] {
+            let app = users.apps(user).join("com.example.notes");
+            let early = users.apps_early(user).join("com.example.notes");
+            for folder in [app.join("cache/thumbnails"), app.join("code_cache"), app.join("databases"), early.join("cache"), early.join("files")] {
+                fs::create_dir_all(folder).unwrap();
+            }
+            fs::write(app.join("databases/notes.db"), b"notes").unwrap();
+            fs::write(app.join("cache/thumbnails/1.png"), b"png").unwrap();
+            fs::write(app.join("code_cache/jit.bin"), b"jit").unwrap();
+            fs::write(early.join("cache/early.tmp"), b"tmp").unwrap();
+            fs::write(early.join("files/alarm"), b"7:00").unwrap();
+            let shared = users.storage(user).join("Android/data/com.example.notes");
+            fs::create_dir_all(shared.join("cache")).unwrap();
+            fs::write(shared.join("cache/download.part"), b"part").unwrap();
+            fs::write(shared.join("export.txt"), b"exported").unwrap();
+            fs::create_dir_all(users.storage(user).join("Android/media/com.example.notes")).unwrap();
+            fs::write(users.storage(user).join("Android/media/com.example.notes/voice.m4a"), b"voice").unwrap();
+            fs::create_dir_all(users.storage(user).join("DCIM")).unwrap();
+            fs::write(users.storage(user).join("DCIM/photo.jpg"), b"photo").unwrap();
+            for (name, inode) in CACHE_INODES.iter().zip([app.join("cache"), app.join("code_cache")]) {
+                let ino = fs::metadata(inode).unwrap().ino().to_ne_bytes();
+                let (path, name) = (path_cstr(&app).unwrap(), cstr(name));
+                assert_eq!(unsafe { libc::lsetxattr(path.as_ptr(), name.as_ptr(), ino.as_ptr().cast(), ino.len(), 0) }, 0);
+            }
+        }
+        users
+    }
+
+    fn quiet(_: Event) {}
+
+    #[test]
+    fn on_the_phone_every_apps_caches_go_and_the_rest_of_its_data_stays() {
+        let root = scratch("caches");
+        let users = users_at(&root);
+        assert_eq!(users.list().unwrap(), [0, 10]);
+        assert_eq!(users.apps(0), root.join("data"), "the owner's apps are where the system has always kept them");
+        clear(&users.app_caches().unwrap(), &mut quiet).unwrap();
+        for user in [0, 10] {
+            let app = users.apps(user).join("com.example.notes");
+            let early = users.apps_early(user).join("com.example.notes");
+            let shared = users.storage(user).join("Android/data/com.example.notes");
+            for emptied in [app.join("cache"), app.join("code_cache"), early.join("cache"), shared.join("cache")] {
+                assert!(contents(&emptied).unwrap().is_empty(), "{} is emptied", emptied.display());
+            }
+            for kept in [app.join("databases/notes.db"), early.join("files/alarm"), shared.join("export.txt")] {
+                assert!(kept.exists(), "{} stays", kept.display());
+            }
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn on_the_phone_every_apps_data_goes_and_the_users_own_files_stay() {
+        let root = scratch("app-data");
+        let users = users_at(&root);
+        let (paths, own) = users.app_data().unwrap();
+        clear(&paths, &mut quiet).unwrap();
+        forget_cache_inodes(&own).unwrap();
+        for user in [0, 10] {
+            let app = users.apps(user).join("com.example.notes");
+            let storage = users.storage(user);
+            for emptied in [
+                app.clone(),
+                users.apps_early(user).join("com.example.notes"),
+                storage.join("Android/data/com.example.notes"),
+                storage.join("Android/media/com.example.notes"),
+            ] {
+                assert!(emptied.is_dir() && contents(&emptied).unwrap().is_empty(), "{} is emptied and stays", emptied.display());
+            }
+            assert!(storage.join("DCIM/photo.jpg").exists(), "the user's own files stay");
+            for name in CACHE_INODES {
+                let (path, name) = (path_cstr(&app).unwrap(), cstr(name));
+                let mut buf = [0u8; 8];
+                let read = unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+                assert_eq!(read, -1, "the note of a cache folder that went goes with it");
+            }
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn on_the_phone_a_user_whose_key_is_out_is_locked() {
+        let root = scratch("lock");
+        let users = users_at(&root);
+        let other = users.apps(10);
+        fs::remove_dir_all(&other).unwrap();
+        fs::create_dir(&other).unwrap();
+        let raw: Vec<u8> = (0..64u8).map(|b| b.wrapping_mul(3) ^ std::process::id() as u8).collect();
+        let key = fscrypt::add_key(&root, &raw, false).unwrap();
+        encrypt(&other, &key);
+        fs::create_dir(other.join("com.example.notes")).unwrap();
+        assert!(users.locked().unwrap().is_empty(), "with the key in, every user reads");
+        remove_key(&root, &key);
+        assert_eq!(users.locked().unwrap(), [10], "the owner's folder is not encrypted here; user 10's key is out");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn on_the_phone_the_logs_take_in_each_users_bug_reports_and_the_phones_own() {
+        let root = scratch("logs");
+        let users = users_at(&root);
+        let extra = [PathBuf::from("/data/vendor/diag")];
+        let folders = users.logs(&extra).unwrap();
+        assert_eq!(&folders[..LOGS.len()], LOGS.map(PathBuf::from));
+        assert!(folders.contains(&users.apps_early(10).join(BUG_REPORTS)));
+        assert_eq!(folders.last(), Some(&extra[0]));
         fs::remove_dir_all(&root).unwrap();
     }
 

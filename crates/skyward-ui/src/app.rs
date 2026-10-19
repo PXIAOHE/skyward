@@ -276,26 +276,42 @@ pub enum Confirm {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wipe {
     All,
+    /// Each app's own data, for every user.
+    AppData,
+    /// The files users share between apps.
     Media,
+    /// Each app's caches, for every user.
+    AppCaches,
+    SystemCaches,
+    /// What ART compiled ahead of time.
     Art,
     /// The cache partition, on phones that have one.
     Cache,
+    Logs,
+    /// The updates the system downloaded.
+    Updates,
 }
 
 /// What the wipe page offers, in the order it lists them.
-pub const WIPES: [Wipe; 4] = [Wipe::All, Wipe::Media, Wipe::Art, Wipe::Cache];
+pub const WIPES: [Wipe; 9] =
+    [Wipe::All, Wipe::AppData, Wipe::Media, Wipe::AppCaches, Wipe::SystemCaches, Wipe::Art, Wipe::Logs, Wipe::Updates, Wipe::Cache];
 
 /// A part of the phone that erasing goes through, in the order it does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
+    /// The data partition, whole.
     Data,
     Cache,
     /// /metadata, which holds the key the data partition is opened with.
     Metadata,
-    /// The files users share between apps, in the data partition.
+    /// The parts of the data partition the wipe page names.
+    AppData,
     Media,
-    /// What ART compiled ahead of time, in the data partition.
+    AppCaches,
+    SystemCaches,
     Art,
+    Logs,
+    Updates,
 }
 
 /// Erasing as its page shows it.
@@ -331,6 +347,9 @@ pub enum EraseStop {
     Erased,
     /// The data partition did not open, so nothing in it was erased: why.
     Closed(String),
+    /// These users' own files are locked, and what was chosen is partly in
+    /// them: nothing was erased.
+    Locked(Vec<u32>),
     /// Erasing this part went wrong: what the system said.
     Failed(Part, String),
 }
@@ -700,9 +719,12 @@ pub struct State {
     pub vibrate: bool,
     pub reboot: usize,
     /// What the wipe page has chosen, by place in [`WIPES`].
-    pub wipe: [bool; 4],
+    pub wipe: [bool; WIPES.len()],
     /// The phone has a cache partition, which the wipe page then offers.
     pub cache_partition: bool,
+    /// How many folders of its own the phone keeps logs in on the data
+    /// partition, which erasing the logs takes in.
+    pub phone_logs: usize,
     pub pattern: Vec<usize>,
     /// How far the swipe-to-confirm knob is dragged, 0 to 1.
     pub confirm: f32,
@@ -772,8 +794,9 @@ impl Default for State {
             screen_off: 3,
             vibrate: true,
             reboot: 0,
-            wipe: [false; 4],
+            wipe: [false; WIPES.len()],
             cache_partition: false,
+            phone_logs: 0,
             pattern: Vec::new(),
             confirm: 0.0,
             install: Install::Idle,
@@ -2064,7 +2087,10 @@ impl App {
                 let k = WIPES.iter().position(|&w| w == item).expect("the page offers only what it lists");
                 let on = !self.state.wipe[k];
                 match (on, item) {
-                    (true, Wipe::All) => self.state.wipe = [true, false, false, false],
+                    (true, Wipe::All) => {
+                        self.state.wipe = [false; WIPES.len()];
+                        self.state.wipe[k] = true;
+                    }
                     (true, _) => {
                         self.state.wipe[0] = false;
                         self.state.wipe[k] = true;
@@ -3568,17 +3594,21 @@ mod tests {
     fn the_wipe_page_erases_everything_or_the_parts_chosen() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Wipe, &f, &i);
+        let chosen = |app: &App| WIPES.iter().zip(app.state.wipe).filter(|(_, on)| *on).map(|(&w, _)| w).collect::<Vec<_>>();
         assert!(swipe(&mut app, &f, &i, Confirm::Wipe).is_empty(), "nothing is chosen at first");
-        tap(&mut app, &f, &i, Action::WipeItem(Wipe::Media));
-        tap(&mut app, &f, &i, Action::WipeItem(Wipe::Art));
-        assert_eq!(app.state.wipe, [false, true, true, false]);
+        for part in [Wipe::Updates, Wipe::Logs, Wipe::Art, Wipe::SystemCaches, Wipe::AppCaches, Wipe::Media, Wipe::AppData] {
+            tap(&mut app, &f, &i, Action::WipeItem(part));
+        }
+        let parts = vec![Wipe::AppData, Wipe::Media, Wipe::AppCaches, Wipe::SystemCaches, Wipe::Art, Wipe::Logs, Wipe::Updates];
+        assert_eq!(chosen(&app), parts, "every part the page lists can be chosen with the others");
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Wipe), vec![Effect::Wipe(parts)], "in the order listed");
         tap(&mut app, &f, &i, Action::WipeItem(Wipe::All));
-        assert_eq!(app.state.wipe, [true, false, false, false], "everything takes the parts in");
+        assert_eq!(chosen(&app), [Wipe::All], "everything takes the parts in");
         tap(&mut app, &f, &i, Action::WipeItem(Wipe::Art));
-        assert_eq!(app.state.wipe, [false, false, true, false], "a part on its own leaves everything out");
+        assert_eq!(chosen(&app), [Wipe::Art], "a part on its own leaves everything out");
         assert_eq!(swipe(&mut app, &f, &i, Confirm::Wipe), vec![Effect::Wipe(vec![Wipe::Art])]);
         tap(&mut app, &f, &i, Action::WipeItem(Wipe::Art));
-        assert_eq!(app.state.wipe, [false; 4], "tapped again, a part is left out");
+        assert!(chosen(&app).is_empty(), "tapped again, a part is left out");
         tap(&mut app, &f, &i, Action::WipeItem(Wipe::All));
         assert_eq!(swipe(&mut app, &f, &i, Confirm::Wipe), vec![Effect::Wipe(vec![Wipe::All])]);
     }
@@ -3615,6 +3645,21 @@ mod tests {
         assert_eq!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), later), vec![Effect::Reboot(Target::System)]);
         assert_eq!(tap_at(&mut app, &f, &i, Action::Dismiss, later), vec![Effect::Dismiss]);
         assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn parts_waiting_on_a_locked_user_erase_nothing_and_send_the_user_home_to_decrypt() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
+        app.erase_started(false, false, vec![Part::AppCaches, Part::Logs]);
+        app.erase_ended(Err(EraseStop::Locked(vec![0])), 0);
+        assert_eq!(app.state.erase.done, 0, "nothing was erased");
+        assert_eq!(app.state.data, Data::Locked { user: 0, keys: Keys::Digits, checking: false }, "the partition stays as it was");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Dismiss, 1000), vec![Effect::Dismiss]);
+        assert_eq!(app.screen(), Screen::Home);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Open(Screen::Decrypt), 1000), Vec::new(), "the screen lock is asked for at once");
+        assert_eq!(app.screen(), Screen::Decrypt);
     }
 
     #[test]
