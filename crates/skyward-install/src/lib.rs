@@ -26,6 +26,10 @@ pub enum Event {
     /// The computer started sending a package of this many bytes, which is
     /// being looked at.
     Checking { size: u64 },
+    /// An update package that passed the checks needs all user data erased
+    /// before the system it brings starts; the version it brings. It waits
+    /// for [`Command::Install`] before anything is written.
+    Wipes { version: Option<String> },
     /// An update package passed the checks and is being installed; the
     /// version it brings.
     Installing { version: Option<String> },
@@ -56,8 +60,9 @@ pub enum Stage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The update is in `slot`, which starts next.
-    Installed { slot: Slot },
+    /// The update is in `slot`, which starts next; `wipe` when all user data
+    /// is to be erased before it does.
+    Installed { slot: Slot, wipe: bool },
     /// The image is in the partition of these slots.
     Flashed { partition: &'static str, slots: Vec<Slot> },
     /// Stopped before anything was written.
@@ -86,10 +91,8 @@ pub enum Refusal {
     /// Older than the installed system: both build times.
     Older { package: i64, installed: i64 },
     /// Its security patch is older than the installed one, which leaves
-    /// the data partition unreadable.
+    /// the data partition unreadable unless it is erased.
     OlderPatch { package: String, installed: String },
-    /// It asks for the data partition to be wiped afterwards.
-    Wipe,
     /// An image for partitions this phone does not have.
     NoPartition,
     /// Too little charge to install safely: the level, and whether a
@@ -121,6 +124,9 @@ pub enum Command {
     /// Write the image held in [`Event::Image`] to `partition` in these
     /// slots.
     Flash { partition: &'static str, slots: Vec<Slot> },
+    /// Install the update held in [`Event::Wipes`], all user data to be
+    /// erased after it.
+    Install,
     /// Leave sideload without installing anything.
     Cancel,
 }

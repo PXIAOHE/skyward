@@ -267,6 +267,8 @@ pub enum Confirm {
     FactoryReset,
     /// Delete the entry the file page shows.
     DeleteEntry,
+    /// Install an update that erases all user data after it.
+    InstallWipe,
 }
 
 /// What the wipe page erases: everything a factory reset erases, or any of
@@ -378,6 +380,9 @@ pub enum Install {
     Checking { size: u64 },
     /// An image waits to be told where it goes.
     Choosing(Choice),
+    /// An update that erases all user data after it waits for the user to
+    /// agree; the version it brings.
+    Confirming { version: Option<String> },
     /// `overwriting` says whether the update writes over the running
     /// system.
     Updating { version: Option<String>, stage: Option<Stage>, overwriting: bool },
@@ -860,6 +865,8 @@ pub enum Effect {
     /// reset does, telling how it goes with [`App::erase_at`],
     /// [`App::erase_progress`] and [`App::erase_ended`].
     Wipe(Vec<Wipe>),
+    /// Install the update held for the user to agree to erasing after it.
+    Install,
     /// Forget what the system asked of the recovery, so that the next start
     /// goes where its reboot reason says.
     Dismiss,
@@ -1911,7 +1918,7 @@ impl App {
                     self.say("正在安装，安装完成后才能返回", now);
                     return fx;
                 }
-                Install::Starting | Install::Waiting | Install::Choosing(_) => {
+                Install::Starting | Install::Waiting | Install::Choosing(_) | Install::Confirming { .. } => {
                     self.state.install = Install::Ending;
                     fx.push(Effect::Cancel);
                 }
@@ -1927,8 +1934,8 @@ impl App {
     }
 
     /// Hear from the installer. Once the sideload page is left, only its
-    /// end matters. An image waiting for its partition, and the end, light
-    /// a dark panel: both want the user.
+    /// end matters. An image waiting for its partition, an update waiting
+    /// to be agreed to, and the end light a dark panel: all want the user.
     pub fn install(&mut self, ev: Event, now: u64) {
         if self.state.install == Install::Ending {
             if matches!(ev, Event::Finished(_)) {
@@ -1936,13 +1943,14 @@ impl App {
             }
             return;
         }
-        if matches!(ev, Event::Image { .. } | Event::Finished(_)) {
+        if matches!(ev, Event::Image { .. } | Event::Wipes { .. } | Event::Finished(_)) {
             self.wake(now);
         }
         let install = &mut self.state.install;
         match ev {
             Event::Waiting => *install = Install::Waiting,
             Event::Checking { size } => *install = Install::Checking { size },
+            Event::Wipes { version } => *install = Install::Confirming { version },
             Event::Installing { version } => *install = Install::Updating { version, stage: None, overwriting: false },
             Event::Overwriting => {
                 if let Install::Updating { overwriting, .. } = install {
@@ -2530,6 +2538,13 @@ impl App {
                                 match chosen.is_empty() {
                                     true => self.say("请选择要清除的内容", now),
                                     false => fx.push(Effect::Wipe(chosen)),
+                                }
+                            }
+                            Confirm::InstallWipe => {
+                                if let Install::Confirming { version } = &self.state.install {
+                                    self.state.install = Install::Updating { version: version.clone(), stage: None, overwriting: false };
+                                    fx.push(Effect::Install);
+                                    self.refresh();
                                 }
                             }
                             Confirm::Backup => self.say("备份还没实现", now),
@@ -3616,6 +3631,30 @@ mod tests {
     }
 
     #[test]
+    fn an_update_that_erases_all_user_data_waits_to_be_agreed_to() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Checking { size: 7_103_043_868 }, 0);
+        app.install(Event::Wipes { version: Some("OS3.0.306.0.WMACNXM".into()) }, 0);
+        assert_eq!(app.state.install, Install::Confirming { version: Some("OS3.0.306.0.WMACNXM".into()) });
+        // The question lit the panel, so the user swipes past the wake guard.
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::InstallWipe)).unwrap().rect;
+        let y = track.centre().1 - app.top().1;
+        app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 1000);
+        app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
+        assert_eq!(app.touch(Touch::Up, &f, 1000), vec![Effect::Install]);
+        assert_eq!(app.state.install, Install::Updating { version: Some("OS3.0.306.0.WMACNXM".into()), stage: None, overwriting: false });
+        app.key(Key::Back, 1000);
+        assert_eq!(app.screen(), Screen::Sideload, "an update being written keeps the page");
+
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Wipes { version: None }, 0);
+        assert_eq!(app.key(Key::Back, 1000), vec![Effect::Cancel], "turning it down cancels before anything is written");
+        assert_eq!(app.state.install, Install::Ending);
+        assert_eq!(app.screen(), Screen::Install);
+    }
+
+    #[test]
     fn work_the_recovery_does_not_do_is_shown_with_where_to_go() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Unhandled, W, H, PPD);
@@ -4351,7 +4390,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
         app.key(Key::Power, 0);
-        app.install(Event::Finished(Outcome::Installed { slot: Slot::A }), 100);
+        app.install(Event::Finished(Outcome::Installed { slot: Slot::A, wipe: false }), 100);
         assert!(app.display_on(), "the finished install lit the panel");
         // A finger reaching for the phone lands on 重启到系统; within the
         // guard it only keeps the panel awake.

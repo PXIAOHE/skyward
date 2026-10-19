@@ -438,7 +438,6 @@ pub fn refusal(r: &Refusal, codename: &str) -> String {
         Refusal::OlderPatch { package, installed } => {
             format!("这个包的安全补丁（{package}）早于手机上的（{installed}），安装后会无法读取数据分区。")
         }
-        Refusal::Wipe => "这个包要求安装后清除全部数据，这里还不能安装这类包。".into(),
         Refusal::NoPartition => "这台手机没有能写入这个镜像的分区。".into(),
         Refusal::Battery { level, charging: true } => format!("电量只有 {level}%，充电时至少需要 15%。"),
         Refusal::Battery { level, charging: false } => format!("电量只有 {level}%，没有充电时至少需要 20%。"),

@@ -573,6 +573,9 @@ fn identify(path: &Path) -> Result<()> {
                     println!("{key:<26} {v}");
                 }
             }
+            if u.wipes() {
+                println!("all user data is erased once it is in, after the user agrees");
+            }
         }
         Package::Image(kind) => println!("{kind:?}, for {}", kind.partitions().join(" or ")),
         Package::Script => println!("a zip that installs itself with a script"),

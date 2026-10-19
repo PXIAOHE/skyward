@@ -110,7 +110,7 @@ fn main() -> Result<()> {
 
     // The sideload page through an install, as the installer tells it.
     let recovery = ImageKind::Boot { kernel: false, ramdisk: Ramdisk::Recovery };
-    let installing: [(&str, bool, Install); 11] = [
+    let installing: [(&str, bool, Install); 12] = [
         ("30-sideload-waiting", false, Install::Waiting),
         ("31-sideload-checking", false, Install::Checking { size: 7_103_043_868 }),
         (
@@ -137,7 +137,8 @@ fn main() -> Result<()> {
             },
         ),
         ("35-sideload-flashing", false, Install::Flashing { partition: "boot", stage: Some(Stage::Flashing { done: 300, total: 800 }) }),
-        ("36-sideload-installed", false, Install::Finished { outcome: Outcome::Installed { slot: Slot::A }, damage: None }),
+        ("36-sideload-installed", false, Install::Finished { outcome: Outcome::Installed { slot: Slot::A, wipe: false }, damage: None }),
+        ("96-sideload-light-wipes", false, Install::Confirming { version: Some("OS3.0.306.0.WMACNXM".into()) }),
         (
             "37-sideload-flashed-recovery-dark",
             true,

@@ -45,6 +45,13 @@ impl Update {
     pub fn version(&self) -> Option<&str> {
         self.metadata.get("post-build-incremental")
     }
+
+    /// Whether the system it installs needs all user data erased before it
+    /// starts, as the package says in its description or in what it hands
+    /// update_engine.
+    pub fn wipes(&self) -> bool {
+        self.metadata.get("ota-wipe") == Some("yes") || self.properties.lines().any(|l| l.trim() == "POWERWASH=1")
+    }
 }
 
 /// The package's META-INF/com/android/metadata: one `key=value` a line.
@@ -145,9 +152,6 @@ pub fn check(update: &Update, phone: &Phone) -> Result<(), Refusal> {
     if m.get("pre-build").is_some() || m.get("pre-build-incremental").is_some() {
         return Err(Refusal::Incremental);
     }
-    if m.get("ota-wipe") == Some("yes") || update.properties.lines().any(|l| l.trim() == "POWERWASH=1") {
-        return Err(Refusal::Wipe);
-    }
     let Some(build) = &phone.installed else { return Ok(()) };
     // A full package may install the version already there again; going
     // back needs a package made for the build it leaves, an incremental
@@ -156,9 +160,10 @@ pub fn check(update: &Update, phone: &Phone) -> Result<(), Refusal> {
     if timestamp < build.timestamp {
         return Err(Refusal::Older { package: timestamp, installed: build.timestamp });
     }
-    // Patch levels are yyyy-mm-dd, so they order as text.
+    // Patch levels are yyyy-mm-dd, so they order as text. Data that is
+    // erased before the older system starts is never read under it.
     if let Some(patch) = m.get("post-security-patch-level") {
-        let allowed = m.get("spl-downgrade") == Some("yes") || m.get("ota-downgrade") == Some("yes");
+        let allowed = m.get("spl-downgrade") == Some("yes") || m.get("ota-downgrade") == Some("yes") || update.wipes();
         if patch < build.security_patch.as_str() && !allowed {
             return Err(Refusal::OlderPatch { package: patch.to_string(), installed: build.security_patch.clone() });
         }
@@ -243,7 +248,7 @@ METADATA_SIZE=1024
     }
 
     #[test]
-    fn incremental_older_and_wiping_packages_are_refused() {
+    fn incremental_and_older_packages_are_refused() {
         let incremental = format!(
             "{METADATA_TEXT}pre-build=Xiaomi/ishtar/ishtar:16/X/OS3.0.305.0.WMACNXM:user/release-keys\npre-build-incremental=OS3.0.305.0.WMACNXM\n"
         );
@@ -260,10 +265,20 @@ METADATA_SIZE=1024
         );
         let allowed = format!("{}spl-downgrade=yes\n", METADATA_TEXT.replace("2026-06-01", "2026-03-01"));
         assert_eq!(check(&update_with(&allowed, PROPERTIES_TEXT), &phone()), Ok(()));
-        let powerwash = format!("{PROPERTIES_TEXT}POWERWASH=1\n");
-        assert_eq!(check(&update_with(METADATA_TEXT, &powerwash), &phone()), Err(Refusal::Wipe));
-        let wipe = format!("{METADATA_TEXT}ota-wipe=yes\n");
-        assert_eq!(check(&update_with(&wipe, PROPERTIES_TEXT), &phone()), Err(Refusal::Wipe));
+    }
+
+    #[test]
+    fn a_package_may_ask_for_all_user_data_to_be_erased_either_way() {
+        let plain = update_with(METADATA_TEXT, PROPERTIES_TEXT);
+        assert!(!plain.wipes());
+        let powerwash = update_with(METADATA_TEXT, &format!("{PROPERTIES_TEXT}POWERWASH=1\n"));
+        assert!(powerwash.wipes());
+        assert_eq!(check(&powerwash, &phone()), Ok(()), "erasing is asked of the user, not refused");
+        let wipe = update_with(&format!("{METADATA_TEXT}ota-wipe=yes\n"), PROPERTIES_TEXT);
+        assert!(wipe.wipes());
+        assert!(!update_with(METADATA_TEXT, &format!("{PROPERTIES_TEXT}POWERWASH=0\n")).wipes());
+        let older_patch = format!("{}ota-wipe=yes\n", METADATA_TEXT.replace("2026-06-01", "2026-03-01"));
+        assert_eq!(check(&update_with(&older_patch, PROPERTIES_TEXT), &phone()), Ok(()), "the data it could not read is erased");
     }
 
     #[test]

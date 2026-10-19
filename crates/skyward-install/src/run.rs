@@ -89,6 +89,12 @@ impl Installer {
         let _ = self.commands.send(Command::Flash { partition, slots });
     }
 
+    /// Install the update the installer holds, which erases all user data
+    /// after it.
+    pub fn install(&self) {
+        let _ = self.commands.send(Command::Install);
+    }
+
     /// Stop waiting for the computer, or for where an image goes.
     pub fn cancel(&self) -> Result<()> {
         let _ = self.commands.send(Command::Cancel);
@@ -250,7 +256,19 @@ fn update_system(ctx: &mut Context, mount: &Mount<Endpoints>, update: &Update) -
     if ctx.shared.cancelled() {
         return Ok(Done::Decided(Outcome::Cancelled));
     }
-    ctx.send(Event::Installing { version: update.version().map(str::to_string) });
+    let version = update.version().map(str::to_string);
+    let wipe = update.wipes();
+    // Erasing all user data is the user's to agree to before the system
+    // they would come back to is written over.
+    if wipe {
+        ctx.send(Event::Wipes { version: version.clone() });
+        match ctx.commands.recv() {
+            Ok(Command::Install) => {}
+            Ok(Command::Cancel) | Err(_) => return Ok(Done::Decided(Outcome::Cancelled)),
+            Ok(other) => bail!("an update waiting to be agreed to was told {other:?}"),
+        }
+    }
+    ctx.send(Event::Installing { version });
     let detach = ctx.detach.take().expect("an installer takes one package");
     detach().context("move off the installed system")?;
     // update_engine mounts /metadata itself, as in the stock recovery, keeps
@@ -265,7 +283,7 @@ fn update_system(ctx: &mut Context, mount: &Mount<Endpoints>, update: &Update) -
         let _ = kmsg(&format!("install: /metadata not mounted again: {e:#}"));
     }
     Ok(match code? {
-        0 => Done::Decided(Outcome::Installed { slot: slot.other() }),
+        0 => Done::Decided(Outcome::Installed { slot: slot.other(), wipe }),
         code => Done::Engine(code),
     })
 }
@@ -416,6 +434,7 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
     let (partition, slots) = match ctx.commands.recv() {
         Ok(Command::Flash { partition, slots }) => (partition, slots),
         Ok(Command::Cancel) | Err(_) => return Ok(Done::Decided(Outcome::Cancelled)),
+        Ok(Command::Install) => bail!("an image waiting for its partition was told to install an update"),
     };
     ensure!(partitions.contains(&partition), "{partition} is not among {partitions:?}");
     ensure!(!slots.is_empty(), "no slot chosen for {partition}");

@@ -504,8 +504,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
     };
     let mut eraser: Option<Eraser> = None;
-    // Erasing the system asked for leaves on its own once it is done; what
-    // the user chose waits for them.
+    // Erasing the system asked for leaves on its own once it is done, as
+    // does erasing an update asked for, sideloaded with a restart after it;
+    // what the user chose waits for them.
     let mut erase_leaves = false;
     match &request.work {
         Work::WipeData => {
@@ -626,21 +627,27 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // acts on the page as it now stands.
         if let Some(i) = &installer {
             for ev in i.events() {
-                let finished = matches!(ev, skyward_install::Event::Finished(_));
+                use skyward_install::{Event as Told, Outcome};
+                let finished = matches!(ev, Told::Finished(_));
+                let wipe_after = matches!(ev, Told::Finished(Outcome::Installed { wipe: true, .. }));
                 eprintln!("install {ev:?}");
                 app.install(ev, now);
                 if finished {
                     installer = None;
                     // A sideload the system asked for is done with however
-                    // it went; asked to, the phone then leaves on its own.
-                    if let Work::Sideload { auto_reboot } = request.work {
-                        if kept {
-                            bcb::clear(&misc)?;
-                            kept = false;
-                        }
-                        if auto_reboot {
-                            leave_at = Some(now + LEAVE_AFTER_MS);
-                        }
+                    // it went; asked to, the phone then leaves on its own,
+                    // once what the update asked to be erased is.
+                    let auto_reboot = matches!(request.work, Work::Sideload { auto_reboot: true });
+                    if matches!(request.work, Work::Sideload { .. }) && kept {
+                        bcb::clear(&misc)?;
+                        kept = false;
+                    }
+                    if wipe_after {
+                        ensure!(eraser.is_none(), "erasing is under way already");
+                        eraser = Some(factory_reset(&mut app, false, false)?);
+                        erase_leaves = auto_reboot;
+                    } else if auto_reboot {
+                        leave_at = Some(now + LEAVE_AFTER_MS);
                     }
                 }
             }
@@ -663,10 +670,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         skyward_sys::kmsg(&format!("erasing ended: {said}"))?;
                         // As with the phone's own recovery, the request is
                         // done with either way, so a restart starts the
-                        // system rather than erasing again.
+                        // system rather than erasing again. A factory
+                        // reset done is what an update that asked for one
+                        // asked, too.
                         if kept {
                             bcb::clear(&misc)?;
                             kept = false;
+                        }
+                        if outcome.is_ok() && app.state.erase.reset {
+                            bcb::clear(&misc)?;
                         }
                         if outcome.is_ok() && erase_leaves {
                             leave_at = Some(now + LEAVE_AFTER_MS);
@@ -806,6 +818,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             eraser = Some(parts_wipe(&mut app, has(Wipe::Media), has(Wipe::Art), has(Wipe::Cache), false)?);
                         }
                     }
+                    Effect::Install => installer.as_ref().context("no installer holds an update")?.install(),
                     // A shell that will not start, or will not take keys,
                     // is the page's to report; the recovery carries on.
                     Effect::StartShell => {

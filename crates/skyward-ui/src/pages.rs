@@ -87,6 +87,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Slot => ("滑动以切换", true),
         Confirm::FactoryReset => ("滑动以恢复出厂设置", true),
         Confirm::DeleteEntry => ("滑动以删除", true),
+        Confirm::InstallWipe => ("滑动以安装并清除", true),
     }
 }
 
@@ -710,6 +711,18 @@ pub fn sideload(cx: &Ctx) -> Frame {
             out.push(Hit { rect: track, action: Action::Confirm(Confirm::Flash) });
             widgets::footnote(&mut c, t, f, track.y + track.h, "刷入会覆盖分区里原来的内容。返回会取消，电脑上的 adb sideload 随之结束。")
         }
+        Install::Confirming { version } => {
+            let what = "安装后将清除所有数据，包括应用、账户、设置和内部存储。";
+            let detail = match version {
+                Some(v) => format!("{v} {what}"),
+                None => format!("该更新{what}"),
+            };
+            let y = widgets::list(&mut c, t, f, top, &[standing("需清除所有数据", ORANGE, Icon::Wipe, &detail)]).bottom;
+            let (label, danger) = confirm_label(Confirm::InstallWipe);
+            let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
+            out.push(Hit { rect: track, action: Action::Confirm(Confirm::InstallWipe) });
+            widgets::footnote(&mut c, t, f, track.y + track.h, "返回即取消安装，手机不会有任何改动。")
+        }
         Install::Updating { version, stage, overwriting } => {
             let title = match version {
                 Some(v) => format!("正在安装 {v}"),
@@ -749,7 +762,7 @@ fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Optio
     let again = Row::new("再发送一个").icon(GREEN, Icon::Usb);
     let restart = Row::new("重启到系统").icon(ORANGE, Icon::Power);
     match outcome {
-        Outcome::Installed { slot } => {
+        Outcome::Installed { slot, .. } => {
             let detail = format!("新系统安装在槽位 {}，重启后从这个槽位启动。", slot.letter());
             let y = widgets::list(c, t, f, top, &[standing("安装完成", GREEN, Icon::Install, &detail)]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[restart]);
