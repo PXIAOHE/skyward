@@ -266,11 +266,37 @@ mod sys {
     /// executable. A filesystem a program holds does not unmount.
     pub fn holders() -> Result<HashMap<(u32, u32), BTreeSet<String>>> {
         let mut found: HashMap<(u32, u32), BTreeSet<String>> = HashMap::new();
+        for h in held()? {
+            for d in h.devices {
+                found.entry(d).or_default().insert(h.name.clone());
+            }
+        }
+        Ok(found)
+    }
+
+    /// The processes that hold the filesystem on `device`, as [`holders`]
+    /// finds them: each one's id and the program it runs.
+    pub fn holding(device: (u32, u32)) -> Result<Vec<(i32, String)>> {
+        Ok(held()?.into_iter().filter(|h| h.devices.contains(&device)).map(|h| (h.pid, h.name)).collect())
+    }
+
+    /// A process and what it holds: the devices of the filesystems it has a
+    /// file of mapped or open, or a directory of as its working or root
+    /// directory.
+    struct Held {
+        pid: i32,
+        /// The program it runs.
+        name: String,
+        devices: Vec<(u32, u32)>,
+    }
+
+    fn held() -> Result<Vec<Held>> {
+        let mut out = Vec::new();
         for p in all_processes().context("list the processes")? {
             let Some(p) = present(p)? else { continue };
             // Kernel threads have no executable and hold no files.
             let Some(exe) = present(p.exe())? else { continue };
-            let name = exe.file_name().with_context(|| format!("{} has no file name", exe.display()))?.to_string_lossy();
+            let name = exe.file_name().with_context(|| format!("{} has no file name", exe.display()))?.to_string_lossy().into_owned();
             let proc_dir = Path::new("/proc").join(p.pid().to_string());
             let mut devices = Vec::new();
             if let Some(maps) = present(p.maps())? {
@@ -286,11 +312,9 @@ mod sys {
             for dir in ["cwd", "root"] {
                 devices.extend(device_of(&proc_dir.join(dir))?);
             }
-            for d in devices {
-                found.entry(d).or_default().insert(name.to_string());
-            }
+            out.push(Held { pid: p.pid(), name, devices });
         }
-        Ok(found)
+        Ok(out)
     }
 
     /// `None` for what went away while it was read: a process that ended,
@@ -367,10 +391,14 @@ mod sys {
     pub fn holders() -> Result<HashMap<(u32, u32), BTreeSet<String>>> {
         bail!("this host does not look up which programs hold a filesystem")
     }
+
+    pub fn holding(_device: (u32, u32)) -> Result<Vec<(i32, String)>> {
+        bail!("this host does not look up which programs hold a filesystem")
+    }
 }
 
 pub use sys::{
-    bind, holders, is_mount_point, mount, mount_ro, mount_ro_over, umount, umount_detach, umount_detach_over,
+    bind, holders, holding, is_mount_point, mount, mount_ro, mount_ro_over, umount, umount_detach, umount_detach_over,
     umount_over, visible,
 };
 
