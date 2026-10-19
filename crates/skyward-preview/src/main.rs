@@ -3,8 +3,8 @@ use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DataState, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
 use skyward_ui::app::{
-    Action, App, Asked, BackupEntry, Choice, Damage, FileKind, FileRow, Install, MountFailure, MountRow, Part, Pick, Screen,
-    Touch, UsbLink, SCREEN_OFF,
+    Action, App, Asked, BackupEntry, Choice, Clip, Damage, FileKind, FileOp, FileRow, FileTask, Install, JobEnd, MountFailure,
+    MountRow, Part, Pick, Screen, Touch, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
@@ -199,7 +199,13 @@ fn main() -> Result<()> {
         BackupEntry { made: 1_791_830_000, size: 141_000_000, place: 1, parts: [true, false, false, false] },
     ];
     let reset_asked = || Asked { reason: Some("factroy_reset(1217)".into()), ..Asked::default() };
-    let pages: [PageShot; 31] = [
+    let in_download = |app: &mut App, name: &str| {
+        app.set_files("/sdcard/Download".into(), Ok(sample_download()), LISTED);
+        app.state.file = sample_download().into_iter().find(|e| e.name == name);
+    };
+    let ota = "/sdcard/Download/OTA_ishtar_OS3.0.305.0.WMACNXM_20260412_full_package_signed_for_recovery_install.zip";
+    let copying = || FileTask::Copy { path: ota.into(), into: "/sdcard/Skyward".into() };
+    let pages: [PageShot; 40] = [
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
@@ -271,6 +277,37 @@ fn main() -> Result<()> {
         }),
         ("74-unhandled-dark", Screen::Unhandled, true, &|app| {
             app.set_asked(Asked { unhandled: Some("--update_package=/data/ota_package/update.zip".into()), ..Asked::default() })
+        }),
+        ("76-files-picked-light", Screen::Files, false, &|app| {
+            app.set_files("/sdcard/Download".into(), Ok(sample_download()), LISTED);
+            app.state.clip = Some(Clip { op: FileOp::Move, path: "/sdcard/README.txt".into() });
+        }),
+        ("77-folder-info-dark", Screen::FileInfo, true, &|app| in_download(app, "安装包")),
+        ("78-file-info-light-deleting", Screen::FileInfo, false, &|app| {
+            in_download(app, "README.txt");
+            app.state.asking_delete = true;
+        }),
+        ("79-rename-light", Screen::Rename, false, &|app| {
+            in_download(app, "README.txt");
+            app.state.new_name = "README-old.txt".into();
+        }),
+        ("80-clash-dark", Screen::Clash, true, &|app| {
+            app.file_clash(FileOp::Copy, "/sdcard/README.txt".into(), "/sdcard/Download".into(), vec!["README.txt".into()])
+        }),
+        ("81-file-job-light", Screen::Files, false, &|app| {
+            app.file_job_started(copying());
+            app.file_progress((2_934_000_000, 7_014_220_000), (0, 1));
+        }),
+        ("82-file-job-dark-measuring", Screen::Files, true, &|app| app.file_job_started(FileTask::Delete { path: "/sdcard/DCIM".into() })),
+        ("83-file-job-light-stopped", Screen::Files, false, &|app| {
+            app.file_job_started(copying());
+            app.file_progress((2_934_000_000, 7_014_220_000), (0, 1));
+            app.file_job_ended(JobEnd::Stopped, 0);
+        }),
+        ("84-file-job-dark-failed", Screen::Files, true, &|app| {
+            app.file_job_started(FileTask::Move { path: "/tmp/skyward.log".into(), into: "/sdcard/Download".into() });
+            app.file_progress((0, 18_000), (0, 1));
+            app.file_job_ended(JobEnd::Failed("make /sdcard/Download/skyward.log: Read-only file system (os error 30)".into()), 0);
         }),
     ];
     for (name, screen, dark, set) in pages {
@@ -527,6 +564,9 @@ fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo, data: DataState) -> C
     }
     if let Some(p) = &frame.pinned {
         c.put(&p.canvas, p.top.round() as i32);
+    }
+    if let Some(d) = &frame.dock {
+        c.put(&d.canvas, (c.h - d.canvas.h) as i32);
     }
     let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
     widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery }, t.pal.status);

@@ -1,3 +1,4 @@
+use crate::filework;
 use crate::haptics::Haptics;
 use crate::input::{monotonic_ms, Event, Inputs};
 use crate::pty;
@@ -10,7 +11,9 @@ use skyward_install::{Detach, Installer};
 use skyward_sys::bcb::{self, Work};
 use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
-use skyward_ui::app::{App, Asked, Effect, FileKind, FileRow, Keys, MountFailure, Part, Screen, Target, UsbLink};
+use skyward_ui::app::{
+    App, Asked, ClashChoice, Effect, FileKind, FileOp, FileRow, FileTask, JobEnd, Keys, MountFailure, Part, Screen, Target, UsbLink,
+};
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
 use std::collections::BTreeSet;
@@ -156,6 +159,23 @@ fn asked(request: &bcb::Request) -> Asked {
             Work::Unsupported(what) => Some(what.clone()),
             _ => None,
         },
+    }
+}
+
+/// Read a folder for the file manager, as it is now.
+fn list(app: &mut App, folder: String) -> Result<()> {
+    let files = read_folder(Path::new(&folder)).map_err(|e| format!("{e:#}"));
+    let listed = SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_secs();
+    app.set_files(folder, files, listed as i64);
+    Ok(())
+}
+
+/// What a choice on the clash page asks of the work on files.
+fn clash_rule(choice: ClashChoice) -> skyward_files::Clash {
+    match choice {
+        ClashChoice::Replace => skyward_files::Clash::Replace,
+        ClashChoice::Skip => skyward_files::Clash::Skip,
+        ClashChoice::KeepBoth => skyward_files::Clash::KeepBoth,
     }
 }
 
@@ -476,13 +496,24 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut leave_at: Option<u64> = None;
     // The terminal page's shell, from when the page first asks for one.
     let mut shell: Option<pty::Shell> = None;
+    // Copying, moving or deleting under way.
+    let mut worker: Option<filework::Worker> = None;
     loop {
         let now = monotonic_ms();
         if leave_at.is_some_and(|at| now >= at) {
             leave_at = None;
             power(leave)?;
         }
-        app.tick(now);
+        for fx in app.tick(now) {
+            match fx {
+                Effect::Haptic => {
+                    if let Some(h) = &mut haptics {
+                        h.click()?;
+                    }
+                }
+                other => unreachable!("time passing asks for nothing but a tap of the motor, not {other:?}"),
+            }
+        }
         let time = clock()?;
         if time != shown_clock {
             shown_clock = time;
@@ -550,6 +581,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(sh) = &shell {
             fds.extend(sh.fds());
         }
+        if let Some(w) = &worker {
+            fds.push(w.fd());
+        }
         wait(&fds, timeout)?;
         let now = monotonic_ms();
         // What the installer and the eraser told comes first, so a touch
@@ -600,6 +634,29 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if erased {
             eraser = None;
+        }
+        let mut worked = false;
+        if let Some(w) = &worker {
+            for ev in w.events() {
+                match ev {
+                    filework::Event::Progress(p) => app.file_progress((p.bytes, p.total_bytes), (p.entries, p.total_entries)),
+                    filework::Event::Ended(end) => {
+                        let end = match end {
+                            filework::End::Done => JobEnd::Done,
+                            filework::End::Stopped => JobEnd::Stopped,
+                            filework::End::Failed(why) => JobEnd::Failed(why),
+                        };
+                        app.file_job_ended(end, now);
+                        worked = true;
+                    }
+                }
+            }
+        }
+        // The folder shown is read again for what the work changed.
+        if worked {
+            worker = None;
+            let folder = app.state.folder.clone();
+            list(&mut app, folder)?;
         }
         if let Some(sh) = &mut shell {
             let wrote = sh.read()?;
@@ -719,11 +776,48 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             app.report(&format!("{e:#}"), now);
                         }
                     },
-                    Effect::ReadDir(folder) => {
-                        let files = read_folder(Path::new(&folder)).map_err(|e| format!("{e:#}"));
-                        let listed = SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_secs();
-                        app.set_files(folder, files, listed as i64);
+                    Effect::ReadDir(folder) => list(&mut app, folder)?,
+                    // A name taken where an entry goes is the user's to
+                    // decide on before anything is written.
+                    Effect::Paste { op, path, into, clash } => {
+                        ensure!(worker.is_none(), "work on files is under way already");
+                        let clash = match clash {
+                            Some(choice) => clash_rule(choice),
+                            None => match skyward_files::clashes(&[PathBuf::from(&path)], Path::new(&into)) {
+                                Ok(taken) if taken.is_empty() => skyward_files::Clash::Refuse,
+                                Ok(taken) => {
+                                    let names = taken.iter().map(|t| t.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect();
+                                    app.file_clash(op, path, into, names);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    app.report(&format!("{e:#}"), now);
+                                    continue;
+                                }
+                            },
+                        };
+                        let (from, to) = (PathBuf::from(&path), PathBuf::from(&into));
+                        let (task, shown) = match op {
+                            FileOp::Copy => (filework::Task::Copy { from, into: to, clash }, FileTask::Copy { path, into }),
+                            FileOp::Move => (filework::Task::Move { from, into: to, clash }, FileTask::Move { path, into }),
+                        };
+                        worker = Some(filework::Worker::start(task)?);
+                        app.file_job_started(shown);
                     }
+                    Effect::Delete(path) => {
+                        ensure!(worker.is_none(), "work on files is under way already");
+                        worker = Some(filework::Worker::start(filework::Task::Delete { path: PathBuf::from(&path) })?);
+                        app.file_job_started(FileTask::Delete { path });
+                    }
+                    Effect::StopJob => worker.as_ref().context("there is no work on files to stop")?.stop(),
+                    Effect::Rename { path, name } => match skyward_files::rename(Path::new(&path), &name) {
+                        Ok(_) => {
+                            app.renamed(Ok(()), now);
+                            let folder = app.state.folder.clone();
+                            list(&mut app, folder)?;
+                        }
+                        Err(e) => app.renamed(Err(format!("{e:#}")), now),
+                    },
                     // A partition that will not mount, or is in use, is the
                     // page's to report; the recovery carries on.
                     Effect::Mount(base) => {

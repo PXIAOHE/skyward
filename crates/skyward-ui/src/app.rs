@@ -71,6 +71,71 @@ pub enum Screen {
     CantStart,
     /// Something the system asked of the recovery that it does not do.
     Unhandled,
+    /// A new name for the entry the file page shows, typed on the screen's
+    /// keyboard.
+    Rename,
+    /// The folder an entry is copied or moved to already holds that name;
+    /// what to do is the user's to choose.
+    Clash,
+    /// Copying, moving or deleting under way, and how it ended.
+    FileJob,
+}
+
+/// What can be done with an entry picked in the file manager.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileOp {
+    Copy,
+    Move,
+}
+
+/// An entry picked to copy or move, while the file manager looks for the
+/// folder it goes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Clip {
+    pub op: FileOp,
+    /// Where the entry is.
+    pub path: String,
+}
+
+/// What to do with an entry of the same name already where one goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClashChoice {
+    /// The new entry takes the old one's place.
+    Replace,
+    /// The old entry stays, and the new one is left out.
+    Skip,
+    /// The new entry gets a name of its own beside the old one.
+    KeepBoth,
+}
+
+/// Work on files as its page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileTask {
+    Copy { path: String, into: String },
+    Move { path: String, into: String },
+    Delete { path: String },
+}
+
+/// How work on files ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobEnd {
+    Done,
+    /// Stopped as asked, with what was done by then left as it is.
+    Stopped,
+    Failed(String),
+}
+
+/// Work on files under way: what it is, how far it has come, and how it
+/// ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileJob {
+    pub task: FileTask,
+    /// Bytes and entries, each as done and out of how many; none while the
+    /// work still measures what it covers.
+    pub progress: Option<((u64, u64), (u64, u64))>,
+    pub outcome: Option<JobEnd>,
+    /// Stopping was asked for and is under way.
+    pub stopping: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +239,8 @@ pub enum Confirm {
     Decrypt,
     /// Erase all user data, as the system offered when it could not start.
     FactoryReset,
+    /// Delete the entry the file page shows.
+    DeleteEntry,
 }
 
 /// A part of the phone that erasing goes through, in the order it does.
@@ -381,6 +448,21 @@ pub enum Action {
     /// Go up to the folder this many levels below the root, by its place in
     /// the path shown over the list.
     OpenAncestor(usize),
+    /// Pick the entry the file page shows to copy or move, and look for
+    /// where it goes.
+    PickEntry(FileOp),
+    /// Copy or move the entry picked into the folder shown.
+    Paste,
+    /// Put the entry picked down again.
+    Unpick,
+    /// Give the entry the file page shows a new name.
+    RenameEntry,
+    /// Ask to delete the entry the file page shows; a swipe then confirms.
+    AskDelete,
+    /// How to go on when a name is taken where an entry goes.
+    Resolve(ClashChoice),
+    /// Stop copying, moving or deleting.
+    StopJob,
     /// A control whose work is not wired up yet; touching it says so.
     Unavailable(&'static str),
 }
@@ -419,6 +501,17 @@ pub struct Frame {
     /// A terminal's screen and the height of its rows: a drag on it scrolls
     /// back through what the shell wrote, rather than moving the page.
     pub scrollback: Option<(Rect, f32)>,
+    /// A strip held at the bottom of the screen over the page; the page
+    /// scrolls far enough for nothing to stay under it.
+    pub dock: Option<Dock>,
+}
+
+/// A strip held at the bottom of the screen over the page, such as the
+/// file manager's choice of where a picked entry goes.
+pub struct Dock {
+    pub canvas: Canvas,
+    /// In the strip's own coordinates.
+    pub hits: Vec<Hit>,
 }
 
 /// The rows of a list drawn as they come into view, the way a list view
@@ -495,6 +588,7 @@ impl Frame {
             rows: None,
             pinned: None,
             scrollback: None,
+            dock: None,
         }
     }
 
@@ -512,7 +606,8 @@ impl Frame {
     /// them if they reach further.
     pub fn height(&self, t: &Theme) -> f32 {
         let h = self.canvas.h as f32;
-        self.rows.as_ref().map_or(h, |r| h.max((r.bottom() + t.m.margin * 2.0).ceil()))
+        let h = self.rows.as_ref().map_or(h, |r| h.max((r.bottom() + t.m.margin * 2.0).ceil()));
+        h + self.dock.as_ref().map_or(0.0, |d| d.canvas.h as f32)
     }
 }
 
@@ -574,6 +669,19 @@ pub struct State {
     pub fastboot: Fastboot,
     pub erase: Erase,
     pub asked: Asked,
+    /// The entry picked to copy or move, while a folder for it is looked
+    /// for.
+    pub clip: Option<Clip>,
+    /// What is typed as an entry's new name.
+    pub new_name: String,
+    /// Deleting the entry the file page shows was asked for; a swipe
+    /// confirms it.
+    pub asking_delete: bool,
+    /// A copy or move waiting on what to do with the names taken where it
+    /// goes, and those names.
+    pub clash: Option<(Clip, String, Vec<String>)>,
+    /// Work on files under way, or how it last ended.
+    pub job: Option<FileJob>,
 }
 
 impl Default for State {
@@ -613,6 +721,11 @@ impl Default for State {
             fastboot: Fastboot { running: false, link: UsbLink::Unplugged, focus: 0 },
             erase: Erase::default(),
             asked: Asked::default(),
+            clip: None,
+            new_name: String::new(),
+            asking_delete: false,
+            clash: None,
+            job: None,
         }
     }
 }
@@ -673,13 +786,28 @@ pub enum Effect {
     StartShell,
     /// Send these bytes to the shell, as typed.
     TermInput(Vec<u8>),
+    /// Copy or move an entry into a folder; with no choice made yet, a name
+    /// taken there is told with [`App::file_clash`] instead of going on.
+    Paste { op: FileOp, path: String, into: String, clash: Option<ClashChoice> },
+    /// Give an entry a new name; how it went comes back with
+    /// [`App::renamed`].
+    Rename { path: String, name: String },
+    /// Delete an entry, folders whole.
+    Delete(String),
+    /// Stop the work on files under way.
+    StopJob,
 }
 
 enum Drag {
     Idle,
     /// Finger down and not yet past the touch slop. `edge` is set when the
     /// press began at a screen edge (true for the left one).
-    Press { x: f32, y: f32, action: Option<Action>, edge: Option<bool> },
+    /// `at` is when it came down: held long enough over an entry of the file
+    /// manager, it opens what can be done with that entry.
+    Press { x: f32, y: f32, action: Option<Action>, edge: Option<bool>, at: u64 },
+    /// A press held long enough to have done its work; nothing it does
+    /// counts until it lifts.
+    Held,
     Scroll { last: f32 },
     /// Swiping in from a screen edge, the finger now `x` across; the cue
     /// keeps to height `cy`, set by where the swipe began. Past the
@@ -697,6 +825,9 @@ enum Drag {
 }
 
 const TOAST_MS: u64 = 2000;
+/// How long a finger rests on an entry before it counts as held, as the
+/// system's long press does.
+const LONG_PRESS_MS: u64 = 400;
 /// A finger lifted slower than this, in dp per second, leaves the page
 /// where it is.
 const MIN_FLING_DP: f32 = 50.0;
@@ -868,9 +999,10 @@ pub struct App {
     /// The file manager's folders left for one inside them, outermost
     /// first, with how far each was scrolled.
     left: Vec<(String, f32)>,
-    /// The current page's large and bar titles, for its theme, with their
-    /// blurred versions as they are needed.
-    titles: Option<((Screen, bool), Blurs, Blurs)>,
+    /// The current page's large and bar titles, for their words and the
+    /// theme, with their blurred versions as they are needed. A page can
+    /// change its title in place, as work on files does once it ends.
+    titles: Option<((&'static str, bool), Blurs, Blurs)>,
     /// The `<` chip for the theme (dark or not), and where it goes.
     chip: Option<(bool, Canvas, i32, i32)>,
     /// The About page field's dither, made for the screen once.
@@ -991,7 +1123,11 @@ impl App {
             return Some(0);
         }
         let easing = self.bright.moving(now).then_some(now + BACKLIGHT_STEP_MS);
-        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due()].into_iter().flatten().min()
+        let held = match self.drag {
+            Drag::Press { action: Some(Action::OpenEntry(_)), at, .. } => Some(at + LONG_PRESS_MS),
+            _ => None,
+        };
+        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held].into_iter().flatten().min()
     }
 
     /// When sitting idle next changes the lit panel: when it dims, or once
@@ -1008,7 +1144,22 @@ impl App {
     /// enough, a gliding page moves on, a page past its end springs back,
     /// the bar and its title follow the scroll, and a message past its
     /// deadline goes away.
-    pub fn tick(&mut self, now: u64) {
+    pub fn tick(&mut self, now: u64) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        // An entry of the file manager held long enough opens what can be
+        // done with it, a folder as much as a file, with a tap of the motor.
+        if let Drag::Press { action: Some(Action::OpenEntry(i)), at, .. } = self.drag {
+            if now >= at + LONG_PRESS_MS {
+                self.drag = Drag::Held;
+                let entry = self.state.files.as_ref().expect("an entry held is one the page lists")[i].clone();
+                self.state.file = Some(entry);
+                self.state.asking_delete = false;
+                self.open(Screen::FileInfo);
+                if self.state.vibrate {
+                    fx.push(Effect::Haptic);
+                }
+            }
+        }
         let active = *self.active.get_or_insert(now);
         if let (true, Some(after)) = (self.display_on, SCREEN_OFF[self.state.screen_off]) {
             let idle = now.saturating_sub(active);
@@ -1064,6 +1215,7 @@ impl App {
             }
         }
         self.follow_scroll(now);
+        fx
     }
 
     /// Whether the About page's field is on screen, moving.
@@ -1250,6 +1402,83 @@ impl App {
         }
     }
 
+    /// Names are taken in `into` where a copy or move of `path` goes: what
+    /// to do with them is the user's to choose.
+    pub fn file_clash(&mut self, op: FileOp, path: String, into: String, taken: Vec<String>) {
+        self.state.clash = Some((Clip { op, path }, into, taken));
+        self.open(Screen::Clash);
+    }
+
+    /// Work on files has begun: its page shows how far it comes, in place
+    /// of the page of an entry being deleted.
+    pub fn file_job_started(&mut self, task: FileTask) {
+        if matches!(task, FileTask::Copy { .. } | FileTask::Move { .. }) {
+            self.state.clip = None;
+        }
+        self.state.job = Some(FileJob { task, progress: None, outcome: None, stopping: false });
+        if self.screen() == Screen::FileInfo {
+            self.state.file = None;
+            self.state.asking_delete = false;
+            self.stack.pop();
+        }
+        self.open(Screen::FileJob);
+    }
+
+    /// How far work on files has come, in bytes and in entries.
+    pub fn file_progress(&mut self, bytes: (u64, u64), entries: (u64, u64)) {
+        let job = self.state.job.as_mut().expect("only work under way moves on");
+        job.progress = Some((bytes, entries));
+        if self.screen() == Screen::FileJob {
+            self.refresh();
+        }
+    }
+
+    /// Work on files has ended. Done, its page goes and says so; stopped
+    /// or failed, the page stays and says why, lit for the user to read.
+    pub fn file_job_ended(&mut self, end: JobEnd, now: u64) {
+        let job = self.state.job.as_mut().expect("only work under way ends");
+        job.stopping = false;
+        let done = match (&end, &job.task) {
+            (JobEnd::Done, FileTask::Copy { .. }) => Some("已复制"),
+            (JobEnd::Done, FileTask::Move { .. }) => Some("已移动"),
+            (JobEnd::Done, FileTask::Delete { .. }) => Some("已删除"),
+            _ => None,
+        };
+        job.outcome = Some(end);
+        match done {
+            Some(said) => {
+                self.state.job = None;
+                if self.screen() == Screen::FileJob {
+                    self.stack.pop();
+                    self.settle_page();
+                }
+                self.refresh();
+                self.say(said, now);
+            }
+            None => {
+                self.wake(now);
+                self.refresh();
+            }
+        }
+    }
+
+    /// How renaming the entry the file page shows went: done, the folder
+    /// comes back with the entry under its new name; refused, why.
+    pub fn renamed(&mut self, outcome: Result<(), String>, now: u64) {
+        match outcome {
+            Ok(()) => {
+                while matches!(self.screen(), Screen::Rename | Screen::FileInfo) {
+                    self.stack.pop();
+                }
+                self.state.file = None;
+                self.settle_page();
+                self.refresh();
+                self.say("已重命名", now);
+            }
+            Err(why) => self.report(&why, now),
+        }
+    }
+
     /// The system asked for sideload before the recovery started: the page
     /// opens over the home page, already receiving.
     pub fn start_sideload(&mut self) {
@@ -1360,9 +1589,9 @@ impl App {
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
         }
-        let key = (self.screen(), self.state.dark);
+        let title = self.frame.as_ref().expect("rendered above").title;
+        let key = (title, self.state.dark);
         if self.titles.as_ref().is_none_or(|(k, _, _)| *k != key) {
-            let title = self.frame.as_ref().expect("rendered above").title;
             self.titles = Some((key, Blurs::new(widgets::big_title(&t, f, title)), Blurs::new(widgets::small_title(&t, f, title))));
         }
         if self.chip.as_ref().is_none_or(|c| c.0 != t.dark) {
@@ -1454,6 +1683,9 @@ impl App {
         if let Some((p, top)) = strip {
             out.put(&p.canvas, top.round() as i32);
         }
+        if let Some(d) = &frame.dock {
+            out.put(&d.canvas, (out.h - d.canvas.h) as i32);
+        }
         if frame.back {
             let (_, chip, x, y) = self.chip.as_ref().expect("drawn above");
             out.lay(chip, *x, *y, bar);
@@ -1526,8 +1758,23 @@ impl App {
                 if let Some(up) = std::path::Path::new(&self.state.folder).parent() {
                     return vec![Effect::ReadDir(up.to_string_lossy().into_owned())];
                 }
+                // Leaving the file manager puts a picked entry down.
+                self.state.clip = None;
             }
-            Screen::FileInfo => self.state.file = None,
+            Screen::FileInfo => {
+                self.state.file = None;
+                self.state.asking_delete = false;
+            }
+            // Turning the choice down leaves the entry picked, for another
+            // folder.
+            Screen::Clash => self.state.clash = None,
+            Screen::FileJob => {
+                if self.state.job.as_ref().is_some_and(|j| j.outcome.is_none()) {
+                    self.say("完成或停止之后才能返回", now);
+                    return fx;
+                }
+                self.state.job = None;
+            }
             Screen::RestoreBackup => self.state.restore = None,
             _ => {}
         }
@@ -1694,6 +1941,60 @@ impl App {
                 self.refresh();
                 return vec![Effect::Dismiss];
             }
+            Action::PickEntry(op) => {
+                let path = self.entry_path();
+                self.state.clip = Some(Clip { op, path });
+                return self.back(now);
+            }
+            // A folder cannot go inside itself, and an entry moved to the
+            // folder it is in stays put: the entry stays picked for another
+            // folder.
+            Action::Paste => {
+                let clip = self.state.clip.clone().expect("only a picked entry is pasted");
+                let (path, folder) = (std::path::Path::new(&clip.path), std::path::Path::new(&self.state.folder));
+                let name = path.file_name().map_or_else(|| clip.path.clone(), |n| n.to_string_lossy().into_owned());
+                if folder.starts_with(path) {
+                    self.say(&format!("不能把「{name}」放进它自己里面"), now);
+                } else if clip.op == FileOp::Move && path.parent() == Some(folder) {
+                    self.say(&format!("「{name}」已经在这个文件夹里"), now);
+                } else {
+                    return vec![Effect::Paste { op: clip.op, path: clip.path, into: self.state.folder.clone(), clash: None }];
+                }
+            }
+            Action::Unpick => {
+                self.state.clip = None;
+                self.refresh();
+            }
+            Action::RenameEntry => {
+                self.state.new_name = self.state.file.as_ref().expect("the file page shows an entry").name.clone();
+                self.state.layer = Layer::Letters;
+                self.open(Screen::Rename);
+            }
+            Action::AskDelete => {
+                self.state.asking_delete = true;
+                self.state.confirm = 0.0;
+                self.refresh();
+            }
+            Action::Resolve(choice) => {
+                let (clip, into, _) = self.state.clash.take().expect("a choice answers a clash");
+                self.stack.pop();
+                self.settle_page();
+                self.refresh();
+                // Skipping the one entry picked leaves nothing to do.
+                if choice == ClashChoice::Skip {
+                    self.state.clip = None;
+                    return Vec::new();
+                }
+                return vec![Effect::Paste { op: clip.op, path: clip.path, into, clash: Some(choice) }];
+            }
+            Action::StopJob => {
+                let job = self.state.job.as_mut().expect("only work under way is stopped");
+                if job.outcome.is_none() && !job.stopping {
+                    job.stopping = true;
+                    self.refresh();
+                    return vec![Effect::StopJob];
+                }
+            }
             Action::ScreenOff(k) => {
                 self.state.screen_off = k;
                 self.refresh();
@@ -1775,8 +2076,15 @@ impl App {
         match self.screen() {
             Screen::Search => &mut self.state.search,
             Screen::Decrypt => &mut self.state.code,
+            Screen::Rename => &mut self.state.new_name,
             s => panic!("{s:?} has no text field"),
         }
+    }
+
+    /// Where the entry the file page shows is.
+    fn entry_path(&self) -> String {
+        let entry = self.state.file.as_ref().expect("the file page shows an entry");
+        std::path::Path::new(&self.state.folder).join(&entry.name).to_string_lossy().into_owned()
     }
 
     /// A key of the keyboard on the terminal page. The layer keys change
@@ -1852,6 +2160,21 @@ impl App {
                     self.refresh();
                     return vec![Effect::Unlock(code)];
                 }
+                // A name the folder cannot take is turned down here, in
+                // the user's words; an unchanged one leaves the page.
+                Screen::Rename => {
+                    let name = self.state.new_name.clone();
+                    let current = &self.state.file.as_ref().expect("the file page shows an entry").name;
+                    let taken = self.state.files.as_ref().is_ok_and(|entries| entries.iter().any(|e| e.name == name));
+                    match name.as_str() {
+                        "" => self.say("先输入名称", now),
+                        "." | ".." => self.say("名称不能是「.」或「..」", now),
+                        _ if name.contains('/') => self.say("名称里不能有「/」", now),
+                        _ if name == *current => return self.back(now),
+                        _ if taken => self.say(&format!("这个文件夹里已经有「{name}」"), now),
+                        _ => return vec![Effect::Rename { path: self.entry_path(), name }],
+                    }
+                }
                 other => unreachable!("{other:?} shows no keyboard"),
             },
         }
@@ -1899,7 +2222,7 @@ impl App {
                 // doing: a finger landing there leaves a gliding or springing
                 // page alone until it drags the page, and presses nothing.
                 if at_edge.is_some() && self.in_motion(now) {
-                    self.drag = Drag::Press { x, y, action: None, edge: at_edge };
+                    self.drag = Drag::Press { x, y, action: None, edge: at_edge, at: now };
                     return fx;
                 }
                 // Anywhere else it stops such a page and holds it; the
@@ -1910,12 +2233,16 @@ impl App {
                 }
                 // The `<` stays put while the page scrolls; under the bar
                 // only it answers. A pinned strip answers where it shows,
-                // over the rows beneath it.
+                // over the rows beneath it, and so does a docked one.
                 let back = widgets::back_rect(&t);
                 let strip = self.frame.as_ref().and_then(|fr| fr.pinned.as_ref()).map(|p| (p, pinned_top(&t, p, scroll)));
                 let on_strip = strip.filter(|&(p, top)| y >= top && y < top + p.canvas.h as f32);
+                let dock = self.frame.as_ref().and_then(|fr| fr.dock.as_ref()).map(|d| (d, self.h as f32 - d.canvas.h as f32));
+                let on_dock = dock.filter(|&(_, top)| y >= top);
                 let hit = if self.frame.as_ref().is_some_and(|fr| fr.back) && back.contains(x, y) {
                     Some((Action::Back, back))
+                } else if let Some((d, top)) = on_dock {
+                    d.hits.iter().find(|h| h.rect.contains(x, y - top)).map(|h| (h.action, Rect { y: h.rect.y + top, ..h.rect }))
                 } else if let Some((p, top)) = on_strip {
                     p.hits.iter().find(|h| h.rect.contains(x, y - top)).map(|h| (h.action, Rect { y: h.rect.y + top, ..h.rect }))
                 } else if self.bar.on && y < widgets::bar_bottom(&t) {
@@ -1938,11 +2265,11 @@ impl App {
                         self.trace(&t, x, y + scroll);
                         Drag::Pattern
                     }
-                    _ => Drag::Press { x, y, action, edge: at_edge },
+                    _ => Drag::Press { x, y, action, edge: at_edge, at: now },
                 };
             }
             Touch::Move(x, y) => match std::mem::replace(&mut self.drag, Drag::Idle) {
-                Drag::Press { x: x0, y: y0, action, edge: at_edge } => {
+                Drag::Press { x: x0, y: y0, action, edge: at_edge, at } => {
                     self.tracker.add(now, y);
                     let (dx, dy) = (x - x0, y - y0);
                     self.drag = match at_edge {
@@ -1964,7 +2291,7 @@ impl App {
                                 Drag::Scroll { last: y }
                             }
                         }
-                        _ => Drag::Press { x: x0, y: y0, action, edge: at_edge },
+                        _ => Drag::Press { x: x0, y: y0, action, edge: at_edge, at },
                     };
                 }
                 Drag::Scroll { last } => {
@@ -1999,6 +2326,7 @@ impl App {
                 }
                 Drag::History { last, carry, pitch } => self.drag = self.scroll_history(last, y, carry, pitch),
                 Drag::Waking => self.drag = Drag::Waking,
+                Drag::Held => self.drag = Drag::Held,
                 Drag::Idle => {}
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {
@@ -2041,6 +2369,7 @@ impl App {
                             },
                             Confirm::Decrypt => fx.push(Effect::Decrypt),
                             Confirm::FactoryReset => fx.push(Effect::FactoryReset),
+                            Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
                             Confirm::Flash => {
                                 if let Install::Choosing(choice) = &self.state.install {
                                     let partition = choice.partitions[choice.partition];
@@ -2277,6 +2606,12 @@ mod tests {
             if let Some(h) = p.hits.iter().find(|h| h.action == action) {
                 let (x, y) = h.rect.centre();
                 return (x, y + pinned_top(&t, p, scroll));
+            }
+        }
+        if let Some(d) = &fr.dock {
+            if let Some(h) = d.hits.iter().find(|h| h.action == action) {
+                let (x, y) = h.rect.centre();
+                return (x, y + H as f32 - d.canvas.h as f32);
             }
         }
         let rows = fr.rows.as_ref().expect("control on the page");
@@ -3347,6 +3682,163 @@ mod tests {
         assert_eq!(app.state.file, None);
         assert!(app.key(Key::Back, 0).is_empty(), "at the root, back leaves");
         assert_eq!(app.screen(), Screen::Advanced);
+    }
+
+    /// The file manager in /sdcard, listing a folder and a file.
+    fn in_sdcard(f: &Fonts, i: &DeviceInfo) -> App {
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        tap(&mut app, f, i, Action::Open(Screen::Files));
+        app.set_files("/sdcard".into(), Ok(vec![entry("DCIM", folder(2)), entry("a.zip", FileKind::File)]), LISTED);
+        app
+    }
+
+    #[test]
+    fn an_entry_held_opens_what_can_be_done_with_it_a_folder_too() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        let (x, y) = spot(&mut app, &f, &i, Action::OpenEntry(0));
+        app.touch(Touch::Down(x, y), &f, 1000);
+        assert_eq!(app.deadline(1000), Some(1000 + LONG_PRESS_MS), "the press is timed");
+        assert!(app.tick(1000 + LONG_PRESS_MS - 1).is_empty());
+        assert_eq!(app.tick(1000 + LONG_PRESS_MS), vec![Effect::Haptic], "held long enough, it opens with a tap of the motor");
+        assert_eq!(app.screen(), Screen::FileInfo);
+        assert_eq!(app.state.file.as_ref().map(|e| e.name.as_str()), Some("DCIM"));
+        assert!(app.touch(Touch::Up, &f, 1500).is_empty(), "lifting does not open the folder as well");
+        assert_eq!(app.screen(), Screen::FileInfo);
+    }
+
+    #[test]
+    fn a_picked_entry_goes_into_the_folder_the_bar_is_used_in() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        assert!(tap(&mut app, &f, &i, Action::PickEntry(FileOp::Copy)).is_empty());
+        assert_eq!(app.screen(), Screen::Files, "back to the folders to pick one");
+        assert_eq!(app.state.clip, Some(Clip { op: FileOp::Copy, path: "/sdcard/a.zip".into() }));
+        assert!(app.frame(&f, &i, DataState::Unmounted).dock.is_some(), "the bar is held at the bottom");
+        assert_eq!(tap(&mut app, &f, &i, Action::OpenEntry(0)), vec![Effect::ReadDir("/sdcard/DCIM".into())]);
+        app.set_files("/sdcard/DCIM".into(), Ok(Vec::new()), LISTED);
+        let paste = Effect::Paste { op: FileOp::Copy, path: "/sdcard/a.zip".into(), into: "/sdcard/DCIM".into(), clash: None };
+        assert_eq!(tap(&mut app, &f, &i, Action::Paste), vec![paste]);
+        app.file_job_started(FileTask::Copy { path: "/sdcard/a.zip".into(), into: "/sdcard/DCIM".into() });
+        assert_eq!(app.state.clip, None, "the entry is put down once the copy starts");
+        assert_eq!(app.screen(), Screen::FileJob);
+        app.file_progress((50, 100), (0, 1));
+        assert_eq!(app.key(Key::Back, 0), Vec::new());
+        assert_eq!(app.screen(), Screen::FileJob, "the page stays while the copy runs");
+        app.file_job_ended(JobEnd::Done, 0);
+        assert_eq!(app.screen(), Screen::Files);
+        assert_eq!(app.state.job, None);
+    }
+
+    #[test]
+    fn a_folder_goes_nowhere_inside_itself_and_a_move_nowhere_it_is_already() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        let paste = |app: &mut App, op: FileOp, path: &str| {
+            app.state.clip = Some(Clip { op, path: path.into() });
+            app.toast = None;
+            app.refresh();
+            tap(app, &f, &i, Action::Paste)
+        };
+        assert!(paste(&mut app, FileOp::Copy, "/sdcard").is_empty());
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("不能把「sdcard」放进它自己里面"));
+        assert!(paste(&mut app, FileOp::Move, "/sdcard/a.zip").is_empty());
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("「a.zip」已经在这个文件夹里"));
+        assert!(app.state.clip.is_some(), "the entry stays picked, for another folder");
+        let copy = Effect::Paste { op: FileOp::Copy, path: "/sdcard/a.zip".into(), into: "/sdcard".into(), clash: None };
+        assert_eq!(paste(&mut app, FileOp::Copy, "/sdcard/a.zip"), vec![copy], "a copy where the entry is makes a second one");
+    }
+
+    #[test]
+    fn a_taken_name_waits_for_the_user_to_choose() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        app.state.clip = Some(Clip { op: FileOp::Move, path: "/tmp/a.zip".into() });
+        app.file_clash(FileOp::Move, "/tmp/a.zip".into(), "/sdcard".into(), vec!["a.zip".into()]);
+        assert_eq!(app.screen(), Screen::Clash);
+        let paste = Effect::Paste { op: FileOp::Move, path: "/tmp/a.zip".into(), into: "/sdcard".into(), clash: Some(ClashChoice::KeepBoth) };
+        assert_eq!(tap(&mut app, &f, &i, Action::Resolve(ClashChoice::KeepBoth)), vec![paste]);
+        assert_eq!(app.screen(), Screen::Files);
+        app.file_clash(FileOp::Move, "/tmp/a.zip".into(), "/sdcard".into(), vec!["a.zip".into()]);
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Files, "turning the choice down goes back to the folder");
+        assert!(app.state.clip.is_some(), "with the entry still picked, for another folder");
+        app.file_clash(FileOp::Move, "/tmp/a.zip".into(), "/sdcard".into(), vec!["a.zip".into()]);
+        assert!(tap(&mut app, &f, &i, Action::Resolve(ClashChoice::Skip)).is_empty(), "skipping the entry leaves nothing to do");
+        assert_eq!(app.screen(), Screen::Files);
+        assert_eq!(app.state.clip, None, "and nothing picked");
+    }
+
+    #[test]
+    fn renaming_takes_the_name_typed() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        tap(&mut app, &f, &i, Action::RenameEntry);
+        assert_eq!(app.screen(), Screen::Rename);
+        assert_eq!(app.state.new_name, "a.zip", "the name it has to start from");
+        for _ in 0..4 {
+            tap(&mut app, &f, &i, Action::Type(Cap::Backspace));
+        }
+        type_text(&mut app, &f, &i, "b");
+        let rename = Effect::Rename { path: "/sdcard/a.zip".into(), name: "ab".into() };
+        assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![rename]);
+        app.renamed(Err("rename /sdcard/a.zip to ab: Read-only file system (os error 30)".into()), 0);
+        assert_eq!(app.screen(), Screen::Rename, "a name refused can be typed again");
+        app.renamed(Ok(()), 0);
+        assert_eq!(app.screen(), Screen::Files, "renamed, the folder shows again");
+    }
+
+    #[test]
+    fn a_name_the_folder_cannot_take_is_turned_down_before_renaming() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        tap(&mut app, &f, &i, Action::RenameEntry);
+        let refused =
+            [("", "先输入名称"), ("..", "名称不能是「.」或「..」"), ("x/y", "名称里不能有「/」"), ("DCIM", "这个文件夹里已经有「DCIM」")];
+        for (name, said) in refused {
+            app.state.new_name = name.into();
+            app.toast = None;
+            assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty(), "{name:?} is not renamed to");
+            assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some(said));
+            assert_eq!(app.screen(), Screen::Rename);
+        }
+        app.state.new_name = "a.zip".into();
+        assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty());
+        assert_eq!(app.screen(), Screen::FileInfo, "the name left as it was, the page goes");
+    }
+
+    #[test]
+    fn deleting_asks_with_a_swipe_and_runs_on_its_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        assert!(app.frame(&f, &i, DataState::Unmounted).hits.iter().all(|h| h.action != Action::Confirm(Confirm::DeleteEntry)));
+        tap(&mut app, &f, &i, Action::AskDelete);
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::DeleteEntry), vec![Effect::Delete("/sdcard/a.zip".into())]);
+        app.file_job_started(FileTask::Delete { path: "/sdcard/a.zip".into() });
+        assert_eq!(app.screen(), Screen::FileJob);
+        assert_eq!(tap(&mut app, &f, &i, Action::StopJob), vec![Effect::StopJob]);
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::FileJob, "it stays until stopped");
+        app.file_job_ended(JobEnd::Stopped, 0);
+        assert_eq!(app.screen(), Screen::FileJob, "how it ended stays to be read");
+        app.key(Key::Back, 1000);
+        assert_eq!(app.screen(), Screen::Files, "back past the entry's page, which was for an entry being deleted");
+    }
+
+    #[test]
+    fn work_that_ends_on_its_page_takes_the_title_of_how_it_ended() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        app.file_job_started(FileTask::Copy { path: "/sdcard/a.zip".into(), into: "/tmp".into() });
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 0);
+        app.file_job_ended(JobEnd::Stopped, 0);
+        app.compose(&mut c, &f, &i, DataState::Unmounted, "12:00", 16);
+        assert_eq!(app.titles.as_ref().map(|((title, _), _, _)| *title), Some("复制没有完成"));
     }
 
     #[test]

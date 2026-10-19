@@ -1,6 +1,7 @@
 use crate::app::{
-    Action, Confirm, Damage, FileKind, Frame, HeroArt, Hit, Install, Keys, Part, Pick, Screen, State, Switch,
-    Target, UsbLink, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS,
+    Action, ClashChoice, Confirm, Damage, Dock, FileKind, FileOp, FileTask, Frame, HeroArt, Hit, Install, JobEnd, Keys,
+    Part, Pick, Screen, State, Switch, Target, UsbLink, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF,
+    TARGETS,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -69,6 +70,9 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Erase => erase(cx),
         Screen::CantStart => cant_start(cx),
         Screen::Unhandled => unhandled(cx),
+        Screen::Rename => rename(cx),
+        Screen::Clash => clash(cx),
+        Screen::FileJob => file_job(cx),
     }
 }
 
@@ -83,6 +87,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Slot => ("滑动以切换", true),
         Confirm::Decrypt => ("滑动以解密", false),
         Confirm::FactoryReset => ("滑动以恢复出厂设置", true),
+        Confirm::DeleteEntry => ("滑动以删除", true),
     }
 }
 
@@ -971,7 +976,17 @@ pub fn files(cx: &Ctx) -> Frame {
         Ok(entries) => Some(files::rows(t, f, entries)),
     };
     let pinned = Some(files::strip(t, f, &s.folder));
-    Frame { bg, rows, pinned, ..Frame::new(t, c, Vec::new(), "文件管理", t.m.dp(files::STRIP_TOP_DP)) }
+    // An entry picked to copy or move goes to the folder shown, from the
+    // bar held at the bottom.
+    let dock = s.clip.as_ref().map(|clip| {
+        let go = match clip.op {
+            FileOp::Copy => "复制到这里",
+            FileOp::Move => "移动到这里",
+        };
+        let (canvas, rects) = widgets::dock_bar(t, f, bg, &["取消", go]);
+        Dock { canvas, hits: hits(&rects, &[Action::Unpick, Action::Paste]) }
+    });
+    Frame { bg, rows, pinned, dock, ..Frame::new(t, c, Vec::new(), "文件管理", t.m.dp(files::STRIP_TOP_DP)) }
 }
 
 /// Row `i` of the page's long list over the whole of `c`, sized for it,
@@ -986,16 +1001,20 @@ pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
     }
 }
 
-/// One entry of a folder: what it is, and what can be done with it.
+/// One entry of a folder, a file or a folder: what it is, and what can be
+/// done with it. Deleting asks first, with a swipe.
 pub fn file_info(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let e = s.file.as_ref().expect("the file page shows an entry");
     let mut c = long_page(t);
     let top = t.m.content_top;
+    let folder = matches!(e.kind, FileKind::Folder { .. });
     let mut facts = vec![("名称", e.name.clone()), ("位置", Path::new(&s.folder).join(&e.name).to_string_lossy().into_owned())];
     match &e.kind {
         FileKind::Link { target, .. } => facts.push(("指向", target.clone())),
-        _ => facts.push(("大小", format!("{}（{} 字节）", fmt::file_size(e.size), e.size))),
+        FileKind::Folder { items: Some(n) } => facts.push(("内容", format!("{n} 项"))),
+        FileKind::Folder { items: None } => facts.push(("内容", "访问限制".to_string())),
+        FileKind::File | FileKind::Special => facts.push(("大小", format!("{}（{} 字节）", fmt::file_size(e.size), e.size))),
     }
     facts.push(("修改时间", fmt::datetime(e.modified)));
     facts.push(("权限", format!("{}，所有者 {}，用户组 {}", fmt::mode(e.mode), e.uid, e.gid)));
@@ -1006,13 +1025,114 @@ pub fn file_info(cx: &Ctx) -> Frame {
         Row::new("重命名"),
         Row::new("删除").tint(t.pal.danger).trail(Trail::None),
     ]);
-    let out = hits(&actions.rows, &[
-        Action::Unavailable("复制还没实现"),
-        Action::Unavailable("移动还没实现"),
-        Action::Unavailable("重命名还没实现"),
-        Action::Unavailable("删除还没实现"),
+    let mut out = hits(&actions.rows, &[
+        Action::PickEntry(FileOp::Copy),
+        Action::PickEntry(FileOp::Move),
+        Action::RenameEntry,
+        Action::AskDelete,
     ]);
-    Frame::new(t, fit(c, t, actions.bottom), out, "文件信息", top)
+    let mut bottom = actions.bottom;
+    if s.asking_delete {
+        let what = if folder {
+            format!("「{}」和里面的全部内容都会删除，删除后无法恢复。", e.name)
+        } else {
+            format!("「{}」会被删除，删除后无法恢复。", e.name)
+        };
+        let y = widgets::footnote(&mut c, t, f, actions.bottom, &what);
+        let (label, danger) = confirm_label(Confirm::DeleteEntry);
+        let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+        out.push(Hit { rect: track, action: Action::Confirm(Confirm::DeleteEntry) });
+        bottom = track.y + track.h;
+    }
+    let title = if folder { "文件夹信息" } else { "文件信息" };
+    Frame::new(t, fit(c, t, bottom), out, title, top)
+}
+
+/// A new name for the entry the file page shows, typed on the keyboard.
+pub fn rename(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let y = widgets::text_field(&mut c, t, f, top, &s.new_name);
+    widgets::footnote(&mut c, t, f, y, "名称里不能有「/」。按「完成」改名。");
+    keyboard_hits(&mut c, t, f, s, "完成", &mut out);
+    Frame::new(t, c, out, "重命名", top)
+}
+
+/// The folder an entry goes to already holds its name: what to do.
+pub fn clash(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let (clip, into, _) = s.clash.as_ref().expect("the clash page shows a clash");
+    let name = Path::new(&clip.path).file_name().map_or_else(|| clip.path.clone(), |n| n.to_string_lossy().into_owned());
+    let verb = match clip.op {
+        FileOp::Copy => "复制",
+        FileOp::Move => "移动",
+    };
+    let mut c = page(t);
+    let top = t.m.content_top;
+    let y = widgets::paragraph(&mut c, t, f, top, &format!("「{into}」里已经有一项叫「{name}」。"));
+    let skip = format!("保留已有的，不{verb}这一项");
+    let choices = widgets::list(&mut c, t, f, y + t.m.dp(12.0), &[
+        Row::new("替换").subtitle("删除已有的，换成这一项"),
+        Row::new("跳过").subtitle(&skip),
+        Row::new("两者都保留").subtitle("这一项改个名字，放在已有的旁边"),
+    ]);
+    let out = hits(&choices.rows, &[
+        Action::Resolve(ClashChoice::Replace),
+        Action::Resolve(ClashChoice::Skip),
+        Action::Resolve(ClashChoice::KeepBoth),
+    ]);
+    Frame::new(t, c, out, "名称已存在", top)
+}
+
+/// Copying, moving or deleting: how far it has come and a way to stop it,
+/// then, if it did not finish, why.
+pub fn file_job(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let job = s.job.as_ref().expect("the job page shows work on files");
+    let (verb, path, titles) = match &job.task {
+        FileTask::Copy { path, .. } => ("复制", path, ("正在复制", "复制没有完成")),
+        FileTask::Move { path, .. } => ("移动", path, ("正在移动", "移动没有完成")),
+        FileTask::Delete { path } => ("删除", path, ("正在删除", "删除没有完成")),
+    };
+    let name = Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+    let share = |(done, total): (u64, u64)| if total == 0 { 0.0 } else { done as f32 / total as f32 };
+    // The bar stays while the work measures, so that the button under it
+    // does not move. Deleting, and copying entries that hold no bytes, is
+    // counted in entries.
+    let (detail, done) = match (job.progress, &job.task) {
+        (None, _) => ("正在准备".to_string(), 0.0),
+        (Some((bytes, _)), FileTask::Copy { .. } | FileTask::Move { .. }) if bytes.1 > 0 => {
+            (format!("已{verb} {}，共 {}", fmt::file_size(bytes.0), fmt::file_size(bytes.1)), share(bytes))
+        }
+        (Some((_, entries)), _) => (format!("已{verb} {} 项，共 {} 项", entries.0, entries.1), share(entries)),
+    };
+    let mut c = page(t);
+    let top = t.m.content_top;
+    let y = widgets::progress_card(&mut c, t, f, top, &name, &detail, Some(done));
+    let mut out = Vec::new();
+    match &job.outcome {
+        None => {
+            let label = if job.stopping { "正在停止" } else { "停止" };
+            let stop = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(label).trail(Trail::None)]);
+            if !job.stopping {
+                out.extend(hits(&stop.rows, &[Action::StopJob]));
+            }
+        }
+        Some(end) => {
+            let why = match end {
+                JobEnd::Stopped => format!("已停止。停止前已经{verb}的部分保持原样。"),
+                JobEnd::Failed(why) => why.clone(),
+                JobEnd::Done => unreachable!("work done leaves its page"),
+            };
+            let y = widgets::footnote(&mut c, t, f, y, &why);
+            let finish = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new("完成").trail(Trail::None)]);
+            out.extend(hits(&finish.rows, &[Action::Back]));
+        }
+    }
+    let title = if job.outcome.is_none() { titles.0 } else { titles.1 };
+    Frame { back: job.outcome.is_some(), ..Frame::new(t, c, out, title, top) }
 }
 
 /// A shell on a terminal: the screen it writes, the keys a phone keyboard

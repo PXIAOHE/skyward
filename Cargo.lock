@@ -1111,6 +1111,7 @@ dependencies = [
  "skyward-block",
  "skyward-config",
  "skyward-crypto",
+ "skyward-files",
  "skyward-info",
  "skyward-install",
  "skyward-lp",

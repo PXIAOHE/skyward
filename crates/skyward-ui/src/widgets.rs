@@ -735,6 +735,50 @@ pub fn paragraph(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, text: &str) -> f3
     top
 }
 
+/// A bar held at the bottom of the screen on the page colour `bg`, with
+/// buttons side by side, the last in the accent colour, and room under
+/// them for the gesture area. Returns the bar and where each button is on
+/// it.
+pub fn dock_bar(t: &Theme, f: &Fonts, bg: Rgba, labels: &[&str]) -> (Canvas, Vec<Rect>) {
+    let m = &t.m;
+    let (h, pad, gap) = (m.dp(48.0), m.dp(12.0), m.dp(12.0));
+    let mut c = Canvas::new(m.w, (pad + h + m.dp(KEYBOARD_BOTTOM_DP)).ceil() as u32);
+    c.clear(bg);
+    let n = labels.len() as f32;
+    let w = (m.w as f32 - m.margin * 2.0 - gap * (n - 1.0)) / n;
+    let mut rects = Vec::new();
+    for (k, label) in labels.iter().enumerate() {
+        let x = m.margin + k as f32 * (w + gap);
+        let (fill, ink) = if k + 1 == labels.len() { (t.pal.accent, Rgba::rgb(255, 255, 255)) } else { (t.pal.search, t.pal.text) };
+        c.fill_round_rect(x, pad, w, h, h / 2.0, fill);
+        c.text_center(&f.heading, label, x + w / 2.0, pad + h / 2.0, m.row_title_px, ink);
+        rects.push(Rect::new(x, pad, w, h));
+    }
+    (c, rects)
+}
+
+/// A card holding text being typed, with the caret after it; text too long
+/// for the card shows its end, where the caret is. Returns where the card
+/// ends.
+pub fn text_field(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, text: &str) -> f32 {
+    let m = &t.m;
+    let (x0, w, h) = (m.margin, m.w as f32 - m.margin * 2.0, m.dp(56.0));
+    c.fill_round_rect(x0, top, w, h, m.card_radius, t.pal.card);
+    let (x, room) = (x0 + m.inner, w - m.inner * 2.0 - m.dp(4.0));
+    let px = m.row_title_px;
+    let mut shown = text;
+    while c.text_width(&f.heading, shown, px) > room {
+        let mut rest = shown.chars();
+        rest.next();
+        shown = rest.as_str();
+    }
+    let (ink_top, ink_bottom) = f.heading.ink(px);
+    let base = top + h / 2.0 - (ink_top + ink_bottom) / 2.0;
+    let advance = c.text(&f.heading, shown, x, base, px, t.pal.text, None);
+    c.fill_rect(x + advance + m.dp(1.0), top + m.dp(16.0), m.dp(2.0), h - m.dp(32.0), t.pal.accent);
+    top + h
+}
+
 /// A full-width button in the accent colour, for a page's one action that
 /// destroys nothing. Returns its rect.
 pub fn button(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str) -> Rect {
