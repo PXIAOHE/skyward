@@ -80,7 +80,7 @@ impl Drop for Decryptor {
 
 /// Do `work` with the phone's key service, reached afresh for it, and say
 /// why it failed in words for the page.
-fn with_key_service<T>(work: impl FnOnce(&KeyMint) -> Result<T>) -> Result<T, String> {
+pub fn with_key_service<T>(work: impl FnOnce(&KeyMint) -> Result<T>) -> Result<T, String> {
     let done = (|| {
         let binder = Binder::open()?;
         let service = KeyMint::open(&binder)?;

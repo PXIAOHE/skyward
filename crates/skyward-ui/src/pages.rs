@@ -1,7 +1,7 @@
 use crate::app::{
-    Action, ClashChoice, Confirm, Damage, Data, Dock, FileKind, FileOp, FileTask, Frame, HeroArt, Hit, Install, JobEnd,
-    Keys, Part, Pick, Screen, State, Switch, Target, UsbLink, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF,
-    TARGETS,
+    Action, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Frame, HeroArt, Hit, Install,
+    JobEnd, Keys, Pick, Screen, State, Switch, Target, UsbLink, Wipe, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES,
+    SCREEN_OFF, TARGETS, WIPES,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -455,6 +455,7 @@ pub fn decrypt(cx: &Ctx) -> Frame {
         Data::Closed | Data::Opening => data_status(cx, c, Icon::Lock, "解密数据分区", Some("正在读取锁屏方式"), None),
         Data::Open => data_status(cx, c, Icon::Folder, "数据分区已解密", Some("文件管理里可以看到手机上的文件"), None),
         Data::Failed(why) => data_status(cx, c, Icon::Lock, "数据分区没有打开", None, Some(why)),
+        Data::Erased => data_status(cx, c, Icon::Wipe, "data 分区已清除", Some("下次开机时将重新建立"), None),
     }
 }
 
@@ -478,7 +479,7 @@ fn data_status(cx: &Ctx, mut c: Canvas, icon: Icon, title: &str, note: Option<&s
         out.push(Hit { rect: again, action: Action::OpenData });
     }
     let leave_cy = m.h as f32 - m.dp(64.0);
-    let leave = if cx.state.data == Data::Open { "完成" } else { "暂不解密" };
+    let leave = if matches!(cx.state.data, Data::Open | Data::Erased) { "完成" } else { "暂不解密" };
     c.text_center(&f.heading, leave, x, leave_cy, m.row_title_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(x - m.dp(80.0), leave_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
     Frame { header: false, ..Frame::new(t, c, out, "解密", 0.0) }
@@ -804,25 +805,59 @@ fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Optio
     }
 }
 
-/// Destructive wipe with the partitions to clear.
+/// What the wipe page lists of [`WIPES`] beyond everything, under the
+/// partition each is in.
+const WIPE_GROUPS: [(&str, &[Wipe]); 2] = [("data 分区", &[Wipe::Media, Wipe::Art]), ("cache 分区", &[Wipe::Cache])];
+
+/// A choice of the wipe page as it lists it: its title, and exactly what it
+/// erases.
+fn wipe_row(w: Wipe, s: &State) -> (&'static str, String) {
+    match w {
+        Wipe::All => {
+            let also = if s.cache_partition { "metadata 和 cache 分区" } else { "metadata 分区" };
+            ("全部数据", format!("清空 data 分区，并格式化 {also}，包括应用、账户、设置和内部存储"))
+        }
+        Wipe::Media => ("内部存储", "/data/media，即 /sdcard 中的照片、视频和文件".into()),
+        Wipe::Art => (
+            "ART 缓存",
+            "/data/dalvik-cache、/data/misc/apexdata/com.android.art/dalvik-cache，下次开机时重新编译，启动时间较长".into(),
+        ),
+        Wipe::Cache => ("全部内容", "格式化 cache 分区，保留 recovery 文件夹中的日志".into()),
+    }
+}
+
+/// What to erase: everything, as a factory reset does, or parts of it on
+/// their own, the cache partition among them where the phone has one; then
+/// a swipe erases what is chosen.
 pub fn wipe(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let chosen = |w: Wipe| s.wipe[WIPES.iter().position(|&x| x == w).expect("every choice is one of WIPES")];
+    let mut c = long_page(t);
     let mut out = Vec::new();
     let top = t.m.content_top;
-    let y = widgets::section_first(&mut c, t, f, top, "选择要清除的内容");
-    let items = widgets::list(&mut c, t, f, y, &[
-        Row::new("用户数据").subtitle("应用、账户与设置").trail(Trail::Check(s.wipe[0])),
-        Row::new("内部存储").subtitle("照片、视频与下载的文件").trail(Trail::Check(s.wipe[1])),
-        Row::new("ART 缓存").subtitle("应用的预编译代码，开机时重新生成").trail(Trail::Check(s.wipe[2])),
-        Row::new("Metadata").subtitle("加密元数据，清除后「数据」分区将无法解密").trail(Trail::Check(s.wipe[3])),
-    ]);
-    out.extend(hits(&items.rows, &[Action::WipeItem(0), Action::WipeItem(1), Action::WipeItem(2), Action::WipeItem(3)]));
-    let y = widgets::footnote(&mut c, t, f, items.bottom, "清除后无法恢复。内部存储里的照片和文件不会一起删除，除非你勾选了它。");
+    let y = widgets::section_first(&mut c, t, f, top, "恢复出厂设置");
+    let (name, sub) = wipe_row(Wipe::All, s);
+    let all = widgets::list(&mut c, t, f, y, &[Row::new(name).subtitle(&sub).trail(Trail::Check(chosen(Wipe::All)))]);
+    out.extend(hits(&all.rows, &[Action::WipeItem(Wipe::All)]));
+    let mut y = widgets::footnote(&mut c, t, f, all.bottom, "系统和已安装的更新不受影响，清除后需重新设置手机。");
+    for (title, items) in WIPE_GROUPS {
+        let shown: Vec<Wipe> = items.iter().copied().filter(|&w| w != Wipe::Cache || s.cache_partition).collect();
+        if shown.is_empty() {
+            continue;
+        }
+        let below = widgets::section(&mut c, t, f, y, title);
+        let texts: Vec<(&str, String)> = shown.iter().map(|&w| wipe_row(w, s)).collect();
+        let rows: Vec<Row> =
+            shown.iter().zip(&texts).map(|(&w, (name, sub))| Row::new(name).subtitle(sub).trail(Trail::Check(chosen(w)))).collect();
+        let list = widgets::list(&mut c, t, f, below, &rows);
+        out.extend(hits(&list.rows, &shown.iter().map(|&w| Action::WipeItem(w)).collect::<Vec<_>>()));
+        y = list.bottom;
+    }
+    let y = widgets::footnote(&mut c, t, f, y, "清除后无法恢复。");
     let (label, danger) = confirm_label(Confirm::Wipe);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Wipe) });
-    Frame::new(t, c, out, "清除数据", top)
+    Frame::new(t, fit(c, t, track.y + track.h), out, "清除数据", top)
 }
 
 /// A page laid out above the on-screen keyboard: where the keyboard's top
@@ -1357,14 +1392,6 @@ pub fn fastboot(cx: &Ctx) -> Frame {
 }
 
 /// What a part erasing goes through is called on its page.
-fn part_name(part: Part) -> &'static str {
-    match part {
-        Part::Data => "用户数据",
-        Part::Cache => "缓存",
-        Part::Metadata => "加密元数据",
-    }
-}
-
 /// Where to go once what the system asked for has stopped or cannot be
 /// done, in the order the pages list them.
 const AFTERWARDS: [(&str, Action); 3] = [
@@ -1373,63 +1400,83 @@ const AFTERWARDS: [(&str, Action); 3] = [
     ("关机", Action::RebootTo(Target::PowerOff)),
 ];
 
-/// The list of [`AFTERWARDS`] at `y`, and where it ends.
-fn afterwards(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, out: &mut Vec<Hit>) -> f32 {
-    let rows: Vec<Row> = AFTERWARDS.iter().map(|&(title, _)| Row::new(title).trail(Trail::None)).collect();
+/// The list of [`AFTERWARDS`] at `y`, and where it ends. Work the user
+/// chose in the recovery goes back to its home page, rather than into it.
+fn afterwards(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, asked: bool, out: &mut Vec<Hit>) -> f32 {
+    let rows: Vec<Row> = AFTERWARDS
+        .iter()
+        .map(|&(title, action)| Row::new(if action == Action::Dismiss && !asked { "返回主页" } else { title }).trail(Trail::None))
+        .collect();
     let choices = widgets::list(c, t, f, y, &rows);
     out.extend(hits(&choices.rows, &AFTERWARDS.map(|(_, action)| action)));
     choices.bottom
 }
 
-/// Erasing what the system asked to erase: each part and how far it has
-/// come, and once erasing has stopped, why, and where to go.
+/// Erasing: each part and how far it has come, and once erasing has
+/// stopped, why. What the system asked for leaves on its own once it is
+/// done, and offers where to go only if it stops; what the user chose
+/// offers where to go once it ends either way.
 pub fn erase(cx: &Ctx) -> Frame {
+    use std::cmp::Ordering;
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let e = &s.erase;
-    let mut c = page(t);
+    let mut c = long_page(t);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let failed = matches!(e.outcome, Some(Err(_)));
+    // Only a part that went wrong was under way; whatever else stopped
+    // erasing stopped it before any part began.
+    let begun = !failed || matches!(e.outcome, Some(Err(EraseStop::Failed(..))));
     let heading = match &e.outcome {
         None => "正在清除",
         Some(Ok(())) => "已清除",
-        Some(Err(_)) => "清除没有完成",
+        Some(Err(_)) => "清除未完成",
     };
     let mut y = widgets::section_first(&mut c, t, f, top, heading);
     if !e.parts.is_empty() {
-        let rows: Vec<Row> = e
-            .parts
-            .iter()
-            .enumerate()
-            .map(|(k, &part)| {
-                let state = match (k.cmp(&e.done), failed) {
-                    (std::cmp::Ordering::Less, _) => "已清除",
-                    (std::cmp::Ordering::Equal, false) => "正在清除",
-                    (std::cmp::Ordering::Equal, true) => "没有完成",
-                    (std::cmp::Ordering::Greater, false) => "等待",
-                    (std::cmp::Ordering::Greater, true) => "没有清除",
-                };
-                Row::new(part_name(part)).trail(Trail::Text(state))
+        let states: Vec<String> = (0..e.parts.len())
+            .map(|k| match (k.cmp(&e.done), failed) {
+                (Ordering::Less, _) => "已清除".into(),
+                (Ordering::Equal, false) => match e.progress {
+                    Some((done, total)) if total > 0 => format!("正在清除 {}%", percent(share(done, total))),
+                    _ => "正在清除".into(),
+                },
+                (Ordering::Equal, true) if begun => "未完成".into(),
+                (Ordering::Greater, false) => "等待中".into(),
+                (Ordering::Equal | Ordering::Greater, true) => "未清除".into(),
             })
             .collect();
+        let rows: Vec<Row> = e.parts.iter().zip(&states).map(|(&part, state)| Row::new(fmt::part(part)).trail(Trail::Text(state))).collect();
         y = widgets::list(&mut c, t, f, y, &rows).bottom;
     }
     let end = if s.asked.shutdown_after { "关机" } else { "重启" };
-    let note = match (&e.outcome, e.reset) {
-        (Some(Err(why)), _) => why.clone(),
-        (_, true) => format!("手机上的全部用户数据都会清除，清除完成后手机会自动{end}。"),
-        (_, false) => format!("清除完成后手机会自动{end}。"),
+    let notes = match (&e.outcome, e.asked, e.reset) {
+        (Some(Err(stop)), _, _) => {
+            let (what, detail) = fmt::erase_stop(stop);
+            std::iter::once(what).chain(detail).collect()
+        }
+        (_, true, true) => vec![format!("手机上的所有数据将被清除，完成后将自动{end}。")],
+        (_, true, false) => vec![format!("完成后将自动{end}。")],
+        (None, false, _) => vec!["清除完成前，请不要关机。".to_string()],
+        (Some(Ok(())), false, true) => vec!["下次开机时将重新建立 data 分区，启动时间较长。".to_string()],
+        (Some(Ok(())), false, false) => Vec::new(),
     };
-    y = widgets::footnote(&mut c, t, f, y, &note);
-    if let Some(reason) = &s.asked.reason {
+    for note in &notes {
+        y = widgets::footnote(&mut c, t, f, y, note);
+    }
+    if let (true, Some(reason)) = (e.asked, &s.asked.reason) {
         y = widgets::info_card(&mut c, t, f, y + t.m.dp(12.0), &[("原因", reason.clone())]);
     }
-    if failed {
-        let y = widgets::section(&mut c, t, f, y, "接下来");
-        afterwards(&mut c, t, f, y, &mut out);
+    if failed || (!e.asked && e.outcome.is_some()) {
+        let below = widgets::section(&mut c, t, f, y, "操作");
+        y = afterwards(&mut c, t, f, below, e.asked, &mut out);
     }
-    let title = if e.reset { "恢复出厂设置" } else { "清除缓存" };
-    Frame { back: false, ..Frame::new(t, c, out, title, top) }
+    let title = match (e.reset, e.asked) {
+        (true, _) => "恢复出厂设置",
+        (false, true) => "清除缓存",
+        (false, false) => "清除数据",
+    };
+    Frame { back: false, ..Frame::new(t, fit(c, t, y), out, title, top) }
 }
 
 /// The system could not start Android and asks whether to erase all user
@@ -1477,6 +1524,6 @@ pub fn unhandled(cx: &Ctx) -> Frame {
     let y = widgets::info_card(&mut c, t, f, top, &items);
     let y = widgets::footnote(&mut c, t, f, y, "Skyward 不处理系统的这项请求，手机上没有任何改动。");
     let y = widgets::section(&mut c, t, f, y, "接下来");
-    afterwards(&mut c, t, f, y, &mut out);
+    afterwards(&mut c, t, f, y, true, &mut out);
     Frame { back: false, ..Frame::new(t, c, out, "无法处理的请求", top) }
 }

@@ -13,7 +13,7 @@ use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Stage};
-use skyward_vab::Slot;
+use skyward_vab::{Hold, Slot};
 
 /// The pages of the recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +249,9 @@ pub enum Data {
     Open,
     /// Not opened, and why.
     Failed(String),
+    /// Erased whole: nothing opens until the system makes it afresh, as it
+    /// next starts.
+    Erased,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,6 +269,20 @@ pub enum Confirm {
     DeleteEntry,
 }
 
+/// What the wipe page erases: everything a factory reset erases, or any of
+/// the parts after it on their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wipe {
+    All,
+    Media,
+    Art,
+    /// The cache partition, on phones that have one.
+    Cache,
+}
+
+/// What the wipe page offers, in the order it lists them.
+pub const WIPES: [Wipe; 4] = [Wipe::All, Wipe::Media, Wipe::Art, Wipe::Cache];
+
 /// A part of the phone that erasing goes through, in the order it does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -273,18 +290,47 @@ pub enum Part {
     Cache,
     /// /metadata, which holds the key the data partition is opened with.
     Metadata,
+    /// The files users share between apps, in the data partition.
+    Media,
+    /// What ART compiled ahead of time, in the data partition.
+    Art,
 }
 
 /// Erasing as its page shows it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Erase {
-    /// All user data, rather than the cache alone.
+    /// Everything users keep on the phone, as a factory reset erases it.
     pub reset: bool,
+    /// The system asked for it before the recovery started; once it is
+    /// done, the phone leaves on its own.
+    pub asked: bool,
     pub parts: Vec<Part>,
     /// How many of `parts` are erased; the one after them is under way.
     pub done: usize,
+    /// How far the part under way has come, entries of how many, where it
+    /// tells.
+    pub progress: Option<(u64, u64)>,
     /// How erasing ended: done, or why it stopped.
-    pub outcome: Option<Result<(), String>>,
+    pub outcome: Option<Result<(), EraseStop>>,
+}
+
+/// Why erasing did not start, or stopped short.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EraseStop {
+    /// An update has to be finished by the system first.
+    Update(Hold),
+    /// The system does not make an emptied data partition afresh as it
+    /// starts, so it is not erased this way.
+    NotRebuilt,
+    /// The phone has no cache partition.
+    NoCache,
+    /// The data partition is erased already, and holds nothing until the
+    /// system makes it afresh.
+    Erased,
+    /// The data partition did not open, so nothing in it was erased: why.
+    Closed(String),
+    /// Erasing this part went wrong: what the system said.
+    Failed(Part, String),
 }
 
 /// What the system asked of the recovery before it started, as the pages
@@ -422,7 +468,8 @@ pub enum Action {
     Theme { dark: bool },
     Toggle(Switch),
     RebootTarget(usize),
-    WipeItem(usize),
+    /// Choose or leave out what the wipe page erases.
+    WipeItem(Wipe),
     /// The brightness track: touching or dragging it sets the level.
     Brightness,
     /// Mount or unmount the mount page's partition at this index.
@@ -647,7 +694,10 @@ pub struct State {
     pub screen_off: usize,
     pub vibrate: bool,
     pub reboot: usize,
+    /// What the wipe page has chosen, by place in [`WIPES`].
     pub wipe: [bool; 4],
+    /// The phone has a cache partition, which the wipe page then offers.
+    pub cache_partition: bool,
     pub pattern: Vec<usize>,
     /// How far the swipe-to-confirm knob is dragged, 0 to 1.
     pub confirm: f32,
@@ -717,7 +767,8 @@ impl Default for State {
             screen_off: 3,
             vibrate: true,
             reboot: 0,
-            wipe: [true, false, true, false],
+            wipe: [false; 4],
+            cache_partition: false,
             pattern: Vec::new(),
             confirm: 0.0,
             install: Install::Idle,
@@ -805,6 +856,10 @@ pub enum Effect {
     /// Erase all user data, as a factory reset does, telling how it goes
     /// with [`App::erase_at`] and [`App::erase_ended`].
     FactoryReset,
+    /// Erase what the wipe page has chosen, [`Wipe::All`] as a factory
+    /// reset does, telling how it goes with [`App::erase_at`],
+    /// [`App::erase_progress`] and [`App::erase_ended`].
+    Wipe(Vec<Wipe>),
     /// Forget what the system asked of the recovery, so that the next start
     /// goes where its reboot reason says.
     Dismiss,
@@ -1545,9 +1600,10 @@ impl App {
     }
 
     /// Erasing has begun, going through `parts`: its page is the only one
-    /// until it ends.
-    pub fn erase_started(&mut self, reset: bool, parts: Vec<Part>) {
-        self.state.erase = Erase { reset, parts, done: 0, outcome: None };
+    /// until it ends. `reset` for a factory reset, `asked` when the system
+    /// asked for it before the recovery started.
+    pub fn erase_started(&mut self, reset: bool, asked: bool, parts: Vec<Part>) {
+        self.state.erase = Erase { reset, asked, parts, done: 0, progress: None, outcome: None };
         self.stack = vec![(Screen::Erase, 0.0)];
         self.settle_page();
         self.refresh();
@@ -1557,17 +1613,32 @@ impl App {
     pub fn erase_at(&mut self, part: Part) {
         let erase = &mut self.state.erase;
         erase.done = erase.parts.iter().position(|&p| p == part).expect("erasing comes only to the parts it set out with");
+        erase.progress = None;
         self.refresh();
     }
 
-    /// Erasing has ended; one that stopped wakes the panel, since what
-    /// comes next is the user's to choose.
-    pub fn erase_ended(&mut self, outcome: Result<(), String>, now: u64) {
+    /// The part under way has come `done` entries of `total`.
+    pub fn erase_progress(&mut self, done: u64, total: u64) {
+        self.state.erase.progress = Some((done, total));
+        self.refresh();
+    }
+
+    /// Erasing has ended. What comes next is the user's to choose and the
+    /// panel lights for it, unless the system asked for the erasing and it
+    /// went well: the phone then leaves on its own. A data partition
+    /// erased whole opens no more until the system makes it afresh.
+    pub fn erase_ended(&mut self, outcome: Result<(), EraseStop>, now: u64) {
         let erase = &mut self.state.erase;
         if outcome.is_ok() {
             erase.done = erase.parts.len();
-        } else {
+        }
+        erase.progress = None;
+        let data_gone = erase.parts.iter().position(|&p| p == Part::Data).is_some_and(|k| k < erase.done);
+        if outcome.is_err() || !erase.asked {
             self.wake(now);
+        }
+        if data_gone {
+            self.state.data = Data::Erased;
         }
         self.state.erase.outcome = Some(outcome);
         self.refresh();
@@ -1979,8 +2050,19 @@ impl App {
                 self.state.reboot = i;
                 self.refresh();
             }
-            Action::WipeItem(i) => {
-                self.state.wipe[i] = !self.state.wipe[i];
+            // Everything takes in every part, so choosing it leaves the
+            // parts out, and choosing a part on its own leaves it out.
+            Action::WipeItem(item) => {
+                let k = WIPES.iter().position(|&w| w == item).expect("the page offers only what it lists");
+                let on = !self.state.wipe[k];
+                match (on, item) {
+                    (true, Wipe::All) => self.state.wipe = [true, false, false, false],
+                    (true, _) => {
+                        self.state.wipe[0] = false;
+                        self.state.wipe[k] = true;
+                    }
+                    (false, _) => self.state.wipe[k] = false,
+                }
                 self.refresh();
             }
             Action::Confirm(_) => self.say("按住圆形按钮向右滑动", now),
@@ -2443,7 +2525,13 @@ impl App {
                     if done {
                         match which {
                             Confirm::Reboot => fx.push(Effect::Reboot(TARGETS[self.state.reboot])),
-                            Confirm::Wipe => self.say("清除功能还没实现", now),
+                            Confirm::Wipe => {
+                                let chosen: Vec<Wipe> = WIPES.iter().zip(self.state.wipe).filter(|(_, on)| *on).map(|(&w, _)| w).collect();
+                                match chosen.is_empty() {
+                                    true => self.say("请选择要清除的内容", now),
+                                    false => fx.push(Effect::Wipe(chosen)),
+                                }
+                            }
                             Confirm::Backup => self.say("备份还没实现", now),
                             Confirm::Restore => self.say("恢复还没实现", now),
                             Confirm::Slot => match self.state.next_slot {
@@ -3432,7 +3520,7 @@ mod tests {
     fn erasing_goes_part_by_part_and_offers_a_way_out_once_it_stops() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::CantStart, W, H, PPD);
-        app.erase_started(true, vec![Part::Data, Part::Metadata]);
+        app.erase_started(true, true, vec![Part::Data, Part::Metadata]);
         assert_eq!(app.screen(), Screen::Erase);
         assert!(app.frame(&f, &i).hits.is_empty(), "nothing is to be done while erasing");
         app.key(Key::Back, 0);
@@ -3441,8 +3529,9 @@ mod tests {
         assert_eq!(app.state.erase.done, 1);
         app.key(Key::Power, 0);
         assert!(!app.display_on());
-        app.erase_ended(Err("make_f2fs ended with exit status: 1".into()), 1000);
+        app.erase_ended(Err(EraseStop::Failed(Part::Metadata, "make_f2fs ended with exit status: 1".into())), 1000);
         assert!(app.display_on(), "what comes next is the user's to choose");
+        assert_eq!(app.state.data, Data::Erased, "the data partition went before /metadata failed");
         let later = 2000;
         assert_eq!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::PowerOff), later), vec![Effect::Reboot(Target::PowerOff)]);
         assert_eq!(tap_at(&mut app, &f, &i, Action::Dismiss, later), vec![Effect::Dismiss]);
@@ -3453,10 +3542,77 @@ mod tests {
     fn erasing_that_ends_well_leaves_nothing_to_choose() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
-        app.erase_started(false, vec![Part::Cache]);
+        app.erase_started(false, true, vec![Part::Cache]);
         app.erase_ended(Ok(()), 0);
         assert_eq!(app.state.erase.done, 1, "every part is erased");
         assert!(app.frame(&f, &i).hits.is_empty(), "the runtime starts the system at once");
+        assert_eq!(app.state.data, Data::Closed, "the data partition was not part of it");
+    }
+
+    #[test]
+    fn the_wipe_page_erases_everything_or_the_parts_chosen() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Wipe, &f, &i);
+        assert!(swipe(&mut app, &f, &i, Confirm::Wipe).is_empty(), "nothing is chosen at first");
+        tap(&mut app, &f, &i, Action::WipeItem(Wipe::Media));
+        tap(&mut app, &f, &i, Action::WipeItem(Wipe::Art));
+        assert_eq!(app.state.wipe, [false, true, true, false]);
+        tap(&mut app, &f, &i, Action::WipeItem(Wipe::All));
+        assert_eq!(app.state.wipe, [true, false, false, false], "everything takes the parts in");
+        tap(&mut app, &f, &i, Action::WipeItem(Wipe::Art));
+        assert_eq!(app.state.wipe, [false, false, true, false], "a part on its own leaves everything out");
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Wipe), vec![Effect::Wipe(vec![Wipe::Art])]);
+        tap(&mut app, &f, &i, Action::WipeItem(Wipe::Art));
+        assert_eq!(app.state.wipe, [false; 4], "tapped again, a part is left out");
+        tap(&mut app, &f, &i, Action::WipeItem(Wipe::All));
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Wipe), vec![Effect::Wipe(vec![Wipe::All])]);
+    }
+
+    #[test]
+    fn the_cache_partition_is_offered_only_on_a_phone_that_has_one() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Wipe, &f, &i);
+        let offered = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::WipeItem(Wipe::Cache));
+        assert!(!offered(&mut app));
+        app.state.cache_partition = true;
+        app.refresh();
+        assert!(offered(&mut app));
+        tap(&mut app, &f, &i, Action::WipeItem(Wipe::Cache));
+        tap(&mut app, &f, &i, Action::WipeItem(Wipe::Media));
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Wipe), vec![Effect::Wipe(vec![Wipe::Media, Wipe::Cache])], "in the order listed");
+    }
+
+    #[test]
+    fn erasing_the_user_chose_tells_its_progress_and_waits_for_them_at_the_end() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.erase_started(false, false, vec![Part::Media, Part::Art]);
+        app.erase_progress(30, 120);
+        assert_eq!(app.state.erase.progress, Some((30, 120)));
+        app.erase_at(Part::Art);
+        assert_eq!(app.state.erase.progress, None, "the next part starts from nothing");
+        app.key(Key::Power, 0);
+        assert!(!app.display_on());
+        app.erase_ended(Ok(()), 1000);
+        assert!(app.display_on(), "how it ended waits to be read");
+        assert_eq!(app.state.data, Data::Closed, "the data partition itself stays");
+        let later = 2000;
+        assert_eq!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), later), vec![Effect::Reboot(Target::System)]);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Dismiss, later), vec![Effect::Dismiss]);
+        assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn a_data_partition_erased_whole_is_not_opened_again() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.data = Data::Open;
+        app.erase_started(true, false, vec![Part::Data, Part::Metadata]);
+        app.erase_ended(Ok(()), 0);
+        assert_eq!(app.state.data, Data::Erased);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Dismiss, 1000), vec![Effect::Dismiss]);
+        assert!(tap_at(&mut app, &f, &i, Action::Open(Screen::Decrypt), 1000).is_empty(), "nothing opens until the system makes it afresh");
+        assert_eq!(app.screen(), Screen::Decrypt);
     }
 
     #[test]

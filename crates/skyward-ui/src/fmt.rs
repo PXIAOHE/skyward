@@ -1,8 +1,8 @@
-use crate::app::{Data, FileKind, FileRow, MountFailure, BACKUP_PARTS};
+use crate::app::{Data, EraseStop, FileKind, FileRow, MountFailure, Part, BACKUP_PARTS};
 use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
-use skyward_vab::{Slot, SnapshotState};
+use skyward_vab::{Hold, Slot, SnapshotState};
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -193,6 +193,45 @@ pub fn data(d: &Data) -> &'static str {
         Data::Closed | Data::Opening | Data::Failed(_) => "未挂载",
         Data::Locked { .. } => "未解密",
         Data::Open => "已解密",
+        Data::Erased => "已清除",
+    }
+}
+
+/// A part of the phone erasing goes through, as its page names it.
+pub fn part(p: Part) -> &'static str {
+    match p {
+        Part::Data => "data 分区",
+        Part::Cache => "cache 分区",
+        Part::Metadata => "metadata 分区",
+        Part::Media => "内部存储",
+        Part::Art => "ART 缓存",
+    }
+}
+
+/// `before`, `inner` and `after` joined, with a space between Chinese and
+/// the Latin letters or digits at either end of `inner`, as the pages write
+/// them: 清除 ART 缓存失败.
+fn spaced(before: &str, inner: &str, after: &str) -> String {
+    let open = if inner.starts_with(|c: char| c.is_ascii()) && !before.ends_with(|c: char| c.is_ascii()) { " " } else { "" };
+    let close = if inner.ends_with(|c: char| c.is_ascii()) && !after.starts_with(|c: char| c.is_ascii()) { " " } else { "" };
+    format!("{before}{open}{inner}{close}{after}")
+}
+
+/// Why erasing did not start or stopped short, and what the system said of
+/// it when there is that.
+pub fn erase_stop(s: &EraseStop) -> (String, Option<String>) {
+    match s {
+        EraseStop::Update(Hold::Unconfirmed) => (
+            "当前槽位的系统更新尚未完成，暂无法清除。请先启动系统完成更新后重试。若系统无法启动，多次启动失败后手机会切回原槽位，之后即可清除。".into(),
+            None,
+        ),
+        EraseStop::Update(Hold::Merging) => ("系统更新正在合并，暂无法清除。请先启动系统，合并完成后重试。".into(), None),
+        EraseStop::Update(Hold::MergeFailed) => ("系统更新合并失败，暂无法清除。请先启动系统处理后重试。".into(), None),
+        EraseStop::NotRebuilt => ("本机系统开机时不会重建已清空的 data 分区，无法清除。".into(), None),
+        EraseStop::NoCache => ("本机没有 cache 分区。".into(), None),
+        EraseStop::Erased => ("data 分区已清空，下次开机时将重新建立，暂无可清除的内容。".into(), None),
+        EraseStop::Closed(why) => ("无法打开 data 分区，未清除任何内容。".into(), Some(why.clone())),
+        EraseStop::Failed(p, why) => (spaced("清除", part(*p), "失败。"), Some(why.clone())),
     }
 }
 
@@ -399,7 +438,7 @@ pub fn refusal(r: &Refusal, codename: &str) -> String {
         Refusal::OlderPatch { package, installed } => {
             format!("这个包的安全补丁（{package}）早于手机上的（{installed}），安装后会无法读取数据分区。")
         }
-        Refusal::Wipe => "这个包要求安装后清除全部数据，清除功能还没实现。".into(),
+        Refusal::Wipe => "这个包要求安装后清除全部数据，这里还不能安装这类包。".into(),
         Refusal::NoPartition => "这台手机没有能写入这个镜像的分区。".into(),
         Refusal::Battery { level, charging: true } => format!("电量只有 {level}%，充电时至少需要 15%。"),
         Refusal::Battery { level, charging: false } => format!("电量只有 {level}%，没有充电时至少需要 20%。"),
@@ -612,5 +651,11 @@ mod tests {
             ("安装包的签名不匹配，这台手机只接受官方签名的包。".into(), Some("update_engine 错误代码 26".into()))
         );
         assert_eq!(failure(&Failure::Error("open ep0: busy".into())).1.as_deref(), Some("open ep0: busy"));
+    }
+
+    #[test]
+    fn erasing_that_stops_says_what_was_left_and_why() {
+        assert_eq!(erase_stop(&EraseStop::Failed(Part::Art, "x".into())).0, "清除 ART 缓存失败。", "a Latin name stands apart");
+        assert_eq!(erase_stop(&EraseStop::Failed(Part::Data, "x".into())).0, "清除 data 分区失败。");
     }
 }

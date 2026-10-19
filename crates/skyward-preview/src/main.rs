@@ -3,12 +3,12 @@ use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
 use skyward_ui::app::{
-    Action, App, Asked, BackupEntry, Choice, Clip, Damage, Data, FileKind, FileOp, FileRow, FileTask, Install, JobEnd, Keys,
-    MountFailure, MountRow, Part, Pick, Screen, Touch, UsbLink, SCREEN_OFF,
+    Action, App, Asked, BackupEntry, Choice, Clip, Damage, Data, EraseStop, FileKind, FileOp, FileRow, FileTask, Install, JobEnd,
+    Keys, MountFailure, MountRow, Part, Pick, Screen, Touch, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
-use skyward_vab::{Slot, SnapshotState};
+use skyward_vab::{Hold, Slot, SnapshotState};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -207,7 +207,7 @@ fn main() -> Result<()> {
     };
     let ota = "/sdcard/Download/OTA_ishtar_OS3.0.305.0.WMACNXM_20260412_full_package_signed_for_recovery_install.zip";
     let copying = || FileTask::Copy { path: ota.into(), into: "/sdcard/Skyward".into() };
-    let pages: [PageShot; 46] = [
+    let pages: [PageShot; 53] = [
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
@@ -258,21 +258,24 @@ fn main() -> Result<()> {
         }),
         ("70-erase-light", Screen::Erase, false, &|app| {
             app.set_asked(reset_asked());
-            app.erase_started(true, vec![Part::Data, Part::Metadata]);
+            app.erase_started(true, true, vec![Part::Data, Part::Metadata]);
             app.erase_at(Part::Metadata);
         }),
         ("71-erase-dark-failed", Screen::Erase, true, &|app| {
             app.set_asked(reset_asked());
-            app.erase_started(true, vec![Part::Data, Part::Metadata]);
+            app.erase_started(true, true, vec![Part::Data, Part::Metadata]);
             app.erase_at(Part::Metadata);
             app.erase_ended(
-                Err("/system/bin/make_f2fs -g android -O project_quota,extra_attr /dev/block/by-name/metadata ended with exit status: 1: Error: Device size is not sufficient for F2FS volume".into()),
+                Err(EraseStop::Failed(
+                    Part::Metadata,
+                    "/system/bin/make_f2fs -g android -O project_quota,extra_attr /dev/block/by-name/metadata ended with exit status: 1: Error: Device size is not sufficient for F2FS volume".into(),
+                )),
                 0,
             );
         }),
         ("72-erase-light-no-cache", Screen::Erase, false, &|app| {
-            app.erase_started(false, Vec::new());
-            app.erase_ended(Err("这台手机没有 cache 分区，没有要清除的缓存。".into()), 0);
+            app.erase_started(false, true, Vec::new());
+            app.erase_ended(Err(EraseStop::NoCache), 0);
         }),
         ("73-cant-start-light", Screen::CantStart, false, &|app| {
             app.set_asked(Asked { reason: Some("RescueParty".into()), ..Asked::default() })
@@ -323,6 +326,28 @@ fn main() -> Result<()> {
         ("89-decrypt-light-open", Screen::Decrypt, false, &|app| app.data_waiting(None)),
         ("90-decrypt-dark-failed", Screen::Decrypt, true, &|app| {
             app.data_failed("android.hardware.security.keymint.IKeyMintDevice/default is not running".into())
+        }),
+        ("91-wipe-light-all", Screen::Wipe, false, &|app| app.state.wipe = [true, false, false, false]),
+        ("92-wipe-dark-parts-cache", Screen::Wipe, true, &|app| {
+            app.state.cache_partition = true;
+            app.state.wipe = [false, true, true, true];
+        }),
+        ("93-erase-light-media", Screen::Erase, false, &|app| {
+            app.erase_started(false, false, vec![Part::Media, Part::Art]);
+            app.erase_progress(41_380, 128_906);
+        }),
+        ("94-erase-light-reset-done", Screen::Erase, false, &|app| {
+            app.erase_started(true, false, vec![Part::Data, Part::Metadata]);
+            app.erase_ended(Ok(()), 0);
+        }),
+        ("95-erase-dark-merging", Screen::Erase, true, &|app| {
+            app.erase_started(true, false, Vec::new());
+            app.erase_ended(Err(EraseStop::Update(Hold::Merging)), 0);
+        }),
+        ("97-decrypt-light-erased", Screen::Decrypt, false, &|app| app.state.data = Data::Erased),
+        ("98-erase-light-closed", Screen::Erase, false, &|app| {
+            app.erase_started(false, false, vec![Part::Art]);
+            app.erase_ended(Err(EraseStop::Closed("android.hardware.security.keymint.IKeyMintDevice/default is not running".into())), 0);
         }),
     ];
     for (name, screen, dark, set) in pages {

@@ -151,6 +151,10 @@ enum Cmd {
         /// world, the same as a wrong try on the screen itself.
         #[arg(long)]
         credential: Option<String>,
+        /// Close the data partition instead, as a factory reset does before
+        /// it erases it: every other program holding it ends first.
+        #[arg(long, conflicts_with = "credential")]
+        close: bool,
     },
     /// Drive the panel and touchscreen with the recovery UI.
     #[cfg(target_os = "android")]
@@ -292,7 +296,13 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(target_os = "android")]
-        Cmd::Data { credential } => {
+        Cmd::Data { close: true, .. } => {
+            wipe::release_data()?;
+            println!("the data partition is closed");
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Data { credential, close: false } => {
             use skyward_crypto::data;
             let binder = skyward_binder::driver::Binder::open()?;
             let service = skyward_crypto::keymint::KeyMint::open(&binder)?;

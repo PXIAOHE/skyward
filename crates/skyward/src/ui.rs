@@ -14,8 +14,8 @@ use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
 use skyward_files::Ownership;
 use skyward_ui::app::{
-    App, Asked, ClashChoice, Effect, FileKind, FileOp, FileRow, FileTask, JobEnd, Keys, MountFailure, Part, RenameRefused, Screen,
-    Target, UsbLink,
+    App, Asked, ClashChoice, Data, Effect, EraseStop, FileKind, FileOp, FileRow, FileTask, JobEnd, Keys, MountFailure, Part,
+    RenameRefused, Screen, Target, UsbLink, Wipe,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
@@ -207,41 +207,50 @@ fn part(step: Step) -> Part {
         Step::Data => Part::Data,
         Step::Cache => Part::Cache,
         Step::Metadata => Part::Metadata,
+        Step::Media => Part::Media,
+        Step::Art => Part::Art,
+    }
+}
+
+/// How erasing stopped, as its page tells it.
+fn erase_stop(stop: wipe::Stop) -> EraseStop {
+    match stop {
+        wipe::Stop::Refused(wipe::Refusal::Update(hold)) => EraseStop::Update(hold),
+        wipe::Stop::Refused(wipe::Refusal::NotRebuilt) => EraseStop::NotRebuilt,
+        wipe::Stop::Refused(wipe::Refusal::NoCache) => EraseStop::NoCache,
+        wipe::Stop::Closed(why) => EraseStop::Closed(why),
+        wipe::Stop::Failed(step, e) => EraseStop::Failed(part(step), format!("{e:#}")),
     }
 }
 
 /// Start erasing all user data, its page following it; why it cannot
-/// start ends it at once, on the same page.
-fn factory_reset(app: &mut App, keep_memtag_mode: bool) -> Result<Eraser> {
+/// start ends it at once, on the same page. `asked` when the system asked
+/// for it.
+fn factory_reset(app: &mut App, keep_memtag_mode: bool, asked: bool) -> Result<Eraser> {
     match wipe::factory_reset() {
         Ok(plan) => {
-            app.erase_started(true, plan.steps().into_iter().map(part).collect());
-            Eraser::start(move |at| plan.carry_out(keep_memtag_mode, at))
+            app.erase_started(true, asked, plan.steps().into_iter().map(part).collect());
+            Eraser::start(move |tell| plan.carry_out(keep_memtag_mode, tell))
         }
-        Err(e) => {
-            app.erase_started(true, Vec::new());
-            Eraser::start(move |_| Err(e))
+        Err(stop) => {
+            app.erase_started(true, asked, Vec::new());
+            Eraser::stopped(stop)
         }
     }
 }
 
-/// Start erasing the cache partition, its page following it.
-fn cache_wipe(app: &mut App) -> Result<Eraser> {
-    match wipe::cache() {
-        Ok(Some(cache)) => {
-            app.erase_started(false, vec![Part::Cache]);
-            Eraser::start(move |at| {
-                at(Step::Cache);
-                wipe::remake(&cache)
-            })
+/// Start erasing parts on their own, its page following it: the shared
+/// storage and ART's cache in the data partition, and the cache partition.
+/// `asked` when the system asked for it.
+fn parts_wipe(app: &mut App, media: bool, art: bool, cache: bool, asked: bool) -> Result<Eraser> {
+    match wipe::parts(media, art, cache) {
+        Ok(parts) => {
+            app.erase_started(false, asked, parts.steps().into_iter().map(part).collect());
+            Eraser::start(move |tell| parts.carry_out(tell))
         }
-        Ok(None) => {
-            app.erase_started(false, Vec::new());
-            Eraser::start(|_| Err(anyhow!("the phone has no cache partition to erase")))
-        }
-        Err(e) => {
-            app.erase_started(false, Vec::new());
-            Eraser::start(move |_| Err(e))
+        Err(stop) => {
+            app.erase_started(false, asked, Vec::new());
+            Eraser::stopped(stop)
         }
     }
 }
@@ -484,10 +493,29 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // leaves it for somewhere else.
     let misc = bcb::misc();
     let mut kept = request.work.lasts();
+    // The wipe page offers the cache partition where the phone's table has
+    // one; a table that does not read leaves it out, and the page still
+    // works.
+    app.state.cache_partition = match wipe::cache() {
+        Ok(cache) => cache.is_some(),
+        Err(e) => {
+            skyward_sys::kmsg(&format!("whether the phone has a cache partition is not known: {e:#}"))?;
+            false
+        }
+    };
     let mut eraser: Option<Eraser> = None;
+    // Erasing the system asked for leaves on its own once it is done; what
+    // the user chose waits for them.
+    let mut erase_leaves = false;
     match &request.work {
-        Work::WipeData => eraser = Some(factory_reset(&mut app, request.keep_memtag_mode)?),
-        Work::WipeCache => eraser = Some(cache_wipe(&mut app)?),
+        Work::WipeData => {
+            eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true)?);
+            erase_leaves = true;
+        }
+        Work::WipeCache => {
+            eraser = Some(parts_wipe(&mut app, false, false, true, true)?);
+            erase_leaves = true;
+        }
         Work::Sideload { .. } => {
             app.start_sideload();
             installer = Some(Installer::start(detach(cfg.services.clone()))?);
@@ -622,8 +650,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             for ev in e.events() {
                 match ev {
                     wipe::Event::At(step) => app.erase_at(part(step)),
+                    wipe::Event::Progress(done, total) => app.erase_progress(done, total),
+                    wipe::Event::Opened(opening) => {
+                        if let Some(mounted) = &opening.mounted {
+                            log_mounted(mounted)?;
+                        }
+                        closed = opening.closed;
+                        show_closed(&mut app, &closed)?;
+                    }
                     wipe::Event::Ended(outcome) => {
-                        skyward_sys::kmsg(&format!("erasing ended: {outcome:?}"))?;
+                        let said = outcome.as_ref().map_or_else(wipe::said, |_| "done".to_string());
+                        skyward_sys::kmsg(&format!("erasing ended: {said}"))?;
                         // As with the phone's own recovery, the request is
                         // done with either way, so a restart starts the
                         // system rather than erasing again.
@@ -631,10 +668,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             bcb::clear(&misc)?;
                             kept = false;
                         }
-                        if outcome.is_ok() {
+                        if outcome.is_ok() && erase_leaves {
                             leave_at = Some(now + LEAVE_AFTER_MS);
                         }
-                        app.erase_ended(outcome, now);
+                        app.erase_ended(outcome.map_err(erase_stop), now);
+                        // Users of a data partition erased whole have no
+                        // files left to open.
+                        if app.state.data == Data::Erased {
+                            closed.clear();
+                        }
                         erased = true;
                     }
                 }
@@ -742,7 +784,27 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::FactoryReset => {
                         ensure!(eraser.is_none(), "erasing is under way already");
-                        eraser = Some(factory_reset(&mut app, request.keep_memtag_mode)?);
+                        eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true)?);
+                        erase_leaves = true;
+                    }
+                    // Opening the data partition and erasing it are not to
+                    // cross; the page says to wait for the one under way.
+                    Effect::Wipe(chosen) => {
+                        ensure!(eraser.is_none(), "erasing is under way already");
+                        if decryptor.is_some() {
+                            app.report("正在打开 data 分区，请稍后再试", now);
+                            continue;
+                        }
+                        let has = |w: Wipe| chosen.contains(&w);
+                        erase_leaves = false;
+                        if has(Wipe::All) {
+                            eraser = Some(factory_reset(&mut app, false, false)?);
+                        } else if (has(Wipe::Media) || has(Wipe::Art)) && app.state.data == Data::Erased {
+                            app.erase_started(false, false, Vec::new());
+                            app.erase_ended(Err(EraseStop::Erased), now);
+                        } else {
+                            eraser = Some(parts_wipe(&mut app, has(Wipe::Media), has(Wipe::Art), has(Wipe::Cache), false)?);
+                        }
                     }
                     // A shell that will not start, or will not take keys,
                     // is the page's to report; the recovery carries on.
