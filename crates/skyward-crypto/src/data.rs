@@ -345,6 +345,7 @@ mod tests {
             device: "/dev/block/bootdevice/by-name/userdata".into(),
             mount_point: MOUNT.into(),
             filesystem: "f2fs".into(),
+            options: vec!["noatime".into(), "inlinecrypt".into()],
             extras: extras.split(',').map(str::to_string).collect(),
         }
     }

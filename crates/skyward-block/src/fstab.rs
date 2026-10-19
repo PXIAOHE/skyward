@@ -13,6 +13,9 @@ pub struct Entry {
     pub device: String,
     pub mount_point: String,
     pub filesystem: String,
+    /// How the phone mounts it: the kernel's flags and the filesystem's
+    /// own options, as one list.
+    pub options: Vec<String>,
     /// What the phone says about the filesystem beyond how to mount it,
     /// such as how it is encrypted.
     pub extras: Vec<String>,
@@ -36,11 +39,12 @@ pub fn entries(text: &str) -> Vec<Entry> {
             continue;
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
-        let [device, mount_point, filesystem, _flags, extras] = fields[..] else { continue };
+        let [device, mount_point, filesystem, options, extras] = fields[..] else { continue };
         out.push(Entry {
             device: device.to_string(),
             mount_point: mount_point.to_string(),
             filesystem: filesystem.to_string(),
+            options: options.split(',').map(str::to_string).collect(),
             extras: extras.split(',').map(str::to_string).collect(),
         });
     }
@@ -94,6 +98,13 @@ mod tests {
         assert_eq!(data[0].filesystem, "f2fs");
         assert_eq!(data[1].filesystem, "mifs");
         assert_eq!(data[0].device, "/dev/block/bootdevice/by-name/userdata");
+    }
+
+    #[test]
+    fn how_the_phone_mounts_a_filesystem_is_kept_apart_from_the_rest() {
+        let data = &entries(TABLE)[1];
+        assert_eq!(data.options, ["noatime", "discard"]);
+        assert!(data.extras.iter().any(|e| e == "latemount") && !data.extras.iter().any(|e| e == "noatime"));
     }
 
     #[test]

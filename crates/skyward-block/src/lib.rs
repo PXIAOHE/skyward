@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub mod dm;
 pub mod erase;
+pub mod fsck;
 pub mod fstab;
 pub mod loopdev;
 pub mod mount;

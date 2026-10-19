@@ -2,6 +2,44 @@
 /// a device's fstab lists alternatives for one mount point.
 pub const FILESYSTEMS: [&str; 3] = ["erofs", "ext4", "f2fs"];
 
+/// The words of a phone's mount options that the kernel takes as flags,
+/// as the phone's own fs_mgr reads them, with the kernel's bits for them
+/// (linux/mount.h); every other word is the filesystem's own.
+const FLAGS: [(&str, u64); 18] = [
+    ("noatime", 1 << 10),
+    ("noexec", 1 << 3),
+    ("nosuid", 1 << 1),
+    ("nodev", 1 << 2),
+    ("nodiratime", 1 << 11),
+    ("ro", 1),
+    ("rw", 0),
+    ("sync", 1 << 4),
+    ("remount", 1 << 5),
+    ("bind", 1 << 12),
+    ("rec", 1 << 14),
+    ("unbindable", 1 << 17),
+    ("private", 1 << 18),
+    ("slave", 1 << 19),
+    ("shared", 1 << 20),
+    ("lazytime", 1 << 25),
+    ("nosymfollow", 1 << 8),
+    ("defaults", 0),
+];
+
+/// Split the mount options of a phone's table into the kernel's flags and
+/// the options the filesystem reads, joined the way the kernel takes them.
+pub fn split_options(options: &[String]) -> (u64, String) {
+    let mut flags = 0;
+    let mut own = Vec::new();
+    for word in options.iter().filter(|w| !w.is_empty()) {
+        match FLAGS.iter().find(|(name, _)| name == word) {
+            Some((_, bit)) => flags |= bit,
+            None => own.push(word.as_str()),
+        }
+    }
+    (flags, own.join(","))
+}
+
 /// The mount that shows at a mount point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Visible {
@@ -65,6 +103,28 @@ mod sys {
             }
         }
         bail!("{} holds none of {} ({})", device.display(), FILESYSTEMS.join(", "), refused.join("; "))
+    }
+
+    /// Mount `device` at `target` as `filesystem` with `options` as a
+    /// phone's own table gives them: writable, unless they say otherwise.
+    pub fn mount(device: &Path, target: &Path, filesystem: &str, options: &[String]) -> Result<()> {
+        let (flags, own) = super::split_options(options);
+        let (src, dst) = (cstr(device)?, cstr(target)?);
+        let ty = CString::new(filesystem).with_context(|| format!("{filesystem} holds a NUL"))?;
+        let data = CString::new(own.as_str()).with_context(|| format!("{own} holds a NUL"))?;
+        if unsafe { libc::mount(src.as_ptr(), dst.as_ptr(), ty.as_ptr(), flags as libc::c_ulong, data.as_ptr().cast()) } != 0 {
+            return Err(os_error())
+                .with_context(|| format!("mount {} on {} as {filesystem} with {}", device.display(), target.display(), options.join(",")));
+        }
+        Ok(())
+    }
+
+    /// Show the folder `from` at `to` as well: one tree, reached from both.
+    pub fn bind(from: &Path, to: &Path) -> Result<()> {
+        if unsafe { libc::mount(cstr(from)?.as_ptr(), cstr(to)?.as_ptr(), null(), libc::MS_BIND, null()) } != 0 {
+            return Err(os_error()).with_context(|| format!("show {} at {}", from.display(), to.display()));
+        }
+        Ok(())
     }
 
     pub fn umount(target: &Path) -> Result<()> {
@@ -284,6 +344,14 @@ mod sys {
         bail!("this host does not mount {}", device.display())
     }
 
+    pub fn mount(device: &Path, _target: &Path, _filesystem: &str, _options: &[String]) -> Result<()> {
+        bail!("this host does not mount {}", device.display())
+    }
+
+    pub fn bind(from: &Path, _to: &Path) -> Result<()> {
+        bail!("this host does not mount {}", from.display())
+    }
+
     pub fn umount(target: &Path) -> Result<()> {
         bail!("this host does not unmount {}", target.display())
     }
@@ -314,6 +382,24 @@ mod sys {
 }
 
 pub use sys::{
-    holders, is_mount_point, mount_ro, mount_ro_over, mount_ro_with, umount, umount_detach, umount_detach_over,
-    umount_over, visible,
+    bind, holders, is_mount_point, mount, mount_ro, mount_ro_over, mount_ro_with, umount, umount_detach,
+    umount_detach_over, umount_over, visible,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_kernels_flags_are_taken_out_of_a_phones_mount_options() {
+        let data: Vec<String> = "noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt,gc_merge,atgc"
+            .split(',')
+            .map(str::to_string)
+            .collect();
+        let (flags, own) = split_options(&data);
+        assert_eq!(flags, (1 << 10) | (1 << 1) | (1 << 2), "noatime, nosuid and nodev");
+        assert_eq!(own, "discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt,gc_merge,atgc");
+        let (flags, own) = split_options(&["ro".into(), "defaults".into(), String::new()]);
+        assert_eq!((flags, own.as_str()), (1, ""), "read-only, and nothing for the filesystem");
+    }
+}
