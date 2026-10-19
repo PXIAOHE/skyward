@@ -1,7 +1,7 @@
 //! Copying, moving, renaming and deleting files and folders the way a file
-//! manager does: folders whole, links as links, each entry's permissions,
-//! owner, times and extended attributes kept where the filesystem it goes
-//! to keeps them, and how far the work has come told as it goes.
+//! manager does: folders whole, links as links, times kept, each new entry
+//! owned as asked, by what the original had or by what the folder it goes
+//! into gives its own, and how far the work has come told as it goes.
 
 use anyhow::{bail, ensure, Context, Result};
 use std::ffi::OsStr;
@@ -48,12 +48,60 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// The name is another entry's in the folder already. A folder that
+/// takes names in any case counts one that differs only in case.
+#[derive(Debug)]
+pub struct Taken(pub PathBuf);
+
+impl std::fmt::Display for Taken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is already there", self.0.display())
+    }
+}
+
+impl std::error::Error for Taken {}
+
+/// What a copy, or a move to another filesystem, gives each entry it
+/// makes beyond its contents and times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ownership {
+    /// What the original has: owner, group, permissions and extended
+    /// attributes, as far as the filesystem the entry goes to keeps them.
+    Kept,
+    /// The owner, group and SELinux label of the folder it goes into, as
+    /// the entries the system makes there have them, and its own
+    /// permissions.
+    Folder,
+    /// The owner, group, label and permissions of the folder it goes into,
+    /// a file's without execute: shared storage, where the system gives
+    /// every entry the same.
+    Shared,
+}
+
 /// What a filesystem keeps of an entry beyond its contents and times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Keeps {
     owner: bool,
     mode: bool,
     xattrs: bool,
+}
+
+/// What the folder a copy goes into gives each entry made in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Like {
+    uid: u32,
+    gid: u32,
+    /// The folder's SELinux label as stored, on the phone.
+    label: Option<Vec<u8>>,
+    /// The folder's permissions, where entries take those as well.
+    mode: Option<u32>,
+}
+
+/// What each entry a copy makes is given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Give {
+    Original(Keeps),
+    Folder(Like),
 }
 
 /// Whether the work goes on, or was asked to stop.
@@ -178,7 +226,7 @@ fn plan(sources: &[PathBuf], into: &Path, clash: Clash, moving: bool) -> Result<
             target = free_name(into, name(source)?)?;
         } else if exists(&target)? {
             match clash {
-                Clash::Refuse => bail!("{} is already there", target.display()),
+                Clash::Refuse => return Err(Taken(target).into()),
                 Clash::Replace => {}
                 Clash::Skip => continue,
                 Clash::KeepBoth => target = free_name(into, name(source)?)?,
@@ -214,32 +262,81 @@ fn keeps(_into: &Path) -> Result<Keeps> {
     Ok(Keeps { owner: true, mode: true, xattrs: false })
 }
 
-/// Copy each of `sources` into the folder `into`.
-pub fn copy(sources: &[PathBuf], into: &Path, clash: Clash, cancel: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
+/// What each entry a copy into the folder `into` makes is given under
+/// `ownership`.
+fn give(into: &Path, ownership: Ownership) -> Result<Give> {
+    let keeps = keeps(into)?;
+    if ownership == Ownership::Kept {
+        return Ok(Give::Original(keeps));
+    }
+    ensure!(keeps.owner, "{} is on a filesystem that keeps no owners to give what is made there", into.display());
+    let folder = fs::metadata(into).with_context(|| format!("look at {}", into.display()))?;
+    let mode = (ownership == Ownership::Shared).then_some(folder.mode() & 0o7777);
+    Ok(Give::Folder(Like { uid: folder.uid(), gid: folder.gid(), label: label(into)?, mode }))
+}
+
+/// The SELinux label of the folder `into`, as stored.
+#[cfg(target_os = "android")]
+fn label(into: &Path) -> Result<Option<Vec<u8>>> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(into.as_os_str().as_bytes()).with_context(|| format!("{} holds a NUL", into.display()))?;
+    let mut value = vec![0u8; 256];
+    let len = unsafe { libc::getxattr(c.as_ptr(), c"security.selinux".as_ptr(), value.as_mut_ptr().cast(), value.len()) };
+    if len < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("read the label of {}", into.display()));
+    }
+    value.truncate(len as usize);
+    Ok(Some(value))
+}
+
+/// A computer the tests run on labels nothing.
+#[cfg(not(target_os = "android"))]
+fn label(_into: &Path) -> Result<Option<Vec<u8>>> {
+    Ok(None)
+}
+
+/// Copy each of `sources` into the folder `into`, each new entry given
+/// what `ownership` says.
+pub fn copy(
+    sources: &[PathBuf],
+    into: &Path,
+    clash: Clash,
+    ownership: Ownership,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<()> {
     let plan = plan(sources, into, clash, false)?;
     let froms: Vec<PathBuf> = plan.iter().map(|(from, _)| from.clone()).collect();
     let (total_bytes, total_entries) = measure(&froms, false)?;
     let mut p = Progress { total_bytes, total_entries, ..Progress::default() };
     progress(p);
-    let keeps = keeps(into)?;
+    let give = give(into, ownership)?;
     for (from, to) in plan {
         if exists(&to)? {
             remove(&to, cancel, &mut Progress::default(), &mut |_| {})?;
         }
-        copy_entry(&from, &to, keeps, cancel, &mut p, progress)?;
+        copy_entry(&from, &to, &give, cancel, &mut p, progress)?;
     }
     Ok(())
 }
 
 /// Move each of `sources` into the folder `into`. Within one filesystem an
-/// entry is moved at once; to another, it is copied and then deleted.
-pub fn move_into(sources: &[PathBuf], into: &Path, clash: Clash, cancel: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
+/// entry is moved at once, keeping all it has; to another, it is copied,
+/// each new entry given what `ownership` says, and then deleted.
+pub fn move_into(
+    sources: &[PathBuf],
+    into: &Path,
+    clash: Clash,
+    ownership: Ownership,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<()> {
     let plan = plan(sources, into, clash, true)?;
     let froms: Vec<PathBuf> = plan.iter().map(|(from, _)| from.clone()).collect();
     let (total_bytes, total_entries) = measure(&froms, true)?;
     let mut p = Progress { total_bytes, total_entries, ..Progress::default() };
     progress(p);
-    let keeps = keeps(into)?;
+    let give = give(into, ownership)?;
     for (from, to) in plan {
         going(cancel)?;
         if exists(&to)? {
@@ -253,7 +350,7 @@ pub fn move_into(sources: &[PathBuf], into: &Path, clash: Clash, cancel: &Atomic
                 progress(p);
             }
             Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                copy_entry(&from, &to, keeps, cancel, &mut p, progress)?;
+                copy_entry(&from, &to, &give, cancel, &mut p, progress)?;
                 remove(&from, cancel, &mut Progress::default(), &mut |_| {})?;
             }
             Err(e) => return Err(e).with_context(|| format!("move {} to {}", from.display(), to.display())),
@@ -263,17 +360,35 @@ pub fn move_into(sources: &[PathBuf], into: &Path, clash: Clash, cancel: &Atomic
 }
 
 /// Give the entry at `path` the name `new`, in the folder it is in, and
-/// say where it now is.
+/// say where it now is. A folder that takes names in any case finds the
+/// entry itself under a name that differs from its own only in case; the
+/// entry then goes through a free name to its new one, as the kernel
+/// leaves an entry renamed to itself as it is.
 pub fn rename(path: &Path, new: &str) -> Result<PathBuf> {
     ensure!(
         !new.is_empty() && new != "." && new != ".." && !new.contains(['/', '\0']),
         "{new:?} cannot be the name of a file or folder"
     );
-    let to = path.parent().with_context(|| format!("{} is in no folder", path.display()))?.join(new);
+    let folder = path.parent().with_context(|| format!("{} is in no folder", path.display()))?;
+    let to = folder.join(new);
     if to == path {
         return Ok(to);
     }
-    ensure!(!exists(&to)?, "{} is already there", to.display());
+    if exists(&to)? {
+        let mut named = false;
+        for entry in fs::read_dir(folder).with_context(|| format!("read {}", folder.display()))? {
+            named |= entry.with_context(|| format!("read {}", folder.display()))?.file_name() == new;
+        }
+        let own = fs::symlink_metadata(path).with_context(|| format!("look at {}", path.display()))?;
+        let found = fs::symlink_metadata(&to).with_context(|| format!("look at {}", to.display()))?;
+        if named || (own.dev(), own.ino()) != (found.dev(), found.ino()) {
+            return Err(Taken(to).into());
+        }
+        let step = free_name(folder, name(path)?)?;
+        fs::rename(path, &step).with_context(|| format!("rename {} to {}", path.display(), step.display()))?;
+        fs::rename(&step, &to).with_context(|| format!("rename {} to {new}", step.display()))?;
+        return Ok(to);
+    }
     fs::rename(path, &to).with_context(|| format!("rename {} to {new}", path.display()))?;
     Ok(to)
 }
@@ -310,7 +425,7 @@ fn remove(path: &Path, cancel: &AtomicBool, p: &mut Progress, progress: &mut dyn
     Ok(())
 }
 
-fn copy_entry(from: &Path, to: &Path, keeps: Keeps, cancel: &AtomicBool, p: &mut Progress, progress: &mut dyn FnMut(Progress)) -> Result<()> {
+fn copy_entry(from: &Path, to: &Path, give: &Give, cancel: &AtomicBool, p: &mut Progress, progress: &mut dyn FnMut(Progress)) -> Result<()> {
     going(cancel)?;
     let meta = fs::symlink_metadata(from).with_context(|| format!("look at {}", from.display()))?;
     let kind = meta.file_type();
@@ -326,7 +441,7 @@ fn copy_entry(from: &Path, to: &Path, keeps: Keeps, cancel: &AtomicBool, p: &mut
             .with_context(|| format!("read {}", from.display()))?;
         entries.sort();
         for entry in entries {
-            copy_entry(&entry, &to.join(name(&entry)?), keeps, cancel, p, progress)?;
+            copy_entry(&entry, &to.join(name(&entry)?), give, cancel, p, progress)?;
         }
     } else if kind.is_file() {
         copy_file(from, to, cancel, p, progress)?;
@@ -335,7 +450,7 @@ fn copy_entry(from: &Path, to: &Path, keeps: Keeps, cancel: &AtomicBool, p: &mut
     } else {
         bail!("{} is a socket, which only the program that made it can answer", from.display());
     }
-    keep(from, to, &meta, keeps)?;
+    keep(from, to, &meta, give)?;
     p.entries += 1;
     progress(*p);
     Ok(())
@@ -380,21 +495,36 @@ fn make_node(to: &Path, mode: u32, rdev: u64) -> Result<()> {
     Ok(())
 }
 
-/// Give a copy what the original has beyond its contents, as far as the
-/// filesystem it is on keeps it; the times go last, as writing the rest
-/// would change them.
-fn keep(from: &Path, to: &Path, meta: &fs::Metadata, keeps: Keeps) -> Result<()> {
+/// Give a copy what `give` says beyond its contents, and the original's
+/// times, which go last, as writing the rest would change them. The owner
+/// goes before the permissions, as changing it clears the set-ID bits.
+fn keep(from: &Path, to: &Path, meta: &fs::Metadata, give: &Give) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let link = meta.file_type().is_symlink();
-    if keeps.xattrs {
-        copy_xattrs(from, to)?;
+    let (owner, mode) = match give {
+        Give::Original(keeps) => {
+            if keeps.xattrs {
+                copy_xattrs(from, to)?;
+            }
+            (keeps.owner.then_some((meta.uid(), meta.gid())), keeps.mode.then_some(meta.mode() & 0o7777))
+        }
+        Give::Folder(like) => {
+            if let Some(label) = &like.label {
+                set_label(to, label)?;
+            }
+            let mode = match like.mode {
+                Some(folder) if meta.is_dir() => folder,
+                Some(folder) => folder & 0o666,
+                None => meta.mode() & 0o7777,
+            };
+            (Some((like.uid, like.gid)), Some(mode))
+        }
+    };
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::lchown(to, Some(uid), Some(gid)).with_context(|| format!("give {} its owner", to.display()))?;
     }
-    if keeps.owner {
-        std::os::unix::fs::lchown(to, Some(meta.uid()), Some(meta.gid())).with_context(|| format!("give {} its owner", to.display()))?;
-    }
-    if keeps.mode && !link {
-        fs::set_permissions(to, fs::Permissions::from_mode(meta.mode() & 0o7777))
-            .with_context(|| format!("give {} its permissions", to.display()))?;
+    if let Some(mode) = mode.filter(|_| !link) {
+        fs::set_permissions(to, fs::Permissions::from_mode(mode)).with_context(|| format!("give {} its permissions", to.display()))?;
     }
     let c = std::ffi::CString::new(to.as_os_str().as_bytes()).with_context(|| format!("{} holds a NUL", to.display()))?;
     let times = [
@@ -452,6 +582,22 @@ fn copy_xattrs(_from: &Path, _to: &Path) -> Result<()> {
     unreachable!("only the phone copies extended attributes")
 }
 
+/// Give an entry an SELinux label, a link its own.
+#[cfg(target_os = "android")]
+fn set_label(to: &Path, label: &[u8]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(to.as_os_str().as_bytes()).with_context(|| format!("{} holds a NUL", to.display()))?;
+    if unsafe { libc::lsetxattr(c.as_ptr(), c"security.selinux".as_ptr(), label.as_ptr().cast(), label.len(), 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("label {}", to.display()));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn set_label(_to: &Path, _label: &[u8]) -> Result<()> {
+    unreachable!("only the phone labels entries")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,7 +635,7 @@ mod tests {
         let root = tree(&at);
         fs::create_dir(at.join("into")).unwrap();
         let mut last = Progress::default();
-        copy(std::slice::from_ref(&root), &at.join("into"), Clash::Refuse, &AtomicBool::new(false), &mut |p| last = p).unwrap();
+        copy(std::slice::from_ref(&root), &at.join("into"), Clash::Refuse, Ownership::Kept, &AtomicBool::new(false), &mut |p| last = p).unwrap();
         let copied = at.join("into/photos");
         assert_eq!(fs::read(copied.join("a.jpg")).unwrap(), vec![7u8; 3 * CHUNK + 5]);
         assert_eq!(fs::read(copied.join("2026/b.txt")).unwrap(), b"hello");
@@ -510,14 +656,15 @@ mod tests {
         fs::write(at.join("into/note.txt"), b"old").unwrap();
         let (cancel, sources) = (AtomicBool::new(false), [at.join("note.txt")]);
         assert_eq!(clashes(&sources, &at.join("into")).unwrap(), [at.join("into/note.txt")]);
-        assert!(copy(&sources, &at.join("into"), Clash::Refuse, &cancel, &mut quiet()).is_err());
-        copy(&sources, &at.join("into"), Clash::Skip, &cancel, &mut quiet()).unwrap();
+        let refused = copy(&sources, &at.join("into"), Clash::Refuse, Ownership::Kept, &cancel, &mut quiet());
+        assert!(refused.unwrap_err().is::<Taken>());
+        copy(&sources, &at.join("into"), Clash::Skip, Ownership::Kept, &cancel, &mut quiet()).unwrap();
         assert_eq!(fs::read(at.join("into/note.txt")).unwrap(), b"old");
-        copy(&sources, &at.join("into"), Clash::KeepBoth, &cancel, &mut quiet()).unwrap();
-        copy(&sources, &at.join("into"), Clash::KeepBoth, &cancel, &mut quiet()).unwrap();
+        copy(&sources, &at.join("into"), Clash::KeepBoth, Ownership::Kept, &cancel, &mut quiet()).unwrap();
+        copy(&sources, &at.join("into"), Clash::KeepBoth, Ownership::Kept, &cancel, &mut quiet()).unwrap();
         assert_eq!(fs::read(at.join("into/note (1).txt")).unwrap(), b"new");
         assert_eq!(fs::read(at.join("into/note (2).txt")).unwrap(), b"new");
-        copy(&sources, &at.join("into"), Clash::Replace, &cancel, &mut quiet()).unwrap();
+        copy(&sources, &at.join("into"), Clash::Replace, Ownership::Kept, &cancel, &mut quiet()).unwrap();
         assert_eq!(fs::read(at.join("into/note.txt")).unwrap(), b"new");
         fs::remove_dir_all(&at).unwrap();
     }
@@ -529,7 +676,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         assert!(clashes(&[at.join(".profile")], &at).unwrap().is_empty(), "an entry does not clash with itself");
         for clash in [Clash::Refuse, Clash::Replace] {
-            copy(&[at.join(".profile")], &at, clash, &cancel, &mut quiet()).unwrap();
+            copy(&[at.join(".profile")], &at, clash, Ownership::Kept, &cancel, &mut quiet()).unwrap();
         }
         assert_eq!(fs::read(at.join(".profile")).unwrap(), b"x", "the original stays");
         assert_eq!(fs::read(at.join(".profile (1)")).unwrap(), b"x");
@@ -542,8 +689,8 @@ mod tests {
         let at = scratch("inside");
         let root = tree(&at);
         let cancel = AtomicBool::new(false);
-        assert!(copy(std::slice::from_ref(&root), &root.join("2026"), Clash::Refuse, &cancel, &mut quiet()).is_err());
-        assert!(move_into(std::slice::from_ref(&root), &root, Clash::Refuse, &cancel, &mut quiet()).is_err());
+        assert!(copy(std::slice::from_ref(&root), &root.join("2026"), Clash::Refuse, Ownership::Kept, &cancel, &mut quiet()).is_err());
+        assert!(move_into(std::slice::from_ref(&root), &root, Clash::Refuse, Ownership::Kept, &cancel, &mut quiet()).is_err());
         assert!(!root.join("2026/photos").exists(), "nothing was written");
         fs::remove_dir_all(&at).unwrap();
     }
@@ -555,11 +702,11 @@ mod tests {
         fs::create_dir(at.join("into")).unwrap();
         let cancel = AtomicBool::new(false);
         let mut last = Progress::default();
-        move_into(std::slice::from_ref(&root), &at.join("into"), Clash::Refuse, &cancel, &mut |p| last = p).unwrap();
+        move_into(std::slice::from_ref(&root), &at.join("into"), Clash::Refuse, Ownership::Kept, &cancel, &mut |p| last = p).unwrap();
         assert!(!root.exists());
         assert_eq!(fs::read(at.join("into/photos/2026/b.txt")).unwrap(), b"hello");
         assert_eq!((last.entries, last.total_entries), (5, 5));
-        move_into(&[at.join("into/photos")], &at.join("into"), Clash::Refuse, &cancel, &mut quiet()).unwrap();
+        move_into(&[at.join("into/photos")], &at.join("into"), Clash::Refuse, Ownership::Kept, &cancel, &mut quiet()).unwrap();
         assert!(at.join("into/photos").exists(), "moving to the folder it is in leaves it as it is");
         fs::remove_dir_all(&at).unwrap();
     }
@@ -571,11 +718,62 @@ mod tests {
         fs::write(at.join("b.txt"), b"b").unwrap();
         assert_eq!(rename(&at.join("a.txt"), "c.txt").unwrap(), at.join("c.txt"));
         assert_eq!(fs::read(at.join("c.txt")).unwrap(), b"a");
-        assert!(rename(&at.join("c.txt"), "b.txt").is_err(), "a name taken stays with its own entry");
+        assert!(rename(&at.join("c.txt"), "b.txt").unwrap_err().is::<Taken>(), "a name taken stays with its own entry");
         for bad in ["", ".", "..", "x/y"] {
             assert!(rename(&at.join("c.txt"), bad).is_err(), "{bad:?}");
         }
         assert_eq!(rename(&at.join("c.txt"), "c.txt").unwrap(), at.join("c.txt"), "the same name changes nothing");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    /// Whether `at` takes names in any case, as a Mac's own disk does.
+    fn any_case(at: &Path) -> bool {
+        fs::write(at.join("probe"), b"").unwrap();
+        let found = exists(&at.join("PROBE")).unwrap();
+        fs::remove_file(at.join("probe")).unwrap();
+        found
+    }
+
+    #[test]
+    fn a_name_can_change_only_in_case_wherever_names_are_taken_in_any_case() {
+        let at = scratch("case");
+        fs::write(at.join("readme.txt"), b"r").unwrap();
+        fs::write(at.join("notes.txt"), b"n").unwrap();
+        rename(&at.join("readme.txt"), "README.txt").unwrap();
+        let names: Vec<_> = fs::read_dir(&at).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(names.contains(&"README.txt".into()) && !names.contains(&"readme.txt".into()), "{names:?}");
+        assert_eq!(fs::read(at.join("README.txt")).unwrap(), b"r");
+        assert_eq!(names.len(), 2, "no name is left over from the way there");
+        let other = rename(&at.join("README.txt"), "NOTES.txt");
+        match any_case(&at) {
+            true => assert!(other.unwrap_err().is::<Taken>(), "another entry's name in another case is taken"),
+            false => assert_eq!(fs::read(other.unwrap()).unwrap(), b"r"),
+        }
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn entries_made_in_a_folder_can_take_what_its_own_have() {
+        let at = scratch("ownership");
+        let root = tree(&at);
+        fs::set_permissions(root.join("a.jpg"), fs::Permissions::from_mode(0o604)).unwrap();
+        let cancel = AtomicBool::new(false);
+        for (folder, ownership) in [("folder", Ownership::Folder), ("shared", Ownership::Shared)] {
+            let into = at.join(folder);
+            fs::create_dir(&into).unwrap();
+            fs::set_permissions(&into, fs::Permissions::from_mode(0o750)).unwrap();
+            copy(std::slice::from_ref(&root), &into, Clash::Refuse, ownership, &cancel, &mut quiet()).unwrap();
+            let mode = |p: &str| fs::symlink_metadata(into.join(p)).unwrap().mode() & 0o7777;
+            let own = fs::metadata(&into).unwrap();
+            for p in ["photos", "photos/a.jpg", "photos/2026", "photos/2026/b.txt", "photos/latest"] {
+                let m = fs::symlink_metadata(into.join(p)).unwrap();
+                assert_eq!((m.uid(), m.gid()), (own.uid(), own.gid()), "{folder}: {p} is owned as the folder is");
+            }
+            match ownership {
+                Ownership::Folder => assert_eq!((mode("photos/a.jpg"), mode("photos/2026/b.txt")), (0o604, 0o640), "their own permissions"),
+                _ => assert_eq!((mode("photos"), mode("photos/2026"), mode("photos/a.jpg"), mode("photos/2026/b.txt")), (0o750, 0o750, 0o640, 0o640)),
+            }
+        }
         fs::remove_dir_all(&at).unwrap();
     }
 
@@ -614,13 +812,13 @@ mod tests {
         assert_eq!(unsafe { libc::lsetxattr(p.as_ptr(), n.as_ptr(), v.as_ptr().cast(), v.len(), 0) }, 0, "{}", std::io::Error::last_os_error());
         fs::create_dir(at.join("into")).unwrap();
         let cancel = AtomicBool::new(false);
-        copy(std::slice::from_ref(&root), &at.join("into"), Clash::Refuse, &cancel, &mut quiet()).unwrap();
+        copy(std::slice::from_ref(&root), &at.join("into"), Clash::Refuse, Ownership::Kept, &cancel, &mut quiet()).unwrap();
         assert_eq!(label(&at.join("into/photos/2026/b.txt")), "u:object_r:system_file:s0");
         let other = Path::new("/dev").join(format!("skyward-files-{}", std::process::id()));
         fs::create_dir(&other).unwrap();
         assert_ne!(fs::metadata(&other).unwrap().dev(), fs::metadata(&at).unwrap().dev(), "two filesystems");
         let mut last = Progress::default();
-        move_into(std::slice::from_ref(&root), &other, Clash::Refuse, &cancel, &mut |p| last = p).unwrap();
+        move_into(std::slice::from_ref(&root), &other, Clash::Refuse, Ownership::Kept, &cancel, &mut |p| last = p).unwrap();
         assert!(!root.exists(), "the original goes once copied");
         assert_eq!(fs::read(other.join("photos/a.jpg")).unwrap(), vec![7u8; 3 * CHUNK + 5]);
         assert_eq!(label(&other.join("photos/2026/b.txt")), "u:object_r:system_file:s0");
@@ -653,9 +851,30 @@ mod tests {
         assert_eq!(set, 0, "{}", std::io::Error::last_os_error());
         let into = Path::new("/").join(format!("skyward-files-acl-{}", std::process::id()));
         fs::create_dir(&into).unwrap();
-        copy(&[file], &into, Clash::Refuse, &AtomicBool::new(false), &mut quiet()).unwrap();
+        copy(&[file], &into, Clash::Refuse, Ownership::Kept, &AtomicBool::new(false), &mut quiet()).unwrap();
         assert_eq!(fs::read(into.join("listed.txt")).unwrap(), b"x");
         fs::remove_dir_all(&into).unwrap();
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    /// On the phone, as root: what a folder gives its own entries includes
+    /// its label, whatever the originals had.
+    #[cfg(target_os = "android")]
+    #[test]
+    fn on_the_phone_entries_made_in_a_folder_take_its_label() {
+        use std::os::unix::ffi::OsStrExt;
+        let at = scratch("phone-label");
+        let root = tree(&at);
+        let into = at.join("into");
+        fs::create_dir(&into).unwrap();
+        let (p, n, v) = (std::ffi::CString::new(into.as_os_str().as_bytes()).unwrap(), c"security.selinux", b"u:object_r:system_file:s0\0");
+        assert_eq!(unsafe { libc::lsetxattr(p.as_ptr(), n.as_ptr(), v.as_ptr().cast(), v.len(), 0) }, 0, "{}", std::io::Error::last_os_error());
+        assert_ne!(label(&root.join("2026/b.txt")), "u:object_r:system_file:s0");
+        let cancel = AtomicBool::new(false);
+        copy(std::slice::from_ref(&root), &into, Clash::Refuse, Ownership::Shared, &cancel, &mut quiet()).unwrap();
+        for entry in ["photos", "photos/a.jpg", "photos/2026/b.txt", "photos/latest"] {
+            assert_eq!(label(&into.join(entry)), "u:object_r:system_file:s0", "{entry}");
+        }
         fs::remove_dir_all(&at).unwrap();
     }
 
@@ -665,7 +884,7 @@ mod tests {
         let root = tree(&at);
         fs::create_dir(at.join("into")).unwrap();
         let cancel = AtomicBool::new(false);
-        let stopped = copy(&[root.join("a.jpg")], &at.join("into"), Clash::Refuse, &cancel, &mut |p| {
+        let stopped = copy(&[root.join("a.jpg")], &at.join("into"), Clash::Refuse, Ownership::Kept, &cancel, &mut |p| {
             if p.bytes >= CHUNK as u64 {
                 cancel.store(true, Ordering::Relaxed);
             }

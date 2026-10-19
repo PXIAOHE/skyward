@@ -2,7 +2,7 @@
 //! how far it has come.
 
 use anyhow::{Context, Result};
-use skyward_files::{Cancelled, Clash, Progress};
+use skyward_files::{Cancelled, Clash, Ownership, Progress};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,8 +69,12 @@ impl Worker {
                     }
                 };
                 let ended = match task {
-                    Task::Copy { from, into, clash } => skyward_files::copy(&[from], &into, clash, &stop, &mut progress),
-                    Task::Move { from, into, clash } => skyward_files::move_into(&[from], &into, clash, &stop, &mut progress),
+                    Task::Copy { from, into, clash } => {
+                        skyward_files::copy(&[from], &into, clash, Ownership::Kept, &stop, &mut progress)
+                    }
+                    Task::Move { from, into, clash } => {
+                        skyward_files::move_into(&[from], &into, clash, Ownership::Kept, &stop, &mut progress)
+                    }
                     Task::Delete { path } => skyward_files::delete(&[path], &stop, &mut progress),
                 };
                 // Work that stops or fails shows how far it came in the end.
