@@ -12,6 +12,7 @@ skyward-info = { path = "../skyward-info" }
 skyward-install = { path = "../skyward-install" }
 skyward-vab = { path = "../skyward-vab" }
 ttf-parser = "0.25.1"
+vt100 = "0.18.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 drm = "0.15.0"

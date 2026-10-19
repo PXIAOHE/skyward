@@ -12,6 +12,7 @@ pub mod pages;
 pub mod search;
 pub mod sprite;
 pub mod surface;
+pub mod term;
 pub mod theme;
 pub mod widgets;
 
