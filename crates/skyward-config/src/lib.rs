@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -41,7 +41,23 @@ pub struct DeviceConfig {
     /// The vibration motor's click, on phones that have one.
     #[serde(default)]
     pub haptics: Option<Haptics>,
+    #[serde(default)]
+    pub wipe: Wipe,
 }
+
+/// What erasing on the wipe page takes in beyond the places every Android
+/// phone keeps the same.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Wipe {
+    /// Folders in the data partition where the phone's own programs keep
+    /// their logs and dumps: their files go with the logs and crash
+    /// records, the folders staying.
+    #[serde(default)]
+    pub logs: Vec<String>,
+}
+
+/// The data partition, which the folders erasing takes in are in.
+const DATA: &str = "/data";
 
 /// A waveform the vibration motor's driver keeps, played through the
 /// kernel's force-feedback events. The driver plays it until told to stop
@@ -162,7 +178,16 @@ impl DeviceConfig {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).context("parse device config")
+        let cfg: DeviceConfig = toml::from_str(text).context("parse device config")?;
+        for log in &cfg.wipe.logs {
+            let path = Path::new(log);
+            let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
+            ensure!(
+                path.is_absolute() && plain && path.starts_with(DATA) && path != Path::new(DATA),
+                "[wipe] logs: {log} is not a folder inside {DATA}"
+            );
+        }
+        Ok(cfg)
     }
 }
 
@@ -226,6 +251,17 @@ mod tests {
             cfg.services[5].ready_hardware_service.as_deref(),
             Some("android.hardware.gatekeeper@1.0::IGatekeeper/default")
         );
+    }
+
+    #[test]
+    fn the_phones_own_logs_are_folders_inside_the_data_partition() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        assert!(cfg.wipe.logs.contains(&"/data/vendor/diag".to_string()));
+        assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().wipe.logs.is_empty(), "a phone may have none");
+        for bad in ["/data", "/data/", "/metadata/logs", "data/log", "/data/../system"] {
+            let text = format!("[device]\ncodename = \"x\"\n[wipe]\nlogs = [\"{bad}\"]\n");
+            assert!(DeviceConfig::parse(&text).is_err(), "{bad} is refused");
+        }
     }
 
     #[test]

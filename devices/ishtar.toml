@@ -64,3 +64,17 @@ ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
 [haptics]
 click = 0
 click_ms = 53
+
+# Where the phone's own programs keep logs in the data partition: the
+# system's, the last kernel and logcat lines the diag service saves at each
+# start, and what the modem, Wi-Fi and Bluetooth leave when they crash.
+[wipe]
+logs = [
+    "/data/miuilog",
+    "/data/vendor/diag",
+    "/data/vendor/log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]
