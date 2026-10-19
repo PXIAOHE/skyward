@@ -3388,7 +3388,7 @@ mod tests {
     fn unfinished_features_explain_themselves() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Language, W, H, PPD);
-        tap(&mut app, &f, &i, Action::Unavailable("这种语言还没有翻译"));
+        tap(&mut app, &f, &i, Action::Unavailable("暂不支持该语言"));
         assert_eq!(app.deadline(0), Some(TOAST_MS));
         app.tick(TOAST_MS);
         assert_eq!(app.deadline(TOAST_MS), app.idle_due());
@@ -4312,7 +4312,7 @@ mod tests {
         assert_eq!(app.state.logs, [true, false]);
         tap(&mut app, &f, &i, Action::LogsTo(1));
         assert_eq!(app.state.logs_to, 1);
-        tap(&mut app, &f, &i, Action::Unavailable("导出日志还没实现"));
+        tap(&mut app, &f, &i, Action::Unavailable("暂不支持导出日志"));
         assert_eq!(app.deadline(0), Some(TOAST_MS));
     }
 

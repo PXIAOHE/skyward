@@ -145,7 +145,7 @@ pub fn home(cx: &Ctx) -> Frame {
     if let Some(s) = i.slot {
         stats.push((s.letter(), "当前槽位"));
     }
-    stats.push((fmt::data(&cx.state.data), "数据分区"));
+    stats.push((fmt::data(&cx.state.data), "data 分区"));
     if let Some(v) = &free {
         stats.push((v.as_str(), "可用空间"));
     }
@@ -240,15 +240,9 @@ pub fn screen_off(cx: &Ctx) -> Frame {
     let rows: Vec<Row> = labels.iter().enumerate().map(|(k, label)| Row::new(label).trail(Trail::Check(s.screen_off == k))).collect();
     let times = widgets::list(&mut c, t, f, top, &rows);
     let picks: Vec<Action> = (0..SCREEN_OFF.len()).map(Action::ScreenOff).collect();
-    let y = widgets::footnote(
-        &mut c,
-        t,
-        f,
-        times.bottom,
-        "超过所选时间没有操作，屏幕会先变暗，再熄灭。熄灭后轻触屏幕或按任意键即可点亮；需要选择分区或安装结束时，屏幕也会自动点亮。",
-    );
+    let y = widgets::footnote(&mut c, t, f, times.bottom, "超过所选时间未操作，屏幕将变暗并熄灭，轻触屏幕或按任意键即可点亮。");
     if SCREEN_OFF[s.screen_off].is_none() {
-        widgets::footnote(&mut c, t, f, y, "屏幕会一直亮着，同一画面显示太久会留下残影。");
+        widgets::footnote(&mut c, t, f, y, "屏幕将保持常亮，长时间显示同一画面可能留下残影。");
     }
     Frame::new(t, c, hits(&times.rows, &picks), "息屏时间", top)
 }
@@ -412,7 +406,7 @@ pub fn specs(cx: &Ctx) -> Frame {
     if let Some(v) = &i.boot.verified {
         boot.push(("验证启动", fmt::verified(v)));
     }
-    boot.push(("数据分区", fmt::data(&cx.state.data).to_string()));
+    boot.push(("data 分区", fmt::data(&cx.state.data).to_string()));
     y = widgets::info_card(&mut c, t, f, y + gap, &boot);
 
     if let Some(b) = &i.battery {
@@ -434,7 +428,7 @@ pub fn specs(cx: &Ctx) -> Frame {
 
     let storage = match i.storage.free {
         Some(free) => format!("可用存储 {} / 总存储 {}", fmt::gb(free), fmt::capacity(i.storage.total)),
-        None => format!("总存储 {} · 数据分区未挂载", fmt::capacity(i.storage.total)),
+        None => format!("总存储 {} · data 分区未挂载", fmt::capacity(i.storage.total)),
     };
     y = widgets::info_card(&mut c, t, f, y + gap, &[("机身存储", storage)]);
     let links = widgets::list(&mut c, t, f, y + gap, &[
@@ -911,11 +905,11 @@ pub fn search(cx: &Ctx) -> Frame {
     let top = field.field.y + field.field.h + m.dp(12.0);
     let kb_top = m.h as f32 - widgets::keyboard_height(t);
     if s.search.trim().is_empty() {
-        widgets::footnote(&mut c, t, f, top, "输入功能或分区的名称。中文名可以用拼音全拼或首字母，例如输入 bf 找到备份。");
+        widgets::footnote(&mut c, t, f, top, "输入功能或分区名称，支持拼音全拼和首字母，例如输入 bf 可找到「备份」。");
     } else {
         let found = search::find(&s.search);
         if found.is_empty() {
-            let none = format!("没有找到「{}」", s.search.trim());
+            let none = format!("未找到\"{}\"", s.search.trim());
             widgets::list(&mut c, t, f, top, &[Row::new(&none).trail(Trail::None)]);
         } else {
             let rows: Vec<Row> = found.iter().map(|e| Row::new(e.title).subtitle(e.place)).collect();
@@ -1235,11 +1229,11 @@ pub fn language(cx: &Ctx) -> Frame {
     let top = t.m.content_top;
     let list = widgets::list(&mut c, t, f, top, &[
         Row::new("简体中文").trail(Trail::Check(true)),
-        Row::new("繁體中文").subtitle("还没有翻译").trail(Trail::Check(false)),
+        Row::new("繁體中文").subtitle("暂未翻译").trail(Trail::Check(false)),
         Row::new("English").subtitle("Not translated yet").trail(Trail::Check(false)),
     ]);
-    let out = hits(&list.rows[1..], &[Action::Unavailable("这种语言还没有翻译"), Action::Unavailable("这种语言还没有翻译")]);
-    widgets::footnote(&mut c, t, f, list.bottom, "界面文字目前只有简体中文。");
+    let out = hits(&list.rows[1..], &[Action::Unavailable("暂不支持该语言"), Action::Unavailable("暂不支持该语言")]);
+    widgets::footnote(&mut c, t, f, list.bottom, "目前仅支持简体中文。");
     Frame::new(t, c, out, "语言", top)
 }
 
@@ -1263,9 +1257,9 @@ pub fn time_zone(cx: &Ctx) -> Frame {
     let top = t.m.content_top;
     let rows: Vec<Row> = TIME_ZONES.iter().enumerate().map(|(k, &(name, cities))| Row::new(name).subtitle(cities).trail(Trail::Check(k == 0))).collect();
     let list = widgets::list(&mut c, t, f, top, &rows);
-    let others = vec![Action::Unavailable("修改时区还没实现"); TIME_ZONES.len() - 1];
+    let others = vec![Action::Unavailable("暂不支持修改时区"); TIME_ZONES.len() - 1];
     let out = hits(&list.rows[1..], &others);
-    let bottom = widgets::footnote(&mut c, t, f, list.bottom, "时区决定状态栏显示的时间。");
+    let bottom = widgets::footnote(&mut c, t, f, list.bottom, "状态栏按所选时区显示时间。");
     Frame::new(t, fit(c, t, bottom), out, "时区", top)
 }
 
@@ -1277,27 +1271,27 @@ pub fn logs(cx: &Ctx) -> Frame {
     let top = t.m.content_top;
     let y = widgets::section_first(&mut c, t, f, top, "日志内容");
     let parts = widgets::list(&mut c, t, f, y, &[
-        Row::new("Recovery 日志").subtitle("界面、安装和挂载的输出").trail(Trail::Check(s.logs[0])),
-        Row::new("内核日志").subtitle("开机以来的内核消息，包括驱动和分区挂载").trail(Trail::Check(s.logs[1])),
+        Row::new("Recovery 日志").subtitle("界面、安装和挂载的记录").trail(Trail::Check(s.logs[0])),
+        Row::new("内核日志").subtitle("本次开机以来的内核消息").trail(Trail::Check(s.logs[1])),
     ]);
     out.extend(hits(&parts.rows, &[Action::LogPart(0), Action::LogPart(1)]));
     let y = widgets::section(&mut c, t, f, parts.bottom, "保存到");
-    let storage = if cx.state.data == Data::Open { "Skyward/logs 文件夹" } else { "需要先解密数据分区" };
+    let storage = if cx.state.data == Data::Open { "Skyward/logs 文件夹" } else { "需先完成「解密」" };
     let places = widgets::list(&mut c, t, f, y, &[
-        Row::new("临时文件夹").subtitle("/tmp/skyward-logs，在电脑上用 adb pull 取走").trail(Trail::Check(s.logs_to == 0)),
+        Row::new("临时文件夹").subtitle("/tmp/skyward-logs，可通过 adb pull 导出到电脑").trail(Trail::Check(s.logs_to == 0)),
         Row::new("内部存储").subtitle(storage).trail(Trail::Check(s.logs_to == 1)),
     ]);
     out.extend(hits(&places.rows, &[Action::LogsTo(0), Action::LogsTo(1)]));
-    let y = widgets::footnote(&mut c, t, f, places.bottom, "临时文件夹在重启后清空。");
+    let y = widgets::footnote(&mut c, t, f, places.bottom, "重启后将清空临时文件夹。");
     let export = widgets::button(&mut c, t, f, y + t.m.dp(24.0), "导出");
-    out.push(Hit { rect: export, action: Action::Unavailable("导出日志还没实现") });
+    out.push(Hit { rect: export, action: Action::Unavailable("暂不支持导出日志") });
     Frame::new(t, c, out, "导出日志", top)
 }
 
 /// Skyward's licence, in Chinese and in the words the licence gives for a
 /// program's notice.
-const LICENSE_NOTICE: &str = "Skyward 是自由软件：你可以按照自由软件基金会发布的 GNU 通用公共许可证第 3 版，或者（由你选择）任何更新的版本，重新发布和修改它。\n\n\
-发布 Skyward 是希望它能有用，但它不附带任何担保，也不担保它适于销售或适合某一特定用途。详情请看 GNU 通用公共许可证。";
+const LICENSE_NOTICE: &str = "Skyward 是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证第 3 版，或（由你选择）任何更新的版本，重新发布和修改它。\n\n\
+发布 Skyward 是希望它有用，但不附带任何担保，也不担保其适销性或适用于特定用途。详见 GNU 通用公共许可证。";
 
 const LICENSE_ORIGINAL: &str = "Skyward\nCopyright (C) 2026 Kirk Lin\n\n\
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.\n\n\
@@ -1336,7 +1330,7 @@ pub fn font_license(cx: &Ctx) -> Frame {
         t,
         f,
         y + t.m.dp(4.0),
-        "Skyward 的界面文字使用小米的 MiSans 字体，按《MiSans 字体知识产权许可协议》免费使用。字体文件没有经过改动，只随 Skyward 一起提供，不单独分发。\n\n协议全文见 hyperos.mi.com/font/zh/download。",
+        "界面文字使用小米 MiSans 字体，依据《MiSans 字体知识产权许可协议》免费使用。字体文件未经修改，仅随 Skyward 提供，不单独分发。\n\n协议全文可在 MiSans 官方网站查看。",
     );
     let y = widgets::section(&mut c, t, f, y, "终端文字");
     let holders: Vec<&str> = MONO_LICENSE.lines().take_while(|l| l.starts_with("Copyright")).collect();
@@ -1351,7 +1345,7 @@ pub fn font_license(cx: &Ctx) -> Frame {
         t,
         f,
         y + t.m.dp(4.0),
-        "终端的文字使用 Kirk Mono 等宽字体。这份许可证允许自由使用、修改和再发布字体，但不能单独出售字体本身。\n\n许可证全文随字体放在 /skyward/KirkMono-OFL.txt，也可以在 openfontlicense.org 查看。",
+        "终端文字使用 Kirk Mono 等宽字体。该许可证允许自由使用、修改和再发布字体，但不允许单独出售字体。\n\n许可证全文位于 /skyward/KirkMono-OFL.txt，也可在 openfontlicense.org 查看。",
     );
     Frame::new(t, fit(c, t, bottom), Vec::new(), "界面字体", top)
 }

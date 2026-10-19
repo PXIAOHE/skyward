@@ -148,9 +148,9 @@ pub fn android(release: &str, patch: Option<&PatchLevel>) -> String {
 
 pub fn verified(state: &str) -> String {
     match state {
-        "green" => "绿色 · 已用官方密钥验证",
-        "yellow" => "黄色 · 已用自定义密钥验证",
-        "orange" => "橙色 · 设备已解锁，不校验系统",
+        "green" => "绿色 · 已通过官方密钥验证",
+        "yellow" => "黄色 · 已通过自定义密钥验证",
+        "orange" => "橙色 · 设备已解锁，不验证系统",
         "red" => "红色 · 验证失败",
         other => return other.to_string(),
     }
@@ -159,11 +159,11 @@ pub fn verified(state: &str) -> String {
 
 pub fn snapshot(s: &SnapshotState) -> &'static str {
     match s {
-        SnapshotState::None => "没有待合并的更新",
-        SnapshotState::Snapshotted => "更新已写入快照，等待合并",
+        SnapshotState::None => "暂无待合并的更新",
+        SnapshotState::Snapshotted => "更新已写入，等待合并",
         SnapshotState::Merging => "正在合并更新",
         SnapshotState::MergeFailed => "更新合并失败",
-        SnapshotState::Unknown => "读不到更新状态",
+        SnapshotState::Unknown => "无法读取更新状态",
     }
 }
 
@@ -171,9 +171,9 @@ pub fn snapshot(s: &SnapshotState) -> &'static str {
 pub fn snapshot_note(s: &SnapshotState) -> Option<&'static str> {
     match s {
         SnapshotState::None => None,
-        SnapshotState::Snapshotted | SnapshotState::Merging => Some("合并完成前不会刷写 super 里的分区"),
-        SnapshotState::MergeFailed => Some("回到系统处理完之前不会刷写 super 里的分区"),
-        SnapshotState::Unknown => Some("读到更新状态之前不会刷写 super 里的分区"),
+        SnapshotState::Snapshotted | SnapshotState::Merging => Some("更新合并完成前，暂不刷写 super 中的分区"),
+        SnapshotState::MergeFailed => Some("在系统中处理完成前，暂不刷写 super 中的分区"),
+        SnapshotState::Unknown => Some("读取到更新状态前，暂不刷写 super 中的分区"),
     }
 }
 
@@ -182,9 +182,9 @@ pub fn snapshot_note(s: &SnapshotState) -> Option<&'static str> {
 pub fn snapshot_mount_note(s: &SnapshotState) -> Option<&'static str> {
     match s {
         SnapshotState::None => None,
-        SnapshotState::Snapshotted | SnapshotState::Merging => Some("合并完成前不能挂载 super 里的分区"),
-        SnapshotState::MergeFailed => Some("回到系统处理完之前不能挂载 super 里的分区"),
-        SnapshotState::Unknown => Some("读到更新状态之前不能挂载 super 里的分区"),
+        SnapshotState::Snapshotted | SnapshotState::Merging => Some("更新合并完成前，无法挂载 super 中的分区"),
+        SnapshotState::MergeFailed => Some("在系统中处理完成前，无法挂载 super 中的分区"),
+        SnapshotState::Unknown => Some("读取到更新状态前，无法挂载 super 中的分区"),
     }
 }
 
@@ -545,7 +545,7 @@ mod tests {
         assert_eq!(model_lines("Xiaomi 17 Ultra by Leica"), "Xiaomi 17 Ultra\nby Leica");
         assert_eq!(model_lines("Xiaomi 17 Ultra"), "Xiaomi 17 Ultra");
         assert_eq!(inches(6.9), "6.9″");
-        assert_eq!(verified("orange"), "橙色 · 设备已解锁，不校验系统");
+        assert_eq!(verified("orange"), "橙色 · 设备已解锁，不验证系统");
         assert_eq!(health("Watchdog timer expire"), "Watchdog timer expire");
     }
 
