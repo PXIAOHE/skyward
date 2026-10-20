@@ -219,7 +219,7 @@ fn conclude(done: Done, served: Result<Option<Fault>>) -> Outcome {
     }
 }
 
-fn install(ctx: &mut Context, mount: &Mount<Endpoints>, size: u64) -> Result<Done> {
+fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
     let file = File::open(fuse::PACKAGE).context("open the package")?;
     let package = package::identify(BufReader::with_capacity(1 << 16, file))?;
     let _ = kmsg(&format!("install: {}", describe(&package)));
@@ -240,7 +240,7 @@ fn describe(package: &Package) -> String {
     }
 }
 
-fn update_system(ctx: &mut Context, mount: &Mount<Endpoints>, update: &Update) -> Result<Done> {
+fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Result<Done> {
     let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
     if let Err(refusal) = package::check(update, &phone(slot)?) {
         return Ok(Done::Decided(Outcome::Refused(refusal)));
@@ -329,7 +329,7 @@ enum Line {
 
 /// Run update_engine on the package, telling the screen how far it is,
 /// and give its exit code.
-fn apply(ctx: &Context, mount: &Mount<Endpoints>, update: &Update) -> Result<i32> {
+fn apply<S>(ctx: &Context, mount: &Mount<S>, update: &Update) -> Result<i32> {
     let (status_read, status_write) = pipe(0)?;
     let status_fd = status_write.as_raw_fd();
     let mut command = std::process::Command::new(ota::PROGRAM);

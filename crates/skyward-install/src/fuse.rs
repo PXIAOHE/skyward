@@ -1,10 +1,10 @@
 //! The package as a file: a FUSE filesystem with one read-only file,
-//! /sideload/package.zip, whose blocks are fetched from the computer as
-//! they are read. A block read again must hash as it did the first time,
-//! so whoever reads the file sees one package even if the computer's copy
-//! changes underneath.
+//! /sideload/package.zip, whose blocks are fetched from where the package
+//! is as they are read. A block read again must hash as it did the first
+//! time, so whoever reads the file sees one package even if the copy it
+//! comes from changes underneath.
 
-use crate::adb::Offer;
+use crate::adb::{Connection, Link, Offer};
 use anyhow::{anyhow, Result};
 use polyfuse_kernel::{
     fuse_attr, fuse_attr_out, fuse_entry_out, fuse_in_header, fuse_init_in, fuse_init_out, fuse_opcode, fuse_open_out,
@@ -41,17 +41,32 @@ pub enum Handled {
     Exit(Vec<u8>),
 }
 
-/// Fetching a block from the computer; the error says why it failed.
+/// Fetching a block from where the package is; the error says why it
+/// failed.
 pub type Fetch<'a> = dyn FnMut(u64, &mut [u8]) -> Result<(), String> + 'a;
 
 /// Why the package stopped being readable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
-    /// Fetching a block failed: the computer stopped sending.
+    /// Fetching a block failed: where the package is stopped giving it.
     Transfer(String),
-    /// A block read again hashed differently: the file changed on the
-    /// computer while it was being sent.
+    /// A block read again hashed differently: the package changed where
+    /// it is while it was being read.
     Changed(u64),
+}
+
+/// Where the package's blocks come from.
+pub trait Source {
+    /// Block `index` into `out`, which is as long as the block; the error
+    /// says why it could not be read.
+    fn read_block(&mut self, index: u64, out: &mut [u8]) -> Result<(), String>;
+}
+
+/// The computer, sending the package with `adb sideload`.
+impl<L: Link> Source for Connection<L> {
+    fn read_block(&mut self, index: u64, out: &mut [u8]) -> Result<(), String> {
+        self.fetch(index, out).map_err(|e| e.to_string())
+    }
 }
 
 /// The filesystem's state: the package's blocks as served so far.
@@ -233,8 +248,8 @@ pub use device::{mount, Mount, Mounted};
 
 #[cfg(target_os = "android")]
 mod device {
-    use super::{Fault, Handled, Server, EXIT, MOUNT_POINT};
-    use crate::adb::{Connection, Link, Offer};
+    use super::{Fault, Handled, Server, Source, EXIT, MOUNT_POINT};
+    use crate::adb::Offer;
     use anyhow::{Context, Result};
     use std::ffi::CString;
     use std::fs::{self, File, OpenOptions};
@@ -256,9 +271,9 @@ mod device {
         offer: Offer,
     }
 
-    /// The filesystem, served from a thread of its own.
-    pub struct Mount<L> {
-        thread: JoinHandle<(Connection<L>, Result<Option<Fault>>)>,
+    /// The filesystem, served from a thread of its own out of `S`.
+    pub struct Mount<S> {
+        thread: JoinHandle<(S, Result<Option<Fault>>)>,
         served: Arc<AtomicU64>,
     }
 
@@ -293,24 +308,24 @@ mod device {
     }
 
     impl Mounted {
-        /// Serve the package from the computer at the other end of `conn`.
-        pub fn serve<L: Link + Send + 'static>(self, conn: Connection<L>) -> Mount<L> {
+        /// Serve the package from `source`.
+        pub fn serve<S: Source + Send + 'static>(self, source: S) -> Mount<S> {
             let served = Arc::new(AtomicU64::new(0));
             let reach = served.clone();
             let thread = thread::Builder::new()
                 .name("sideload-fuse".into())
                 .spawn(move || {
-                    let mut conn = conn;
+                    let mut source = source;
                     let mut server = Server::new(self.offer);
-                    let result = serve(&self.dev, &mut server, &mut conn, &reach);
-                    (conn, result.map(|()| server.fault().cloned()))
+                    let result = serve(&self.dev, &mut server, &mut source, &reach);
+                    (source, result.map(|()| server.fault().cloned()))
                 })
                 .expect("the FUSE thread starts");
             Mount { thread, served }
         }
     }
 
-    fn serve<L: Link>(dev: &File, server: &mut Server, conn: &mut Connection<L>, served: &AtomicU64) -> Result<()> {
+    fn serve(dev: &File, server: &mut Server, source: &mut impl Source, served: &AtomicU64) -> Result<()> {
         let mut buf = vec![0u8; REQUEST_BUFFER];
         loop {
             let n = match { dev }.read(&mut buf) {
@@ -320,7 +335,7 @@ mod device {
                 Err(e) if e.raw_os_error() == Some(libc::ENODEV) => return Ok(()),
                 Err(e) => return Err(e).context("read a FUSE request"),
             };
-            let mut fetch = |index: u64, out: &mut [u8]| conn.fetch(index, out).map_err(|e| e.to_string());
+            let mut fetch = |index: u64, out: &mut [u8]| source.read_block(index, out);
             let handled = server.handle(&buf[..n], &mut fetch)?;
             served.store(server.served(), Ordering::Relaxed);
             match handled {
@@ -341,20 +356,20 @@ mod device {
         }
     }
 
-    impl<L> Mount<L> {
+    impl<S> Mount<S> {
         /// How far into the package reads have reached.
         pub fn served(&self) -> u64 {
             self.served.load(Ordering::Relaxed)
         }
 
-        /// Stop serving and unmount. The connection always comes back; the
+        /// Stop serving and unmount. The source always comes back; the
         /// result says whether serving went well, and why the package
         /// stopped being readable if it did.
-        pub fn unmount(self) -> (Connection<L>, Result<Option<Fault>>) {
+        pub fn unmount(self) -> (S, Result<Option<Fault>>) {
             let stopped = stop();
-            let (conn, served) = self.thread.join().expect("the FUSE thread does not panic");
+            let (source, served) = self.thread.join().expect("the FUSE thread does not panic");
             let unmounted = skyward_block::mount::umount_detach(Path::new(MOUNT_POINT));
-            (conn, stopped.and(unmounted).and(served))
+            (source, stopped.and(unmounted).and(served))
         }
     }
 
