@@ -1424,6 +1424,9 @@ pub struct App {
     pub state: State,
     stack: Vec<(Screen, f32)>,
     frame: Option<Frame>,
+    /// How tall the page was when last drawn: one being drawn again, as
+    /// work under way tells how far it has come, scrolls as far meanwhile.
+    height: f32,
     /// The rows of the page's long list drawn so far, by their place in it;
     /// those far off screen are let go, their canvases kept spare for the
     /// next rows to be drawn on.
@@ -1483,6 +1486,7 @@ impl App {
             state: State::default(),
             stack: vec![(start, 0.0)],
             frame: None,
+            height: 0.0,
             drawn: Vec::new(),
             spare: Vec::new(),
             titles: None,
@@ -2166,6 +2170,7 @@ impl App {
             let screen = self.screen();
             let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref() };
             let frame = pages::render(screen, &cx);
+            self.height = frame.height(&t);
             self.frame = Some(frame);
             self.clamp_scroll();
             if std::mem::take(&mut self.snap) {
@@ -2178,8 +2183,7 @@ impl App {
     }
 
     fn max_scroll(&self) -> f32 {
-        let t = self.theme();
-        self.frame.as_ref().map_or(0.0, |f| (f.height(&t) - self.h as f32).max(0.0))
+        (self.height - self.h as f32).max(0.0)
     }
 
     fn clamp_scroll(&mut self) {
@@ -2326,6 +2330,7 @@ impl App {
     /// Put the page back where it rests, for a page just opened or returned
     /// to; its first frame shows the bar as its scroll has it.
     fn settle_page(&mut self) {
+        self.height = 0.0;
         self.fling = None;
         self.pull = 0.0;
         self.bounce = None;
@@ -3761,6 +3766,34 @@ mod tests {
         assert_eq!(app.deadline(lift + 5000), app.idle_due(), "the glide comes to rest");
         let rest = app.top().1;
         assert!(rest > lifted + 300.0 && rest < app.max_scroll(), "{rest}");
+    }
+
+    #[test]
+    fn a_page_drawn_again_as_work_goes_on_keeps_its_scroll() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.backup_started(false, Place::Storage, true);
+        app.backup_plan((0..20).map(|k| (format!("part{k}"), 1_000_000)).collect());
+        let at = |done| BackupAt { item: 0, done, of: 1_000_000, checking: false };
+        app.backup_at(at(0));
+        app.frame(&f, &i);
+        // A finger drags the page up while the work tells how far it has
+        // come, each time drawing the page again.
+        app.touch(Touch::Down(700.0, 2400.0), &f, 0);
+        for k in 1..=4u64 {
+            app.touch(Touch::Move(700.0, 2400.0 - 200.0 * k as f32), &f, 8 * k);
+        }
+        let dragged = app.top().1;
+        assert!(dragged > 0.0);
+        app.backup_at(at(500_000));
+        app.touch(Touch::Move(700.0, 1400.0), &f, 40);
+        assert_eq!((app.top().1, app.pull), (dragged + 200.0, 0.0), "the page goes on from where it was");
+        app.touch(Touch::Up, &f, 48);
+        let lifted = app.top().1;
+        app.backup_at(at(600_000));
+        app.tick(98);
+        assert!(app.top().1 > lifted, "a glide goes on through the page being drawn again");
+        assert_eq!(app.overscroll(98), 0.0, "and does not spring back from the top");
     }
 
     #[test]
