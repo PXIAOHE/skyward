@@ -9,8 +9,8 @@ pub mod boot;
 mod partitions;
 
 pub use partitions::{
-    mount_one, mount_partitions, mount_point, mounted_partitions, release_partitions, slot_bases, unmount_one,
-    unmount_partitions, Mounted, Mounts,
+    map_whole, mount_one, mount_partitions, mount_point, mounted_partitions, release_partitions, slot_bases, slot_sizes,
+    unmap_whole, unmount_one, unmount_partitions, Mounted, Mounts, Whole,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

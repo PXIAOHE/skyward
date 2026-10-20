@@ -49,18 +49,26 @@ fn block_devices(md: &Metadata, super_dev: &Path) -> Result<Vec<(u32, u32)>> {
         .collect()
 }
 
-/// Map partition `p` from super read-only with device-mapper and mount it
-/// over its point. A device that does not mount is removed again.
-fn map_and_mount(p: &Partition, devices: &[(u32, u32)], slot: Slot) -> Result<Mounted> {
-    let targets: Vec<dm::Target> = p
-        .extents
+/// The device-mapper targets that lay partition `p` out over super.
+fn targets(p: &Partition, devices: &[(u32, u32)]) -> Vec<dm::Target> {
+    p.extents
         .iter()
         .map(|e| match *e {
             Extent::Linear { sectors, device, sector } => dm::Target::Linear { sectors, device: devices[device], offset: sector },
             Extent::Zero { sectors } => dm::Target::Zero { sectors },
         })
-        .collect();
-    let device = dm::create(&p.name, &targets, true)?;
+        .collect()
+}
+
+/// How many bytes partition `p` holds.
+fn bytes(p: &Partition) -> u64 {
+    p.sectors() * 512
+}
+
+/// Map partition `p` from super read-only with device-mapper and mount it
+/// over its point. A device that does not mount is removed again.
+fn map_and_mount(p: &Partition, devices: &[(u32, u32)], slot: Slot) -> Result<Mounted> {
+    let device = dm::create(&p.name, &targets(p, devices), true)?;
     let mount_point = mount_point(base(p, slot));
     let mounted = (|| -> Result<String> {
         fs::create_dir_all(&mount_point).with_context(|| format!("create {}", mount_point.display()))?;
@@ -121,6 +129,41 @@ pub fn mount_partitions(slot: Slot) -> Result<Mounts> {
 pub fn slot_bases(slot: Slot) -> Result<Vec<String>> {
     let md = skyward_lp::read(&super_device(), slot.number())?;
     Ok(slot_partitions(&md, slot).into_iter().map(|p| base(p, slot).to_string()).collect())
+}
+
+/// The slot's logical partitions by base name with the bytes each holds, in
+/// the order super lists them.
+pub fn slot_sizes(slot: Slot) -> Result<Vec<(String, u64)>> {
+    let md = skyward_lp::read(&super_device(), slot.number())?;
+    Ok(slot_partitions(&md, slot).into_iter().map(|p| (base(p, slot).to_string(), bytes(p))).collect())
+}
+
+/// One of the slot's logical partitions mapped whole under a name of its
+/// own, beside the mapping the recovery mounts, for a backup to read it or
+/// a restore to write it.
+#[derive(Debug)]
+pub struct Whole {
+    pub name: String,
+    pub device: PathBuf,
+    pub size: u64,
+}
+
+/// Map the slot's logical partition `base_name` whole as `name`, read-only
+/// or not, while no update snapshot is outstanding.
+pub fn map_whole(slot: Slot, base_name: &str, name: &str, readonly: bool) -> Result<Whole> {
+    ensure_no_snapshot()?;
+    let super_dev = super_device();
+    let md = skyward_lp::read(&super_dev, slot.number())?;
+    let devices = block_devices(&md, &super_dev)?;
+    let full = format!("{base_name}{}", slot.suffix());
+    let p = slot_partitions(&md, slot).into_iter().find(|p| p.name == full).with_context(|| format!("super holds no {full}"))?;
+    let device = dm::create(name, &targets(p, &devices), readonly)?;
+    Ok(Whole { name: name.into(), device, size: bytes(p) })
+}
+
+/// Remove a mapping [`map_whole`] made.
+pub fn unmap_whole(whole: &Whole) -> Result<()> {
+    dm::remove(&whole.name)
 }
 
 /// Map and mount one of the slot's logical partitions read-only by its base

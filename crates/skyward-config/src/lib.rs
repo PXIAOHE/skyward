@@ -43,6 +43,24 @@ pub struct DeviceConfig {
     pub haptics: Option<Haptics>,
     #[serde(default)]
     pub wipe: Wipe,
+    #[serde(default)]
+    pub backup: Backup,
+}
+
+/// What a backup takes in and leaves out beyond what every Android phone
+/// keeps the same.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Backup {
+    /// The partitions that keep the baseband's settings, with the phone's
+    /// own identity, and the sensors' calibration.
+    #[serde(default)]
+    pub efs: Vec<String>,
+    /// Folders in the data partition, from its top, that the phone's own
+    /// secure world keeps in step with itself, as its own storage and the
+    /// fingerprint templates: an older copy written back would not open.
+    /// A `*` stands for any one name.
+    #[serde(default)]
+    pub data_skipped: Vec<String>,
 }
 
 /// What erasing on the wipe page takes in beyond the places every Android
@@ -187,6 +205,14 @@ impl DeviceConfig {
                 "[wipe] logs: {log} is not a folder inside {DATA}"
             );
         }
+        for name in &cfg.backup.efs {
+            ensure!(!name.is_empty() && !name.contains('/'), "[backup] efs: {name} is not a partition's name");
+        }
+        for folder in &cfg.backup.data_skipped {
+            let path = Path::new(folder);
+            let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+            ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
+        }
         Ok(cfg)
     }
 }
@@ -253,6 +279,17 @@ mod tests {
             Some("android.hardware.gatekeeper@1.0::IGatekeeper/default")
         );
         assert_eq!(cfg.services[6].ready_hardware_service.as_deref(), Some("android.hardware.boot@1.2::IBootControl/default"));
+        assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
+        assert!(cfg.backup.data_skipped.contains(&"vendor/tzstorage".to_string()));
+    }
+
+    #[test]
+    fn what_a_backup_takes_in_is_named_plainly() {
+        let base = "[device]\ncodename = \"x\"\n";
+        assert!(DeviceConfig::parse(&format!("{base}[backup]\nefs = [\"by-name/fsg\"]\n")).is_err());
+        assert!(DeviceConfig::parse(&format!("{base}[backup]\ndata_skipped = [\"/data/vendor\"]\n")).is_err());
+        assert!(DeviceConfig::parse(&format!("{base}[backup]\ndata_skipped = [\"vendor/../system\"]\n")).is_err());
+        assert!(DeviceConfig::parse(&format!("{base}[backup]\ndata_skipped = [\"vendor_de/*/fpdata\"]\n")).is_ok());
     }
 
     #[test]

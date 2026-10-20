@@ -143,6 +143,47 @@ mod sys {
         Ok(mounts()?.iter().any(|m| m.mount_point == path))
     }
 
+    /// Where the device numbered `device` is mounted.
+    pub fn points_of(device: (u32, u32)) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for m in mounts()? {
+            let (major, minor) = m.majmin.split_once(':').with_context(|| format!("device number {:?}", m.majmin))?;
+            if (major.parse::<u32>()?, minor.parse::<u32>()?) == device {
+                out.push(m.mount_point);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Mount what shows at `target` again with the flags it has, writable
+    /// or read-only. Going read-only writes all it holds out first.
+    pub fn remount_writable(target: &Path, writable: bool) -> Result<()> {
+        let c = cstr(target)?;
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+            return Err(os_error()).with_context(|| format!("look at the mount on {}", target.display()));
+        }
+        let kept = [
+            (libc::ST_NOSUID, libc::MS_NOSUID),
+            (libc::ST_NODEV, libc::MS_NODEV),
+            (libc::ST_NOEXEC, libc::MS_NOEXEC),
+            (libc::ST_NOATIME, libc::MS_NOATIME),
+            (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
+            (libc::ST_RELATIME, libc::MS_RELATIME),
+        ];
+        let mut flags = libc::MS_REMOUNT;
+        for (has, keep) in kept {
+            if st.f_flag & has != 0 {
+                flags |= keep;
+            }
+        }
+        if !writable {
+            flags |= libc::MS_RDONLY;
+        }
+        let what = if writable { "writable" } else { "read-only" };
+        remount(target, flags, what)
+    }
+
     /// What is visibly mounted at `path`, the last of any mounts stacked there.
     pub fn visible(path: &Path) -> Result<Option<Visible>> {
         let Some(m) = mounts()?.into_iter().rev().find(|m| m.mount_point == path) else {
@@ -388,6 +429,14 @@ mod sys {
         bail!("this host has no mount table to look up {}", path.display())
     }
 
+    pub fn points_of(_device: (u32, u32)) -> Result<Vec<std::path::PathBuf>> {
+        bail!("this host has no mount table to look up")
+    }
+
+    pub fn remount_writable(target: &Path, _writable: bool) -> Result<()> {
+        bail!("this host does not mount {}", target.display())
+    }
+
     pub fn holders() -> Result<HashMap<(u32, u32), BTreeSet<String>>> {
         bail!("this host does not look up which programs hold a filesystem")
     }
@@ -398,8 +447,8 @@ mod sys {
 }
 
 pub use sys::{
-    bind, holders, holding, is_mount_point, mount, mount_ro, mount_ro_over, umount, umount_detach, umount_detach_over,
-    umount_over, visible,
+    bind, holders, holding, is_mount_point, mount, mount_ro, mount_ro_over, points_of, remount_writable, umount, umount_detach,
+    umount_detach_over, umount_over, visible,
 };
 
 #[cfg(test)]

@@ -73,6 +73,15 @@ ready_hardware_service = "android.hardware.boot@1.2::IBootControl/default"
 click = 0
 click_ms = 53
 
+# The partitions a backup of the baseband and EFS takes: the baseband's
+# settings, with the IMEI, and the sensors' calibration. And what of the
+# data partition a backup leaves out because the secure world keeps it in
+# step with itself: its own storage, its apps' data and the fingerprint
+# templates.
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+data_skipped = ["vendor/tzstorage", "vendor/qtee", "vendor/fingerprint", "vendor/fpc", "vendor/goodix"]
+
 # Where the phone's own programs keep logs in the data partition: the
 # system's, the last kernel and logcat lines the diag service saves at each
 # start, and what the modem, Wi-Fi and Bluetooth leave when they crash.
