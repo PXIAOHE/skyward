@@ -560,9 +560,11 @@ pub fn reboot(cx: &Ctx) -> Frame {
     out.extend(hits(&targets.rows, &picks));
     y = targets.bottom;
     if let Some(slot) = cx.info.slot {
-        let next = match s.next_slot {
-            Some(other) => other.letter().to_string(),
-            None => format!("{}（当前）", slot.letter()),
+        let next = match &s.boot_slots {
+            Some(Ok(slots)) if slots.active == slot => format!("{}（当前）", slot.letter()),
+            Some(Ok(slots)) => slots.active.letter().to_string(),
+            Some(Err(_)) => "无法读取".to_string(),
+            None => String::new(),
         };
         y = widgets::section(&mut c, t, f, y, "槽位");
         let slots = widgets::list(&mut c, t, f, y, &[Row::new("下次启动").trail(Trail::Value(&next))]);
@@ -1461,7 +1463,9 @@ pub fn font_license(cx: &Ctx) -> Frame {
     Frame::new(t, fit(c, t, bottom), Vec::new(), "界面字体", top)
 }
 
-/// Which slot the phone starts from next.
+/// Which slot the phone starts from next, as the boot control holds it,
+/// and what it holds of each; picking the other and swiping switches.
+/// While an update is in flight the slot stays as the update set it.
 pub fn slot(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
     let mut c = page(t);
@@ -1471,20 +1475,35 @@ pub fn slot(cx: &Ctx) -> Frame {
         widgets::list(&mut c, t, f, top, &[Row::new("本机没有 A/B 槽位").trail(Trail::None)]);
         return Frame::new(t, c, out, "启动槽位", top);
     };
-    let chosen = s.next_slot.unwrap_or(current);
+    let slots = match &s.boot_slots {
+        Some(Ok(slots)) => *slots,
+        Some(Err(why)) => {
+            let list = widgets::list(&mut c, t, f, top, &[Row::new("无法读取启动槽位").trail(Trail::None)]);
+            widgets::footnote(&mut c, t, f, list.bottom, why);
+            return Frame::new(t, c, out, "启动槽位", top);
+        }
+        None => return Frame::new(t, c, out, "启动槽位", top),
+    };
+    let chosen = s.next_slot.unwrap_or(slots.active);
     let y = widgets::section_first(&mut c, t, f, top, "下次启动");
     let titles = [Slot::A, Slot::B].map(|slot| format!("槽位 {}", slot.letter()));
-    let rows: Vec<Row> = [Slot::A, Slot::B]
-        .iter()
-        .zip(&titles)
-        .map(|(&slot, title)| {
-            let sub = if slot == current { "当前运行的系统" } else { "另一个槽位" };
-            Row::new(title).subtitle(sub).trail(Trail::Check(slot == chosen))
-        })
-        .collect();
+    let subs = [Slot::A, Slot::B].map(|slot| {
+        let k = slot.number() as usize;
+        let which = if slot == current { "当前运行的系统" } else { "另一个槽位" };
+        match (slots.bootable[k], slots.successful[k]) {
+            (false, _) => format!("{which}，已标记为无法启动"),
+            (true, false) => format!("{which}，尚未完整启动过"),
+            (true, true) => which.to_string(),
+        }
+    });
+    let rows: Vec<Row> =
+        [Slot::A, Slot::B].iter().enumerate().map(|(k, &slot)| Row::new(&titles[k]).subtitle(&subs[k]).trail(Trail::Check(slot == chosen))).collect();
     let list = widgets::list(&mut c, t, f, y, &rows);
-    let picks = [Slot::A, Slot::B].map(|slot| Action::PickSlot((slot != current).then_some(slot)));
-    out.extend(hits(&list.rows, &picks));
+    out.extend(hits(&list.rows, &[Slot::A, Slot::B].map(Action::PickSlot)));
+    if let Some(note) = fmt::snapshot_slot_note(&i.snapshot) {
+        widgets::footnote(&mut c, t, f, list.bottom, note);
+        return Frame::new(t, c, out, "启动槽位", top);
+    }
     let y = widgets::footnote(&mut c, t, f, list.bottom, "另一个槽位中没有完整的系统时，切换后将无法开机。");
     let (label, danger) = confirm_label(Confirm::Slot);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);

@@ -540,6 +540,33 @@ fn read_mounts(services: &[Service]) -> Result<Vec<skyward_ui::app::MountRow>> {
     Ok(rows)
 }
 
+/// What the phone's boot control holds of the slots, or why it cannot be
+/// asked.
+fn read_slots() -> Result<skyward_vab::BootSlots, String> {
+    let read = || -> Result<skyward_vab::BootSlots> {
+        let binder = skyward_binder::driver::Binder::hardware()?;
+        let control = skyward_vab::boot::BootControl::open(&binder)?;
+        control.slots()
+    };
+    read().map_err(|e| format!("{e:#}"))
+}
+
+/// Have the bootloader start `slot` next and give what the boot control
+/// holds of the slots then, unless an update is in flight: it set the
+/// slot it needs itself.
+fn set_slot(slot: skyward_vab::Slot) -> Result<skyward_vab::BootSlots, String> {
+    let set = || -> Result<skyward_vab::BootSlots> {
+        let state = skyward_vab::snapshot_state()?;
+        ensure!(state == skyward_vab::SnapshotState::None, "an update is in flight ({state:?}), and it set the slot it needs");
+        let binder = skyward_binder::driver::Binder::hardware()?;
+        let control = skyward_vab::boot::BootControl::open(&binder)?;
+        control.set_active(slot)?;
+        skyward_sys::kmsg(&format!("slot {} starts next", slot.letter()))?;
+        control.slots()
+    };
+    set().map_err(|e| format!("{e:#}"))
+}
+
 /// What has to happen before an update writes over the installed system's
 /// partitions: the files the phone's own programs run from stay in memory,
 /// and the booted slot's partitions come off.
@@ -1016,6 +1043,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::Cancel => installer.as_ref().context("no installer to cancel")?.cancel()?,
                     Effect::ReadMounts => app.set_mounts(mounts()),
+                    Effect::ReadSlots => app.set_boot_slots(read_slots()),
+                    Effect::SetSlot(slot) => app.slot_switched(set_slot(slot), now),
                     // The decrypt page shows meanwhile that the work is
                     // under way, and takes nothing more until it is done.
                     Effect::OpenData => {

@@ -59,6 +59,14 @@ path = "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
 
+# The boot control, which says which slot the bootloader starts next and
+# switches it, writing where the bootloader reads it. It comes last: the
+# phone is usable without it.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot@1.2-service"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_hardware_service = "android.hardware.boot@1.2::IBootControl/default"
+
 # qcom-hv-haptics. Waveform 0 is the click: 8 pattern samples at 6667 µs
 # each (its debugfs entry, haptics/effect0).
 [haptics]

@@ -233,6 +233,7 @@ mod tests {
                 "/vendor/bin/hw/android.hardware.security.keymint-service-qti",
                 "/mnt/system_ext/bin/hwservicemanager",
                 "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti",
+                "/vendor/bin/hw/android.hardware.boot@1.2-service",
             ]
         );
         assert_eq!(cfg.services[1].libraries, ["/odm/lib64", "/system/lib64"]);
@@ -251,6 +252,7 @@ mod tests {
             cfg.services[5].ready_hardware_service.as_deref(),
             Some("android.hardware.gatekeeper@1.0::IGatekeeper/default")
         );
+        assert_eq!(cfg.services[6].ready_hardware_service.as_deref(), Some("android.hardware.boot@1.2::IBootControl/default"));
     }
 
     #[test]

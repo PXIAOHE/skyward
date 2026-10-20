@@ -13,7 +13,7 @@ use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Stage};
-use skyward_vab::{Hold, Slot};
+use skyward_vab::{BootSlots, Hold, Slot};
 
 /// The pages of the recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -680,8 +680,8 @@ pub enum Action {
     LogsTo(usize),
     /// Save the logs ticked where they are to go.
     ExportLogs,
-    /// Start next from this slot; `None` is the one running now.
-    PickSlot(Option<Slot>),
+    /// Pick this slot to start next; a swipe then switches to it.
+    PickSlot(Slot),
     /// A key of the on-screen keyboard.
     Type(Cap),
     /// A key of the terminal's own row, above the keyboard.
@@ -905,7 +905,11 @@ pub struct State {
     pub logs: [bool; 2],
     /// Where the logs go: 0 for /tmp, 1 for internal storage.
     pub logs_to: usize,
-    /// The slot chosen to start from next; `None` keeps the running one.
+    /// What the phone's boot control holds of the slots, as the runtime
+    /// last read it for the slot or reboot page, or why it could not.
+    pub boot_slots: Option<Result<BootSlots, String>>,
+    /// The slot picked on the slot page to start next; with none picked,
+    /// the page shows the one the boot control starts next.
     pub next_slot: Option<Slot>,
     /// Where the data partition stands, and what is typed at the screen
     /// lock its users' own files wait on.
@@ -973,6 +977,7 @@ impl Default for State {
             restore: None,
             logs: [true, true],
             logs_to: 0,
+            boot_slots: None,
             next_slot: None,
             data: Data::Closed,
             code: String::new(),
@@ -1062,6 +1067,12 @@ pub enum Effect {
     Cancel,
     /// Read the slot's partitions for the mount page, which has just opened.
     ReadMounts,
+    /// Read what the boot control holds of the slots, telling it with
+    /// [`App::set_boot_slots`].
+    ReadSlots,
+    /// Have the bootloader start this slot next, telling how it went with
+    /// [`App::slot_switched`].
+    SetSlot(Slot),
     /// Mount the slot's partition with this base name, such as `system`.
     Mount(String),
     /// Unmount the slot's partition with this base name.
@@ -1877,6 +1888,27 @@ impl App {
         self.refresh();
     }
 
+    /// What the boot control holds of the slots, as the runtime read it, or
+    /// why it could not.
+    pub fn set_boot_slots(&mut self, slots: Result<BootSlots, String>) {
+        self.state.boot_slots = Some(slots);
+        self.refresh();
+    }
+
+    /// How switching the slot to start next went: what the boot control
+    /// holds of the slots now, or why it did not switch.
+    pub fn slot_switched(&mut self, outcome: Result<BootSlots, String>, now: u64) {
+        match outcome {
+            Ok(slots) => {
+                self.state.next_slot = None;
+                self.state.boot_slots = Some(Ok(slots));
+                self.say(&format!("下次将从槽位 {} 启动", slots.active.letter()), now);
+                self.refresh();
+            }
+            Err(why) => self.say(&format!("切换失败：{why}"), now),
+        }
+    }
+
     /// The runtime could not mount or unmount a partition: the mount page
     /// says so, and why.
     pub fn mount_failed(&mut self, failure: MountFailure) {
@@ -2144,6 +2176,8 @@ impl App {
         }
         match self.screen() {
             Screen::Mount => self.state.mount_failure = None,
+            // A slot picked and not switched to is put down.
+            Screen::Slot => self.state.next_slot = None,
             Screen::Files => {
                 if let Some(up) = self.state.files.up() {
                     return vec![Effect::ReadDir(up)];
@@ -2260,6 +2294,7 @@ impl App {
     fn arrive_at(&mut self, s: Screen) -> Vec<Effect> {
         match s {
             Screen::Mount => vec![Effect::ReadMounts],
+            Screen::Slot | Screen::Reboot => vec![Effect::ReadSlots],
             Screen::Files => vec![Effect::ReadDir(self.state.files.path.clone())],
             Screen::Choose(place) if self.state.place_open(place) => vec![Effect::ReadPlace(place, self.state.folder(s).path.clone())],
             Screen::Search => {
@@ -2483,7 +2518,7 @@ impl App {
                 }
             }
             Action::PickSlot(slot) => {
-                self.state.next_slot = slot;
+                self.state.next_slot = Some(slot);
                 self.refresh();
             }
             Action::Type(cap) if self.screen() == Screen::Terminal => return self.term_typed(cap),
@@ -2874,9 +2909,13 @@ impl App {
                             }
                             Confirm::Backup => self.say("暂不支持备份", now),
                             Confirm::Restore => self.say("暂不支持恢复", now),
-                            Confirm::Slot => match self.state.next_slot {
-                                None => self.say("已从该槽位启动", now),
-                                Some(_) => self.say("暂不支持切换槽位", now),
+                            Confirm::Slot => match (&self.state.boot_slots, self.state.next_slot) {
+                                (Some(Ok(slots)), Some(pick)) if pick != slots.active => fx.push(Effect::SetSlot(pick)),
+                                (Some(Ok(slots)), _) => {
+                                    let said = format!("下次已从槽位 {} 启动", slots.active.letter());
+                                    self.say(&said, now);
+                                }
+                                _ => self.say("无法读取启动槽位", now),
                             },
                             Confirm::FactoryReset => fx.push(Effect::FactoryReset),
                             Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
@@ -4118,18 +4157,30 @@ mod tests {
     }
 
     #[test]
-    fn the_slot_page_picks_the_other_slot_and_the_reboot_page_says_so() {
+    fn the_slot_page_switches_to_the_slot_picked() {
         let (f, i) = (fonts(), DeviceInfo { slot: Some(Slot::B), ..info() });
         let mut app = App::new(Screen::Reboot, W, H, PPD);
-        tap(&mut app, &f, &i, Action::Open(Screen::Slot));
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Slot)), vec![Effect::ReadSlots], "read as the page opens");
+        let held = BootSlots { active: Slot::B, bootable: [false, true], successful: [true, true] };
+        app.set_boot_slots(Ok(held));
         assert!(swipe(&mut app, &f, &i, Confirm::Slot).is_empty());
-        assert_eq!(app.deadline(0), Some(TOAST_MS), "already starting from B");
-        tap(&mut app, &f, &i, Action::PickSlot(Some(Slot::A)));
-        assert_eq!(app.state.next_slot, Some(Slot::A));
-        tap(&mut app, &f, &i, Action::PickSlot(None));
-        assert_eq!(app.state.next_slot, None, "picking the running slot keeps it");
-        tap(&mut app, &f, &i, Action::PickSlot(Some(Slot::A)));
-        assert!(swipe(&mut app, &f, &i, Confirm::Slot).is_empty(), "switching is not done yet");
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "B starts next already");
+        tap(&mut app, &f, &i, Action::PickSlot(Slot::A));
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Slot), vec![Effect::SetSlot(Slot::A)]);
+        let switched = BootSlots { active: Slot::A, bootable: [true, true], ..held };
+        app.slot_switched(Ok(switched), 0);
+        assert_eq!((app.state.boot_slots.clone(), app.state.next_slot), (Some(Ok(switched)), None), "the pick is done with");
+        tap(&mut app, &f, &i, Action::PickSlot(Slot::B));
+        app.key(Key::Back, 0);
+        assert_eq!(app.state.next_slot, None, "a pick left unswitched is put down");
+    }
+
+    #[test]
+    fn the_slot_stays_as_an_update_in_flight_set_it() {
+        let (f, i) = (fonts(), DeviceInfo { slot: Some(Slot::B), snapshot: SnapshotState::Snapshotted, ..info() });
+        let mut app = App::new(Screen::Slot, W, H, PPD);
+        app.set_boot_slots(Ok(BootSlots { active: Slot::A, bootable: [true, true], successful: [false, true] }));
+        assert!(app.frame(&f, &i).hits.iter().all(|h| !matches!(h.action, Action::Confirm(_))), "nothing to swipe");
     }
 
     /// Whether the page shows a key of the keypad or keyboard to tap.

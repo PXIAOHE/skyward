@@ -8,7 +8,7 @@ use skyward_ui::app::{
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
-use skyward_vab::{Hold, Slot, SnapshotState};
+use skyward_vab::{BootSlots, Hold, Slot, SnapshotState};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -214,7 +214,7 @@ fn main() -> Result<()> {
         app.state.install = install;
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 67] = [
+    let pages: [PageShot; 68] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -299,7 +299,13 @@ fn main() -> Result<()> {
         ("57-logs-light", Screen::Logs, false, &|_| {}),
         ("58-license-light", Screen::License, false, &|_| {}),
         ("59-font-license-light", Screen::FontLicense, false, &|_| {}),
-        ("60-slot-dark", Screen::Slot, true, &|app| app.state.next_slot = Some(Slot::A)),
+        ("60-slot-dark", Screen::Slot, true, &|app| {
+            app.set_boot_slots(Ok(BootSlots { active: Slot::B, bootable: [false, true], successful: [true, true] }));
+            app.state.next_slot = Some(Slot::A);
+        }),
+        ("60-slot-light-unread", Screen::Slot, false, &|app| {
+            app.set_boot_slots(Err("android.hardware.boot@1.2::IBootControl is not running; the phone's boot control has to be started first".into()))
+        }),
         ("68-fastboot-light", Screen::Fastboot, false, &|app| app.set_fastboot(true, UsbLink::Connected)),
         ("69-fastboot-dark-unplugged", Screen::Fastboot, true, &|app| {
             app.set_fastboot(true, UsbLink::Unplugged);

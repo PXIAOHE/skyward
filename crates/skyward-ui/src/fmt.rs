@@ -181,6 +181,17 @@ pub fn snapshot_note(s: &SnapshotState) -> Option<&'static str> {
     }
 }
 
+/// Why the slot to start next stays as an update in flight set it; `None`
+/// when none is.
+pub fn snapshot_slot_note(s: &SnapshotState) -> Option<&'static str> {
+    match s {
+        SnapshotState::None => None,
+        SnapshotState::Snapshotted | SnapshotState::Merging => Some("更新合并完成前，暂不切换启动槽位。"),
+        SnapshotState::MergeFailed => Some("在系统中处理完成前，暂不切换启动槽位。"),
+        SnapshotState::Unknown => Some("读取到更新状态前，暂不切换启动槽位。"),
+    }
+}
+
 /// Why the mount page mounts nothing from super while an update is in
 /// flight; `None` when it is not.
 pub fn snapshot_mount_note(s: &SnapshotState) -> Option<&'static str> {
