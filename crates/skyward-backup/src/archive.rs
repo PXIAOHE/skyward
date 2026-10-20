@@ -46,9 +46,21 @@ impl Skipped {
 }
 
 /// How many bytes of file contents `pack` would archive, each file with
-/// more than one name once, and how many entries there are.
-pub fn measure(root: &Path, skipped: &Skipped) -> Result<(u64, u64)> {
-    fn walk(folder: &Path, rel: &Path, dev: u64, skipped: &Skipped, seen: &mut HashSet<(u64, u64)>, sum: &mut (u64, u64)) -> Result<()> {
+/// more than one name once, and how many entries there are; stopping when
+/// asked to.
+pub fn measure(root: &Path, skipped: &Skipped, cancel: &AtomicBool) -> Result<(u64, u64)> {
+    fn walk(
+        folder: &Path,
+        rel: &Path,
+        dev: u64,
+        skipped: &Skipped,
+        cancel: &AtomicBool,
+        seen: &mut HashSet<(u64, u64)>,
+        sum: &mut (u64, u64),
+    ) -> Result<()> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
         for (name, path, meta) in children(folder)? {
             let rel = rel.join(&name);
             if skipped.holds(&rel) || meta.file_type().is_socket() || (meta.is_dir() && meta.dev() != dev) {
@@ -58,14 +70,14 @@ pub fn measure(root: &Path, skipped: &Skipped) -> Result<(u64, u64)> {
             if meta.is_file() && (meta.nlink() == 1 || seen.insert((meta.dev(), meta.ino()))) {
                 sum.0 += meta.len();
             } else if meta.is_dir() {
-                walk(&path, &rel, dev, skipped, seen, sum)?;
+                walk(&path, &rel, dev, skipped, cancel, seen, sum)?;
             }
         }
         Ok(())
     }
     let dev = fs::symlink_metadata(root).with_context(|| format!("look at {}", root.display()))?.dev();
     let mut sum = (0, 0);
-    walk(root, Path::new(""), dev, skipped, &mut HashSet::new(), &mut sum)?;
+    walk(root, Path::new(""), dev, skipped, cancel, &mut HashSet::new(), &mut sum)?;
     Ok(sum)
 }
 
@@ -671,7 +683,7 @@ mod tests {
         tree(&from);
         #[cfg(target_os = "android")]
         set_xattr(&from.join("data/com.example/empty"), "user.skyward", b"kept").unwrap();
-        let (bytes, entries) = measure(&from, &skipped()).unwrap();
+        let (bytes, entries) = measure(&from, &skipped(), &AtomicBool::new(false)).unwrap();
         assert_eq!((bytes, entries), (300_000 + 11, 11), "what is left out is not counted, nor a second name");
         let mut archived = Vec::new();
         let mut told = 0;
@@ -717,10 +729,12 @@ mod tests {
     }
 
     #[test]
-    fn packing_stops_when_asked() {
+    fn measuring_and_packing_stop_when_asked() {
         let at = scratch("stop");
         tree(&at.join("from"));
         let stop = AtomicBool::new(true);
+        let e = measure(&at.join("from"), &skipped(), &stop).unwrap_err();
+        assert!(e.is::<Cancelled>(), "{e:#}");
         let e = pack(&at.join("from"), &skipped(), io::sink(), &stop, &mut |_| {}).unwrap_err();
         assert!(e.is::<Cancelled>(), "{e:#}");
         fs::remove_dir_all(&at).unwrap();

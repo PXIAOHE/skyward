@@ -208,6 +208,23 @@ impl Read for Reader {
     }
 }
 
+/// The SHA-256 of the first `len` bytes `from` gives, in hex as a part's is
+/// kept: a partition read back once a part is written to it, to see that
+/// it holds the part. Tells how many bytes are read so far.
+pub fn digest(mut from: impl Read, len: u64, progress: &mut dyn FnMut(u64)) -> io::Result<String> {
+    let mut digest = Sha256::new();
+    let mut buf = vec![0u8; 4 << 20];
+    let mut done = 0u64;
+    while done < len {
+        let want = (len - done).min(buf.len() as u64) as usize;
+        from.read_exact(&mut buf[..want])?;
+        digest.update(&buf[..want]);
+        done += want as u64;
+        progress(done);
+    }
+    Ok(hex(&digest.finalize()))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -270,6 +287,26 @@ mod tests {
         fs::remove_file(&second).unwrap();
         let mut r = Reader::open(&at, &stored);
         assert!(io::copy(&mut r, &mut io::sink()).is_err(), "a file gone is an error");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn what_is_read_back_digests_as_the_part_was_stored() {
+        let at = scratch("digest");
+        let held = sample(3_000);
+        let mut w = Writer::cut_at(&at, "dtbo", true, Ownership::Kept, 1_000);
+        w.write_all(&held).unwrap();
+        let stored = w.finish().unwrap();
+        // A partition is larger than what went into it; only the part's
+        // bytes count.
+        let mut partition = held.clone();
+        partition.extend([0xff; 512]);
+        let mut told = 0;
+        assert_eq!(digest(partition.as_slice(), stored.size, &mut |n| told = n).unwrap(), stored.sha256);
+        assert_eq!(told, 3_000);
+        partition[2_999] ^= 1;
+        assert_ne!(digest(partition.as_slice(), stored.size, &mut |_| {}).unwrap(), stored.sha256);
+        assert!(digest(&held[..10], stored.size, &mut |_| {}).is_err(), "a partition too small to hold the part");
         fs::remove_dir_all(&at).unwrap();
     }
 
