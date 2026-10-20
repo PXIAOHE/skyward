@@ -130,8 +130,14 @@ impl Packing<'_> {
                 return Err(Cancelled.into());
             }
             let own = if meta.is_dir() { key(&path)? } else { None };
-            self.entry(b, &path, &rel, &meta, meta.is_dir() && own.as_deref() != above)
-                .with_context(|| format!("archive {}", path.display()))?;
+            if let Err(e) = self.entry(b, &path, &rel, &meta, meta.is_dir() && own.as_deref() != above) {
+                // A file stopped partway through comes back as an error of
+                // the archive's writing; it was stopped all the same.
+                if self.cancel.load(Ordering::Relaxed) {
+                    return Err(Cancelled.into());
+                }
+                return Err(e.context(format!("archive {}", path.display())));
+            }
             if meta.is_dir() {
                 self.folder(b, &path, &rel, dev, skipped, own.as_deref())?;
             }
@@ -737,6 +743,9 @@ mod tests {
         assert!(e.is::<Cancelled>(), "{e:#}");
         let e = pack(&at.join("from"), &skipped(), io::sink(), &stop, &mut |_| {}).unwrap_err();
         assert!(e.is::<Cancelled>(), "{e:#}");
+        let partway = AtomicBool::new(false);
+        let e = pack(&at.join("from"), &skipped(), io::sink(), &partway, &mut |n| partway.store(n > 0, Ordering::Relaxed)).unwrap_err();
+        assert!(e.is::<Cancelled>(), "stopped in the middle of a file: {e:#}");
         fs::remove_dir_all(&at).unwrap();
     }
 
