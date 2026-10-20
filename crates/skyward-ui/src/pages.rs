@@ -1418,7 +1418,6 @@ pub fn fastboot(cx: &Ctx) -> Frame {
     Frame { back: false, ..Frame::new(t, c, out, "Fastboot", top) }
 }
 
-/// What a part erasing goes through is called on its page.
 /// Where to go once what the system asked for has stopped or cannot be
 /// done, in the order the pages list them.
 const AFTERWARDS: [(&str, Action); 3] = [
@@ -1482,10 +1481,10 @@ pub fn erase(cx: &Ctx) -> Frame {
             let (what, detail) = fmt::erase_stop(stop);
             std::iter::once(what).chain(detail).collect()
         }
-        (_, true, true) => vec![format!("手机上的所有数据将被清除，完成后将自动{end}。")],
+        (_, true, true) => vec![format!("本机的全部数据将被清除，完成后将自动{end}。")],
         (_, true, false) => vec![format!("完成后将自动{end}。")],
         (None, false, _) => vec!["清除完成前，请不要关机。".to_string()],
-        (Some(Ok(())), false, true) => vec!["下次开机时将重新建立 data 分区，启动时间较长。".to_string()],
+        (Some(Ok(())), false, true) => vec!["下次开机时将重新创建 data 分区，启动时间较长。".to_string()],
         (Some(Ok(())), false, false) => Vec::new(),
     };
     for note in &notes {
@@ -1518,19 +1517,19 @@ pub fn cant_start(cx: &Ctx) -> Frame {
         t,
         f,
         top,
-        "Android 没能启动，手机上的数据可能已经损坏。如果每次启动都停在这里，可以恢复出厂设置，这会清除手机上的全部用户数据。",
+        "无法启动系统，本机数据可能已损坏。如果每次启动都停留在此页面，可恢复出厂设置，这将清除本机的全部数据。",
     );
     if let Some(reason) = &s.asked.reason {
         y = widgets::info_card(&mut c, t, f, y + t.m.dp(12.0), &[("原因", reason.clone())]);
     }
-    y = widgets::section(&mut c, t, f, y, "选择");
+    y = widgets::section(&mut c, t, f, y, "操作");
     let rows = [
-        Row::new("重试").subtitle("重新启动 Android").trail(Trail::None),
-        Row::new("进入恢复模式").subtitle("不清除任何内容，先用 recovery 查看手机").trail(Trail::None),
+        Row::new("重试").subtitle("重新启动系统").trail(Trail::None),
+        Row::new("进入恢复模式").subtitle("不清除任何内容").trail(Trail::None),
     ];
     let choices = widgets::list(&mut c, t, f, y, &rows);
     out.extend(hits(&choices.rows, &[Action::RebootTo(Target::System), Action::Dismiss]));
-    let y = widgets::footnote(&mut c, t, f, choices.bottom, "恢复出厂设置后无法撤销。");
+    let y = widgets::footnote(&mut c, t, f, choices.bottom, "恢复出厂设置后，数据无法恢复。");
     let (label, danger) = confirm_label(Confirm::FactoryReset);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::FactoryReset) });
@@ -1549,8 +1548,8 @@ pub fn unhandled(cx: &Ctx) -> Frame {
         items.push(("原因", reason.clone()));
     }
     let y = widgets::info_card(&mut c, t, f, top, &items);
-    let y = widgets::footnote(&mut c, t, f, y, "Skyward 不处理系统的这项请求，手机上没有任何改动。");
-    let y = widgets::section(&mut c, t, f, y, "接下来");
+    let y = widgets::footnote(&mut c, t, f, y, "Skyward 暂不支持该请求，本机未做任何改动。");
+    let y = widgets::section(&mut c, t, f, y, "操作");
     afterwards(&mut c, t, f, y, true, &mut out);
-    Frame { back: false, ..Frame::new(t, c, out, "无法处理的请求", top) }
+    Frame { back: false, ..Frame::new(t, c, out, "无法处理该请求", top) }
 }

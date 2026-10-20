@@ -233,14 +233,14 @@ pub fn users(users: &[u32]) -> String {
 pub fn erase_stop(s: &EraseStop) -> (String, Option<String>) {
     match s {
         EraseStop::Update(Hold::Unconfirmed) => (
-            "当前槽位的系统更新尚未完成，暂无法清除。请先启动系统完成更新后重试。若系统无法启动，多次启动失败后手机会切回原槽位，之后即可清除。".into(),
+            "当前槽位的系统更新尚未完成，暂无法清除。请先启动系统完成更新后重试。如果系统无法启动，多次启动失败后将切换回原槽位，之后即可清除。".into(),
             None,
         ),
         EraseStop::Update(Hold::Merging) => ("系统更新正在合并，暂无法清除。请先启动系统，合并完成后重试。".into(), None),
         EraseStop::Update(Hold::MergeFailed) => ("系统更新合并失败，暂无法清除。请先启动系统处理后重试。".into(), None),
-        EraseStop::NotRebuilt => ("本机系统开机时不会重建已清空的 data 分区，无法清除。".into(), None),
+        EraseStop::NotRebuilt => ("本机系统开机时不会重新创建已清空的 data 分区，无法清除。".into(), None),
         EraseStop::NoCache => ("本机没有 cache 分区。".into(), None),
-        EraseStop::Erased => ("data 分区已清空，下次开机时将重新建立，暂无可清除的内容。".into(), None),
+        EraseStop::Erased => ("data 分区已清空，下次开机时将重新创建，暂无可清除的内容。".into(), None),
         EraseStop::Closed(why) => ("无法打开 data 分区，未清除任何内容。".into(), Some(why.clone())),
         EraseStop::Locked(locked) => {
             (spaced("", &users(locked), "的数据尚未解密，未清除任何内容。请先在「解密」中输入锁屏密码后重试。"), None)

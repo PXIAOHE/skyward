@@ -2103,7 +2103,7 @@ impl App {
                 }
                 self.refresh();
             }
-            Action::Confirm(_) => self.say("按住圆形按钮向右滑动", now),
+            Action::Confirm(_) => self.say("请按住圆形按钮向右滑动", now),
             Action::Brightness | Action::Pattern => {}
             Action::Sideload => match self.state.install {
                 Install::Idle | Install::Finished { .. } => {
