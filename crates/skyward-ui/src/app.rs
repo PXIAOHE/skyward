@@ -26,9 +26,12 @@ pub enum Screen {
     /// Mounting and unmounting the slot's partitions.
     Mount,
     Install,
-    /// Receiving what the computer sends with `adb sideload`, and
-    /// installing it.
-    Sideload,
+    /// A place's folders and the files in them that can be installed, to
+    /// choose one.
+    Choose(Place),
+    /// Installing a package, which the computer sends with `adb sideload`
+    /// or which is a file chosen in a place, and how it went.
+    Installing,
     About,
     Specs,
     /// How long the screen stays on with nothing touched.
@@ -79,6 +82,23 @@ pub enum Screen {
     Clash,
     /// Copying, moving or deleting under way, and how it ended.
     FileJob,
+}
+
+/// Where a file to install is chosen from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// The owner's internal storage, which opens with the data partition.
+    Storage,
+}
+
+/// Where the package being installed comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// The computer, with `adb sideload`.
+    #[default]
+    Computer,
+    /// A file chosen in a place.
+    File(Place),
 }
 
 /// What can be done with an entry picked in the file manager.
@@ -264,6 +284,23 @@ impl Folder {
     }
 }
 
+/// Whether a list in a place shows an entry: a folder, or a file the
+/// installer may take by its name, an update package or a partition
+/// image. Hidden entries are left out, as the stock file manager leaves
+/// them out.
+fn installable(e: &FileRow) -> bool {
+    if e.name.starts_with('.') {
+        return false;
+    }
+    match e.kind {
+        FileKind::Folder { .. } | FileKind::Link { folder: true, .. } => true,
+        FileKind::File | FileKind::Link { folder: false, .. } => std::path::Path::new(&e.name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("img")),
+        FileKind::Special => false,
+    }
+}
+
 /// A partition the mount page lists: its name, where it sits, and how it
 /// shows now. The runtime fills these in; the page draws them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,6 +352,19 @@ pub enum Data {
     /// Erased whole: nothing opens until the system makes it afresh, as it
     /// next starts.
     Erased,
+}
+
+impl Data {
+    /// Whether the owner's internal storage can be read: the partition is
+    /// open, and so are the owner's own files, which open first.
+    pub fn storage_open(&self) -> bool {
+        match self {
+            Data::Open => true,
+            // The owner is user 0.
+            Data::Locked { user, .. } => *user != 0,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,7 +523,8 @@ pub enum Install {
     Flashing { partition: &'static str, stage: Option<Stage> },
     /// `damage` is what a failure may have left broken.
     Finished { outcome: Outcome, damage: Option<Damage> },
-    /// The page was left and the installer is handing USB back.
+    /// The page was left and the installer is stopping, handing USB back
+    /// if it had it.
     Ending,
 }
 
@@ -608,8 +659,11 @@ pub enum Action {
     ClearSearch,
     /// Open the file manager's entry at this place in the folder.
     OpenEntry(usize),
-    /// Go up to the folder this many levels below the root, by its place in
-    /// the path shown over the list.
+    /// Open the entry at this place in a place's folder: a folder to look
+    /// in, or the file to install.
+    ChooseEntry(usize),
+    /// Go up to the folder this many levels below the top of the list
+    /// shown, by its place in the path shown over the list.
     OpenAncestor(usize),
     /// Pick the entry the file page shows to copy or move, and look for
     /// where it goes.
@@ -796,6 +850,8 @@ pub struct State {
     /// How far the swipe-to-confirm knob is dragged, 0 to 1.
     pub confirm: f32,
     pub install: Install,
+    /// Where the package being installed comes from.
+    pub source: Source,
     /// The mount page's partitions, as the runtime last read them, or why
     /// it could not.
     pub mounts: Result<Vec<MountRow>, String>,
@@ -828,6 +884,9 @@ pub struct State {
     pub pressed: Option<Cap>,
     /// The folder the file manager shows.
     pub files: Folder,
+    /// The folder of internal storage a file to install is chosen in, its
+    /// path from the top of the storage.
+    pub storage: Folder,
     /// The entry the file page describes.
     pub file: Option<FileRow>,
     pub fastboot: Fastboot,
@@ -863,6 +922,7 @@ impl Default for State {
             pattern: Vec::new(),
             confirm: 0.0,
             install: Install::Idle,
+            source: Source::Computer,
             mounts: Ok(Vec::new()),
             mount_failure: None,
             backup: [true, true, false, true],
@@ -880,6 +940,7 @@ impl Default for State {
             layer: Layer::Letters,
             pressed: None,
             files: Folder::new("/"),
+            storage: Folder::new(""),
             file: None,
             fastboot: Fastboot { running: false, link: UsbLink::Unplugged, focus: 0 },
             erase: Erase::default(),
@@ -889,6 +950,26 @@ impl Default for State {
             asking_delete: false,
             clash: None,
             job: None,
+        }
+    }
+}
+
+impl State {
+    /// The folder the list on page `screen` shows: the file manager's, or
+    /// a place's to choose a file to install in.
+    pub fn folder(&self, screen: Screen) -> &Folder {
+        match screen {
+            Screen::Files => &self.files,
+            Screen::Choose(Place::Storage) => &self.storage,
+            other => unreachable!("{other:?} lists no folder"),
+        }
+    }
+
+    fn folder_mut(&mut self, screen: Screen) -> &mut Folder {
+        match screen {
+            Screen::Files => &mut self.files,
+            Screen::Choose(Place::Storage) => &mut self.storage,
+            other => unreachable!("{other:?} lists no folder"),
         }
     }
 }
@@ -917,10 +998,14 @@ pub enum Effect {
     Haptic,
     /// Start receiving a package over USB.
     Sideload,
+    /// Start installing the file at this path from the top of a place,
+    /// telling how it goes as [`Effect::Sideload`] does.
+    InstallFile(Place, String),
     /// Write the image the installer holds to `partition` in the slots
     /// `pick` means.
     Flash { partition: &'static str, pick: Pick },
-    /// Stop waiting for the computer, or for where an image goes.
+    /// Stop waiting for the computer, for where an image goes, or for an
+    /// update to be agreed to.
     Cancel,
     /// Read the slot's partitions for the mount page, which has just opened.
     ReadMounts,
@@ -930,6 +1015,9 @@ pub enum Effect {
     Unmount(String),
     /// List the folder at this path for the file manager.
     ReadDir(String),
+    /// List the folder at this path from the top of a place, to choose a
+    /// file to install in, telling what it holds with [`App::set_place`].
+    ReadPlace(Place, String),
     /// Open the data partition as far as it opens with nothing a user
     /// knows, telling what waits with [`App::data_waiting`] or why it did
     /// not open with [`App::data_failed`].
@@ -949,7 +1037,7 @@ pub enum Effect {
     /// reset does, telling how it goes with [`App::erase_at`],
     /// [`App::erase_progress`] and [`App::erase_ended`].
     Wipe(Vec<Wipe>),
-    /// Install the update held for the user to agree to erasing after it.
+    /// Install the update held for the user to agree to.
     Install,
     /// Forget what the system asked of the recovery, so that the next start
     /// goes where its reboot reason says.
@@ -1677,7 +1765,8 @@ impl App {
     /// opens over the home page, already receiving.
     pub fn start_sideload(&mut self) {
         self.state.install = Install::Starting;
-        self.open(Screen::Sideload);
+        self.state.source = Source::Computer;
+        self.open(Screen::Installing);
     }
 
     /// What the system asked of the recovery before it started.
@@ -1739,18 +1828,31 @@ impl App {
     }
 
     /// The runtime listed a folder for the file manager at `listed`, in Unix
-    /// seconds, or could not: it becomes the folder shown. A folder gone back
-    /// up to shows where it was left, as the stock file manager does; any
-    /// other starts from its top.
+    /// seconds, or could not: it becomes the folder shown.
     pub fn set_files(&mut self, folder: String, files: Result<Vec<FileRow>, String>, listed: i64) {
-        if folder != self.state.files.path && self.screen() == Screen::Files {
-            self.top_mut().1 = self.state.files.scroll_for(&folder);
+        self.show_folder(Screen::Files, folder, files, listed);
+    }
+
+    /// The runtime listed a folder of `place` at `listed`, its path from
+    /// the place's top, or could not: it becomes the folder shown to choose
+    /// a file to install in, with what it holds that may be installed.
+    pub fn set_place(&mut self, place: Place, folder: String, files: Result<Vec<FileRow>, String>, listed: i64) {
+        let files = files.map(|entries| entries.into_iter().filter(installable).collect());
+        self.show_folder(Screen::Choose(place), folder, files, listed);
+    }
+
+    /// `folder` becomes the one the list on page `screen` shows. A folder
+    /// gone back up to shows where it was left, as the stock file manager
+    /// does; any other starts from its top.
+    fn show_folder(&mut self, screen: Screen, folder: String, files: Result<Vec<FileRow>, String>, listed: i64) {
+        if folder != self.state.folder(screen).path && self.screen() == screen {
+            self.top_mut().1 = self.state.folder_mut(screen).scroll_for(&folder);
             self.fling = None;
             self.bounce = None;
             self.pull = 0.0;
             self.snap = true;
         }
-        let shown = &mut self.state.files;
+        let shown = self.state.folder_mut(screen);
         shown.path = folder;
         shown.entries = files;
         shown.listed = listed;
@@ -1952,9 +2054,10 @@ impl App {
         self.refresh();
     }
 
-    /// Go back a page. Leaving the sideload page stops what can be stopped;
-    /// while a package is being read or written, the page stays. In the
-    /// file manager, back climbs a folder until it reaches the root.
+    /// Go back a page. Leaving the installing page stops what can be
+    /// stopped; while a package is being read or written, the page stays.
+    /// In the file manager, back climbs a folder until it reaches the root,
+    /// and in a place, until it reaches the place's top.
     fn back(&mut self, now: u64) -> Vec<Effect> {
         let mut fx = Vec::new();
         if self.stack.len() <= 1 {
@@ -1968,6 +2071,11 @@ impl App {
                 }
                 // Leaving the file manager puts a picked entry down.
                 self.state.clip = None;
+            }
+            Screen::Choose(place) => {
+                if let Some(up) = self.state.folder(Screen::Choose(place)).up() {
+                    return vec![Effect::ReadPlace(place, up)];
+                }
             }
             Screen::FileInfo => {
                 self.state.file = None;
@@ -1986,7 +2094,7 @@ impl App {
             Screen::RestoreBackup => self.state.restore = None,
             _ => {}
         }
-        if self.screen() == Screen::Sideload {
+        if self.screen() == Screen::Installing {
             match self.state.install {
                 Install::Checking { .. } => {
                     self.say("正在读取文件，请稍后再试", now);
@@ -2015,7 +2123,7 @@ impl App {
         fx
     }
 
-    /// Hear from the installer. Once the sideload page is left, only its
+    /// Hear from the installer. Once the installing page is left, only its
     /// end matters. An image waiting for its partition, an update waiting
     /// to be agreed to, and the end light a dark panel: all want the user.
     pub fn install(&mut self, ev: Event, now: u64) {
@@ -2057,7 +2165,7 @@ impl App {
                 *install = Install::Finished { outcome, damage };
             }
         }
-        if self.screen() == Screen::Sideload {
+        if self.screen() == Screen::Installing {
             self.refresh();
         }
     }
@@ -2074,6 +2182,7 @@ impl App {
         match s {
             Screen::Mount => vec![Effect::ReadMounts],
             Screen::Files => vec![Effect::ReadDir(self.state.files.path.clone())],
+            Screen::Choose(place) => vec![Effect::ReadPlace(place, self.state.folder(s).path.clone())],
             Screen::Search => {
                 self.state.search.clear();
                 self.state.layer = Layer::Letters;
@@ -2167,10 +2276,11 @@ impl App {
             Action::Sideload => match self.state.install {
                 Install::Idle | Install::Finished { .. } => {
                     self.state.install = Install::Starting;
-                    if self.screen() == Screen::Sideload {
+                    self.state.source = Source::Computer;
+                    if self.screen() == Screen::Installing {
                         self.refresh();
                     } else {
-                        self.open(Screen::Sideload);
+                        self.open(Screen::Installing);
                     }
                     return vec![Effect::Sideload];
                 }
@@ -2312,9 +2422,29 @@ impl App {
                     }
                 }
             }
+            Action::ChooseEntry(i) => {
+                let screen = self.screen();
+                let Screen::Choose(place) = screen else { unreachable!("only a place's folder is chosen in") };
+                let folder = self.state.folder(screen);
+                let entry = folder.entry(i).clone();
+                let path = folder.inside(&entry.name);
+                match entry.kind {
+                    FileKind::Folder { .. } | FileKind::Link { folder: true, .. } => {
+                        let scroll = self.top().1;
+                        self.state.folder_mut(screen).leave(scroll);
+                        return vec![Effect::ReadPlace(place, path)];
+                    }
+                    FileKind::File | FileKind::Link { folder: false, .. } => return self.install_file(place, path, entry.size, now),
+                    FileKind::Special => unreachable!("a place lists no special files"),
+                }
+            }
             Action::OpenAncestor(depth) => {
-                if let Some(path) = self.state.files.ancestor(depth) {
-                    return vec![Effect::ReadDir(path)];
+                let screen = self.screen();
+                if let Some(path) = self.state.folder(screen).ancestor(depth) {
+                    return vec![match screen {
+                        Screen::Choose(place) => Effect::ReadPlace(place, path),
+                        _ => Effect::ReadDir(path),
+                    }];
                 }
             }
             Action::Unavailable(text) => self.say(text, now),
@@ -2336,6 +2466,23 @@ impl App {
     fn entry_path(&self) -> String {
         let entry = self.state.file.as_ref().expect("the file page shows an entry");
         self.state.files.inside(&entry.name)
+    }
+
+    /// Install the file of `size` bytes at `path` in `place`, its page
+    /// following how it goes; one install at a time.
+    fn install_file(&mut self, place: Place, path: String, size: u64, now: u64) -> Vec<Effect> {
+        match self.state.install {
+            Install::Idle | Install::Finished { .. } => {
+                self.state.install = Install::Checking { size };
+                self.state.source = Source::File(place);
+                self.open(Screen::Installing);
+                vec![Effect::InstallFile(place, path)]
+            }
+            _ => {
+                self.say("上一次安装尚未结束，请稍后再试", now);
+                Vec::new()
+            }
+        }
     }
 
     /// A key of the keyboard on the terminal page. The layer keys change
@@ -3453,12 +3600,12 @@ mod tests {
         assert_eq!(app.deadline(TOAST_MS), app.idle_due());
     }
 
-    /// The sideload page, opened from the installing page, with the
+    /// The installing page, opened from the install page, with the
     /// installer started and waiting for the computer.
     fn sideloading(f: &Fonts, i: &DeviceInfo) -> App {
         let mut app = opened(Screen::Install, f, i);
         assert_eq!(tap(&mut app, f, i, Action::Sideload), vec![Effect::Sideload]);
-        assert_eq!(app.screen(), Screen::Sideload);
+        assert_eq!(app.screen(), Screen::Installing);
         assert_eq!(app.state.install, Install::Starting);
         app.install(Event::Waiting, 0);
         app
@@ -3505,7 +3652,7 @@ mod tests {
         app.install(Event::Progress(Stage::Flashing { done: 10, total: 40 }), 1000);
         assert_eq!(app.state.install, Install::Flashing { partition: "boot", stage: Some(Stage::Flashing { done: 10, total: 40 }) });
         app.key(Key::Back, 1000);
-        assert_eq!(app.screen(), Screen::Sideload, "a partition being written keeps the page");
+        assert_eq!(app.screen(), Screen::Installing, "a partition being written keeps the page");
         app.install(Event::Finished(Outcome::Flashed { partition: "boot", slots: vec![Slot::A, Slot::B] }), 1000);
         assert!(matches!(app.state.install, Install::Finished { damage: None, .. }), "a flash that worked broke nothing");
         assert_eq!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), 2000), vec![Effect::Reboot(Target::System)]);
@@ -3526,14 +3673,14 @@ mod tests {
         let shown = app.frame(&f, &i).hits.len();
         assert_eq!(shown, 0, "nothing on the page to tap while installing");
         app.key(Key::Back, 0);
-        assert_eq!(app.screen(), Screen::Sideload);
+        assert_eq!(app.screen(), Screen::Installing);
         assert_eq!(app.deadline(0), Some(TOAST_MS), "it says why");
         app.install(Event::Finished(Outcome::Failed(Failure::Engine(9))), 0);
         assert!(matches!(app.state.install, Install::Finished { damage: Some(Damage::System), .. }));
         // Sending again starts over on the same page, past the wake guard.
         assert_eq!(tap_at(&mut app, &f, &i, Action::Sideload, 1000), vec![Effect::Sideload]);
         assert_eq!(app.state.install, Install::Starting);
-        assert_eq!(app.screen(), Screen::Sideload);
+        assert_eq!(app.screen(), Screen::Installing);
     }
 
     #[test]
@@ -3749,7 +3896,7 @@ mod tests {
         assert_eq!(app.touch(Touch::Up, &f, 1000), vec![Effect::Install]);
         assert_eq!(app.state.install, Install::Updating { version: Some("OS3.0.306.0.WMACNXM".into()), stage: None, overwriting: false });
         app.key(Key::Back, 1000);
-        assert_eq!(app.screen(), Screen::Sideload, "an update being written keeps the page");
+        assert_eq!(app.screen(), Screen::Installing, "an update being written keeps the page");
 
         let mut app = sideloading(&f, &i);
         app.install(Event::Ready { version: None, wipe: true }, 0);
@@ -4097,6 +4244,58 @@ mod tests {
         assert_eq!(app.state.file, None);
         assert!(app.key(Key::Back, 0).is_empty(), "at the root, back leaves");
         assert_eq!(app.screen(), Screen::Advanced);
+    }
+
+    #[test]
+    fn a_file_in_internal_storage_is_chosen_once_the_storage_is_open() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        // Closed, the storage leads to the decrypt page, which comes back.
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Decrypt)), vec![Effect::OpenData]);
+        app.data_waiting(None);
+        tap(&mut app, &f, &i, Action::Skip);
+        assert_eq!(app.screen(), Screen::Install);
+        let storage = Screen::Choose(Place::Storage);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(storage)), vec![Effect::ReadPlace(Place::Storage, String::new())]);
+        let listed = vec![
+            entry(".thumbnails", folder(9)),
+            entry("Download", folder(3)),
+            entry("OTA.ZIP", FileKind::File),
+            entry("boot.img", FileKind::File),
+            entry("notes.txt", FileKind::File),
+            entry(".old.zip", FileKind::File),
+            entry("fifo", FileKind::Special),
+        ];
+        app.set_place(Place::Storage, String::new(), Ok(listed), LISTED);
+        let shown: Vec<&str> = app.state.storage.entries.as_ref().expect("listed").iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(shown, ["Download", "OTA.ZIP", "boot.img"], "folders and what can be installed, hidden ones left out");
+        assert_eq!(tap(&mut app, &f, &i, Action::ChooseEntry(0)), vec![Effect::ReadPlace(Place::Storage, "Download".into())]);
+        app.set_place(Place::Storage, "Download".into(), Ok(vec![entry("ota.zip", FileKind::File)]), LISTED);
+        assert_eq!(tap(&mut app, &f, &i, Action::ChooseEntry(0)), vec![Effect::InstallFile(Place::Storage, "Download/ota.zip".into())]);
+        assert_eq!((app.screen(), app.state.source), (Screen::Installing, Source::File(Place::Storage)));
+        assert_eq!(app.state.install, Install::Checking { size: 4096 }, "the file is read at once");
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Installing, "a file being read keeps the page");
+        app.install(Event::Finished(Outcome::Refused(Refusal::Unknown)), 0);
+        tap_at(&mut app, &f, &i, Action::Back, 1000);
+        assert_eq!((app.screen(), &app.state.install), (storage, &Install::Idle), "back to choose another");
+        assert_eq!(app.key(Key::Back, 1000), vec![Effect::ReadPlace(Place::Storage, String::new())], "back climbs to the top");
+        app.set_place(Place::Storage, String::new(), Ok(Vec::new()), LISTED);
+        assert!(app.key(Key::Back, 1000).is_empty());
+        assert_eq!(app.screen(), Screen::Install, "from the top, back leaves");
+    }
+
+    #[test]
+    fn a_file_waits_for_the_install_before_it_to_end() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        app.data_waiting(None);
+        tap(&mut app, &f, &i, Action::Open(Screen::Choose(Place::Storage)));
+        app.set_place(Place::Storage, String::new(), Ok(vec![entry("ota.zip", FileKind::File)]), LISTED);
+        app.state.install = Install::Ending;
+        assert!(tap(&mut app, &f, &i, Action::ChooseEntry(0)).is_empty());
+        assert_eq!(app.screen(), Screen::Choose(Place::Storage));
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says to wait");
     }
 
     /// The file manager in /sdcard, listing a folder and a file.
@@ -4511,7 +4710,7 @@ mod tests {
         // A finger reaching for the phone lands on 重启到系统; within the
         // guard it only keeps the panel awake.
         assert!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), 200).is_empty());
-        assert_eq!(app.screen(), Screen::Sideload, "the stray tap did not reboot");
+        assert_eq!(app.screen(), Screen::Installing, "the stray tap did not reboot");
         // Past the guard the same tap reboots.
         assert_eq!(
             tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), 700),

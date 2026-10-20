@@ -219,7 +219,7 @@ fn receive(ctx: &mut Context, mut conn: Connection<Endpoints>, offer: Offer) -> 
 fn run_file(ctx: &mut Context, path: &Path) -> Outcome {
     let (file, offer) = match LocalFile::open(path) {
         Ok(opened) => opened,
-        Err(e) => return failed(e),
+        Err(e) => return Outcome::Failed(Failure::Unreadable(format!("{e:#}"))),
     };
     let _ = kmsg(&format!("install: {}, {} bytes", path.display(), offer.size));
     if offer.size == 0 {

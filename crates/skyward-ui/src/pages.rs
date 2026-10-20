@@ -1,7 +1,7 @@
 use crate::app::{
-    Action, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Frame, HeroArt, Hit, Install,
-    JobEnd, Keys, Pick, Screen, State, Switch, Target, UsbLink, Wipe, BACKUP_PARTS, BACKUP_PLACES, FASTBOOT_CHOICES,
-    SCREEN_OFF, TARGETS, WIPES,
+    Action, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Folder, Frame, HeroArt, Hit,
+    Install, JobEnd, Keys, Pick, Place, Screen, Source, State, Switch, Target, UsbLink, Wipe, BACKUP_PARTS, BACKUP_PLACES,
+    FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, WIPES,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -48,7 +48,8 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Wipe => wipe(cx),
         Screen::Mount => mount(cx),
         Screen::Install => install(cx),
-        Screen::Sideload => sideload(cx),
+        Screen::Choose(place) => choose(cx, place),
+        Screen::Installing => installing(cx),
         Screen::About => about(cx),
         Screen::Specs => specs(cx),
         Screen::ScreenOff => screen_off(cx),
@@ -601,17 +602,44 @@ pub fn install(cx: &Ctx) -> Frame {
     if let Some(note) = fmt::snapshot_note(&i.snapshot) {
         rows.push(Row::new(fmt::snapshot(&i.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::None));
     }
-    rows.push(Row::new("通过电脑安装").icon(GREEN, Icon::Usb).subtitle("在电脑上运行 adb sideload"));
+    // Internal storage opens with the data partition, which the decrypt
+    // page opens or tells why it does not.
+    let data = &cx.state.data;
+    let (storage, from_storage) = if data.storage_open() {
+        ("选择内部存储中的更新包或镜像", Action::Open(Screen::Choose(Place::Storage)))
+    } else if *data == Data::Erased {
+        ("data 分区已清除", Action::Open(Screen::Decrypt))
+    } else {
+        ("需先完成「解密」", Action::Open(Screen::Decrypt))
+    };
+    rows.push(Row::new(install_title(Source::File(Place::Storage))).icon(BLUE, Icon::Phone).subtitle(storage));
+    rows.push(Row::new(install_title(Source::Computer)).icon(GREEN, Icon::Usb).subtitle("在电脑上运行 adb sideload"));
     let methods = widgets::list(&mut c, t, f, y, &rows);
-    let out = vec![Hit { rect: *methods.rows.last().expect("the list holds the sideload row"), action: Action::Sideload }];
+    let out = hits(&methods.rows[methods.rows.len() - 2..], &[from_storage, Action::Sideload]);
     widgets::footnote(
         &mut c,
         t,
         f,
         methods.bottom,
-        "支持安装 A/B 完整更新包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动。",
+        "支持安装 A/B 完整更新包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动。选择文件时仅列出文件夹以及 .zip、.img 文件。",
     );
     Frame::new(t, c, out, "安装", top)
+}
+
+/// How installing from `source` is named: on the install page, and as the
+/// title of the page that installs.
+fn install_title(source: Source) -> &'static str {
+    match source {
+        Source::Computer => "通过电脑安装",
+        Source::File(Place::Storage) => "从内部存储安装",
+    }
+}
+
+/// What a place is called at the top of its folders.
+fn place_name(place: Place) -> &'static str {
+    match place {
+        Place::Storage => "内部存储",
+    }
 }
 
 /// A one-line card on how things stand.
@@ -655,17 +683,21 @@ fn pick_title(pick: Pick, current: Option<Slot>) -> String {
     }
 }
 
-/// Receiving what the computer sends with `adb sideload`, and installing
-/// it, step by step.
-pub fn sideload(cx: &Ctx) -> Frame {
+/// Installing a package step by step: receiving what the computer sends
+/// with `adb sideload`, or reading the file chosen, then installing it.
+pub fn installing(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
     let mut c = long_page(t);
     let mut out = Vec::new();
     let top = t.m.content_top;
+    let computer = s.source == Source::Computer;
     let bottom = match &s.install {
-        Install::Idle | Install::Starting | Install::Ending => {
+        Install::Idle | Install::Starting | Install::Ending if computer => {
             let row = standing("正在切换 USB 模式", GREEN, Icon::Usb, "从 adb 调试切换到 sideload 模式");
             widgets::list(&mut c, t, f, top, &[row]).bottom
+        }
+        Install::Idle | Install::Starting | Install::Ending => {
+            widgets::list(&mut c, t, f, top, &[Row::new("正在读取文件").icon(GREEN, Icon::Install).trail(Trail::None)]).bottom
         }
         Install::Waiting => {
             let row = standing("等待电脑发送", GREEN, Icon::Usb, "请用数据线连接电脑，并在电脑上运行以下命令");
@@ -680,7 +712,10 @@ pub fn sideload(cx: &Ctx) -> Frame {
         Install::Checking { size } => {
             let detail = format!("文件大小 {}", fmt::bytes(*size));
             let y = widgets::list(&mut c, t, f, top, &[standing("正在读取文件", GREEN, Icon::Install, &detail)]).bottom;
-            widgets::footnote(&mut c, t, f, y, "读取完成前，请不要断开数据线。")
+            match s.source {
+                Source::Computer => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要断开数据线。"),
+                Source::File(Place::Storage) => y,
+            }
         }
         Install::Choosing(choice) => {
             let (name, holds) = fmt::image_kind(choice.kind);
@@ -705,7 +740,12 @@ pub fn sideload(cx: &Ctx) -> Frame {
             let (label, danger) = confirm_label(Confirm::Flash);
             let track = widgets::confirm(&mut c, t, f, picks.bottom + t.m.dp(28.0), label, danger, s.confirm);
             out.push(Hit { rect: track, action: Action::Confirm(Confirm::Flash) });
-            widgets::footnote(&mut c, t, f, track.y + track.h, "刷入将覆盖分区中的原有内容。返回将取消刷入，并结束电脑上的 adb sideload。")
+            let note = if computer {
+                "刷入将覆盖分区中的原有内容。返回将取消刷入，并结束电脑上的 adb sideload。"
+            } else {
+                "刷入将覆盖分区中的原有内容。返回将取消刷入。"
+            };
+            widgets::footnote(&mut c, t, f, track.y + track.h, note)
         }
         Install::Confirming { version, wipe } => {
             let (title, color, icon, detail, which) = if *wipe {
@@ -739,7 +779,11 @@ pub fn sideload(cx: &Ctx) -> Frame {
             let (detail, done) = update_stage(stage.as_ref());
             let y = widgets::progress_card(&mut c, t, f, top, &title, &detail, done);
             let target = i.slot.map(|s| format!("新系统将安装到槽位 {}。", s.other().letter())).unwrap_or_default();
-            let y = widgets::footnote(&mut c, t, f, y, &format!("安装完成前，请不要断开数据线或关机。{target}"));
+            let keep = match s.source {
+                Source::Computer => "安装完成前，请不要断开数据线或关机。",
+                Source::File(Place::Storage) => "安装完成前，请不要关机。",
+            };
+            let y = widgets::footnote(&mut c, t, f, y, &format!("{keep}{target}"));
             if *overwriting {
                 widgets::footnote(&mut c, t, f, y, "正在覆盖当前系统，安装完成前重启将无法进入系统。")
             } else {
@@ -756,18 +800,26 @@ pub fn sideload(cx: &Ctx) -> Frame {
                 _ => ("正在准备".into(), None),
             };
             let y = widgets::progress_card(&mut c, t, f, top, &format!("正在刷入 {partition}"), &detail, done);
-            widgets::footnote(&mut c, t, f, y, "刷入完成前，请不要断开数据线。")
+            let keep = match s.source {
+                Source::Computer => "刷入完成前，请不要断开数据线。",
+                Source::File(Place::Storage) => "刷入完成前，请不要关机。",
+            };
+            widgets::footnote(&mut c, t, f, y, keep)
         }
         Install::Finished { outcome, damage } => finished(&mut c, cx, top, outcome, *damage, &mut out),
     };
-    Frame::new(t, fit(c, t, bottom), out, "通过电脑安装", top)
+    Frame::new(t, fit(c, t, bottom), out, install_title(s.source), top)
 }
 
-/// How an install ended, and where to go from there.
+/// How an install ended, and where to go from there: another package from
+/// the computer, or back to choose another file.
 fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Option<Damage>, out: &mut Vec<Hit>) -> f32 {
-    let (t, f) = (cx.t, cx.f);
+    let (t, f, source) = (cx.t, cx.f, cx.state.source);
     let gap = t.m.card_gap;
-    let again = Row::new("再次发送").icon(GREEN, Icon::Usb);
+    let (again, another) = match source {
+        Source::Computer => (Row::new("再次发送").icon(GREEN, Icon::Usb), Action::Sideload),
+        Source::File(_) => (Row::new("选择其他文件").icon(GREEN, Icon::Folder), Action::Back),
+    };
     let restart = Row::new("重启到系统").icon(ORANGE, Icon::Power);
     match outcome {
         Outcome::Installed { slot, .. } => {
@@ -787,7 +839,7 @@ fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Optio
                 acts.push(Action::RebootTo(Target::Recovery));
             }
             rows.push(again);
-            acts.push(Action::Sideload);
+            acts.push(another);
             let next = widgets::list(c, t, f, y + gap, &rows);
             out.extend(hits(&next.rows, &acts));
             next.bottom
@@ -795,24 +847,28 @@ fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Optio
         Outcome::Cancelled => {
             let y = widgets::list(c, t, f, top, &[standing("已取消", SLATE, Icon::Install, "未写入任何内容。")]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[again]);
-            out.extend(hits(&next.rows, &[Action::Sideload]));
+            out.extend(hits(&next.rows, &[another]));
             next.bottom
         }
         Outcome::Refused(r) => {
-            let reason = fmt::refusal(r, &cx.info.codename);
+            let reason = fmt::refusal(r, &cx.info.codename, source);
             let y = widgets::list(c, t, f, top, &[standing("无法安装", ORANGE, Icon::Install, &reason)]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[again]);
-            out.extend(hits(&next.rows, &[Action::Sideload]));
+            out.extend(hits(&next.rows, &[another]));
             widgets::footnote(c, t, f, next.bottom, "未写入任何内容。")
         }
         Outcome::Failed(failure) => {
-            let (what, detail) = fmt::failure(failure);
+            let (what, detail) = fmt::failure(failure, source);
             let y = widgets::list(c, t, f, top, &[standing("安装失败", RED, Icon::Install, &what)]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[again, restart]);
-            out.extend(hits(&next.rows, &[Action::Sideload, Action::RebootTo(Target::System)]));
+            out.extend(hits(&next.rows, &[another, Action::RebootTo(Target::System)]));
+            let redo = match source {
+                Source::Computer => ("重新发送", "重新发送"),
+                Source::File(_) => ("重新安装", "重新刷入"),
+            };
             let warning = match damage {
-                Some(Damage::System) => "当前系统已被部分覆盖，重启后将无法进入系统。请重新发送完整更新包，安装完成后再重启。".to_string(),
-                Some(Damage::Partition(p)) => format!("{p} 仅写入了部分内容，重启后可能无法正常启动。请重新发送该镜像，刷入完成后再重启。"),
+                Some(Damage::System) => format!("当前系统已被部分覆盖，重启后将无法进入系统。请{}完整更新包，安装完成后再重启。", redo.0),
+                Some(Damage::Partition(p)) => format!("{p} 仅写入了部分内容，重启后可能无法正常启动。请{}该镜像，刷入完成后再重启。", redo.1),
                 None => "当前系统未受影响。".into(),
             };
             let mut y = widgets::footnote(c, t, f, next.bottom, &warning);
@@ -1043,27 +1099,9 @@ pub fn advanced(cx: &Ctx) -> Frame {
     Frame::new(t, c, out, "高级", top)
 }
 
-/// The file manager, laid out as the stock file manager lays out a folder:
-/// the path as capsules, held under the bar once scrolled there, then every
-/// entry of the folder in one list on the plain page, folders first, each
-/// row drawn as it scrolls into view.
+/// The file manager, every entry of the folder shown, folders first.
 pub fn files(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let bg = files::page(t);
-    let mut c = Canvas::new(t.m.w, t.m.h);
-    c.clear(bg);
-    let rows = match &s.files.entries {
-        Err(why) => {
-            files::note(&mut c, t, f, "无法读取该文件夹", Some(why));
-            None
-        }
-        Ok(entries) if entries.is_empty() => {
-            files::note(&mut c, t, f, "暂无文件", None);
-            None
-        }
-        Ok(entries) => Some(files::rows(t, f, entries)),
-    };
-    let pinned = Some(files::strip(t, f, &s.files.path));
     // An entry picked to copy or move goes to the folder shown, from the
     // bar held at the bottom.
     let dock = s.clip.as_ref().map(|clip| {
@@ -1071,18 +1109,48 @@ pub fn files(cx: &Ctx) -> Frame {
             FileOp::Copy => "复制到此处",
             FileOp::Move => "移动到此处",
         };
-        let (canvas, rects) = widgets::dock_bar(t, f, bg, &["取消", go]);
+        let (canvas, rects) = widgets::dock_bar(t, f, files::page(t), &["取消", go]);
         Dock { canvas, hits: hits(&rects, &[Action::Unpick, Action::Paste]) }
     });
-    Frame { bg, rows, pinned, dock, ..Frame::new(t, c, Vec::new(), "文件管理", t.m.dp(files::STRIP_TOP_DP)) }
+    Frame { dock, ..listing(cx, &s.files, "根目录", "暂无文件", Action::OpenEntry, "文件管理") }
+}
+
+/// A place's folders and the files in them that can be installed, to
+/// choose one.
+pub fn choose(cx: &Ctx, place: Place) -> Frame {
+    listing(cx, cx.state.folder(Screen::Choose(place)), place_name(place), "暂无可安装的文件", Action::ChooseEntry, "选择文件")
+}
+
+/// A folder laid out as the stock file manager lays one out: the path as
+/// capsules from `top`, held under the bar once scrolled there, then the
+/// entries in one list on the plain page, each row drawn as it scrolls into
+/// view and touched for `action`; `empty` says there are none.
+fn listing(cx: &Ctx, folder: &Folder, top: &str, empty: &str, action: fn(usize) -> Action, title: &'static str) -> Frame {
+    let (t, f) = (cx.t, cx.f);
+    let bg = files::page(t);
+    let mut c = Canvas::new(t.m.w, t.m.h);
+    c.clear(bg);
+    let rows = match &folder.entries {
+        Err(why) => {
+            files::note(&mut c, t, f, "无法读取该文件夹", Some(why));
+            None
+        }
+        Ok(entries) if entries.is_empty() => {
+            files::note(&mut c, t, f, empty, None);
+            None
+        }
+        Ok(entries) => Some(files::rows(t, f, entries, action)),
+    };
+    let pinned = Some(files::strip(t, f, top, &folder.path));
+    Frame { bg, rows, pinned, ..Frame::new(t, c, Vec::new(), title, t.m.dp(files::STRIP_TOP_DP)) }
 }
 
 /// Row `i` of the page's long list over the whole of `c`, sized for it,
 /// drawn as the row comes into view.
 pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
     match screen {
-        Screen::Files => {
-            let folder = &cx.state.files;
+        Screen::Files | Screen::Choose(_) => {
+            let folder = cx.state.folder(screen);
             let entries = folder.entries.as_ref().expect("a folder listed draws its rows");
             files::row(c, cx.t, cx.f, &entries[i], folder.listed);
         }

@@ -15,7 +15,7 @@ use skyward_sys::Power;
 use skyward_files::Ownership;
 use skyward_ui::app::{
     App, Asked, ClashChoice, Data, Effect, EraseStop, FileKind, FileOp, FileRow, FileTask, JobEnd, Keys, MountFailure, Part,
-    RenameRefused, Screen, Target, UsbLink, Wipe,
+    Place, RenameRefused, Screen, Target, UsbLink, Wipe,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
@@ -168,9 +168,34 @@ fn asked(request: &bcb::Request) -> Asked {
 /// Read a folder for the file manager, as it is now.
 fn list(app: &mut App, folder: String) -> Result<()> {
     let files = read_folder(Path::new(&folder)).map_err(|e| format!("{e:#}"));
-    let listed = SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_secs();
-    app.set_files(folder, files, listed as i64);
+    app.set_files(folder, files, unix_now()?);
     Ok(())
+}
+
+/// Read a folder of `place` to choose a file to install in, as it is now;
+/// `folder` is its path from the place's top.
+fn list_place(app: &mut App, place: Place, folder: String) -> Result<()> {
+    let files = read_folder(&in_place(place, &folder)).map_err(|e| format!("{e:#}"));
+    app.set_place(place, folder, files, unix_now()?);
+    Ok(())
+}
+
+/// Where `path`, from the top of `place`, is: internal storage is the
+/// owner's shared storage, where the data partition shows it.
+fn in_place(place: Place, path: &str) -> PathBuf {
+    let top = match place {
+        Place::Storage => Path::new(skyward_crypto::data::SDCARD),
+    };
+    if path.is_empty() {
+        top.to_path_buf()
+    } else {
+        top.join(path)
+    }
+}
+
+/// Now, in Unix seconds.
+fn unix_now() -> Result<i64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_secs() as i64)
 }
 
 /// What a choice on the clash page asks of the work on files.
@@ -873,6 +898,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         ensure!(installer.is_none(), "an installer is running already");
                         installer = Some(Installer::start(detach(cfg.services.clone()))?);
                     }
+                    Effect::InstallFile(place, path) => {
+                        ensure!(installer.is_none(), "an installer is running already");
+                        installer = Some(Installer::open(in_place(place, &path), detach(cfg.services.clone()))?);
+                    }
                     Effect::Flash { partition, pick } => {
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
                         installer.as_ref().context("no installer holds an image")?.flash(partition, pick.slots(slot));
@@ -891,6 +920,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         decryptor = Some(Decryptor::start(job)?);
                     }
                     Effect::ReadDir(folder) => list(&mut app, folder)?,
+                    Effect::ReadPlace(place, folder) => list_place(&mut app, place, folder)?,
                     // A name taken where an entry goes is the user's to
                     // decide on before anything is written.
                     Effect::Paste { op, path, into, clash } => {

@@ -1,4 +1,4 @@
-use crate::app::{Data, EraseStop, FileKind, FileRow, MountFailure, Part, BACKUP_PARTS};
+use crate::app::{Data, EraseStop, FileKind, FileRow, MountFailure, Part, Source, BACKUP_PARTS};
 use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
@@ -436,16 +436,27 @@ pub fn mount_failure(m: &MountFailure) -> String {
     format!("{what} {} 失败：{}", m.base, m.detail)
 }
 
-/// Why a package was not installed, for a phone with this codename.
-pub fn refusal(r: &Refusal, codename: &str) -> String {
+/// How another package is given to the installer from where this one came
+/// from: the computer sends it, or another file is chosen.
+fn give(source: Source) -> &'static str {
+    match source {
+        Source::Computer => "发送",
+        Source::File(_) => "选择",
+    }
+}
+
+/// Why a package from `source` was not installed, for a phone with this
+/// codename.
+pub fn refusal(r: &Refusal, codename: &str, source: Source) -> String {
+    let give = give(source);
     match r {
-        Refusal::Unknown => "无法识别该文件，请发送 A/B 完整更新包或分区镜像。".into(),
-        Refusal::Script => "无法安装刷机包，请发送 A/B 完整更新包或分区镜像。".into(),
-        Refusal::NotAb(kind) if kind.is_empty() => "该更新包未注明类型，请发送 A/B 完整更新包。".into(),
-        Refusal::NotAb(kind) => format!("该更新包的类型为 {kind}，请发送 A/B 完整更新包。"),
+        Refusal::Unknown => format!("无法识别该文件，请{give} A/B 完整更新包或分区镜像。"),
+        Refusal::Script => format!("无法安装刷机包，请{give} A/B 完整更新包或分区镜像。"),
+        Refusal::NotAb(kind) if kind.is_empty() => format!("该更新包未注明类型，请{give} A/B 完整更新包。"),
+        Refusal::NotAb(kind) => format!("该更新包的类型为 {kind}，请{give} A/B 完整更新包。"),
         Refusal::OtherDevice(devices) => format!("该更新包适用于 {devices}，本机为 {codename}。"),
         Refusal::OtherSerial => "该更新包仅适用于指定序列号的设备，不包括本机。".into(),
-        Refusal::Incremental => "无法安装增量更新包，请发送完整更新包。".into(),
+        Refusal::Incremental => format!("无法安装增量更新包，请{give}完整更新包。"),
         Refusal::Older { package, installed } => {
             format!("该更新包的构建日期为 {}，早于当前系统的 {}。", date(*package), date(*installed))
         }
@@ -460,27 +471,32 @@ pub fn refusal(r: &Refusal, codename: &str) -> String {
     }
 }
 
-/// What went wrong, and the details behind it when there are any.
-pub fn failure(f: &Failure) -> (String, Option<String>) {
+/// What went wrong installing a package from `source`, and the details
+/// behind it when there are any.
+pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
     match f {
         Failure::Engine(code) => {
-            let what = match Trouble::of(*code) {
-                Trouble::Signature => "更新包签名验证失败，请发送官方更新包。",
-                Trouble::Damaged => "更新包已损坏，请重新下载。",
-                Trouble::Older => "更新包的版本过旧。",
-                Trouble::NoSpace => "super 分区空间不足。",
-                Trouble::Transfer => "读取更新包失败，请检查数据线连接后重新发送。",
-                Trouble::Write => "写入分区失败。",
-                Trouble::Verify => "分区校验失败。",
-                Trouble::PostInstall => "完成安装失败。",
-                Trouble::Unsupported => "暂不支持该更新包的格式。",
-                Trouble::Other => "更新程序出错。",
+            let what = match (Trouble::of(*code), source) {
+                (Trouble::Signature, _) => format!("更新包签名验证失败，请{}官方更新包。", give(source)),
+                (Trouble::Damaged, _) => "更新包已损坏，请重新下载。".into(),
+                (Trouble::Older, _) => "更新包的版本过旧。".into(),
+                (Trouble::NoSpace, _) => "super 分区空间不足。".into(),
+                (Trouble::Transfer, Source::Computer) => "读取更新包失败，请检查数据线连接后重新发送。".into(),
+                (Trouble::Transfer, Source::File(_)) => "读取更新包失败。".into(),
+                (Trouble::Write, _) => "写入分区失败。".into(),
+                (Trouble::Verify, _) => "分区校验失败。".into(),
+                (Trouble::PostInstall, _) => "完成安装失败。".into(),
+                (Trouble::Unsupported, _) => "暂不支持该更新包的格式。".into(),
+                (Trouble::Other, _) => "更新程序出错。".into(),
             };
-            (what.into(), Some(format!("错误代码：{code}")))
+            (what, Some(format!("错误代码：{code}")))
         }
         Failure::Disconnected => ("电脑已停止发送，请检查数据线连接后重新发送。".into(), None),
         Failure::Unreadable(why) => ("读取文件失败。".into(), Some(why.clone())),
-        Failure::Changed => ("文件在发送过程中被修改，请重新发送。".into(), None),
+        Failure::Changed => match source {
+            Source::Computer => ("文件在发送过程中被修改，请重新发送。".into(), None),
+            Source::File(_) => ("文件在读取过程中被修改，请重新选择。".into(), None),
+        },
         Failure::Error(detail) => ("发生意外错误。".into(), Some(detail.clone())),
     }
 }
@@ -654,18 +670,30 @@ mod tests {
 
     #[test]
     fn reasons_read_as_sentences() {
-        assert_eq!(refusal(&Refusal::OtherDevice("nezha".into()), "ishtar"), "该更新包适用于 nezha，本机为 ishtar。");
+        let pc = Source::Computer;
+        assert_eq!(refusal(&Refusal::OtherDevice("nezha".into()), "ishtar", pc), "该更新包适用于 nezha，本机为 ishtar。");
         assert_eq!(
-            refusal(&Refusal::Older { package: 1_770_000_000, installed: 1_778_243_655 }, "ishtar"),
+            refusal(&Refusal::Older { package: 1_770_000_000, installed: 1_778_243_655 }, "ishtar", pc),
             "该更新包的构建日期为 2026年2月2日，早于当前系统的 2026年5月8日。"
         );
-        assert_eq!(refusal(&Refusal::Battery { level: 12, charging: true }, "ishtar"), "电量仅剩 12%，请充电至 15% 以上后重试。");
+        assert_eq!(refusal(&Refusal::Battery { level: 12, charging: true }, "ishtar", pc), "电量仅剩 12%，请充电至 15% 以上后重试。");
         assert_eq!(
-            refusal(&Refusal::Pending(SnapshotState::Snapshotted), "ishtar"),
+            refusal(&Refusal::Pending(SnapshotState::Snapshotted), "ishtar", pc),
             "更新已写入，等待合并。请重启到系统，完成上一次更新后重试。"
         );
-        assert_eq!(failure(&Failure::Engine(26)), ("更新包签名验证失败，请发送官方更新包。".into(), Some("错误代码：26".into())));
-        assert_eq!(failure(&Failure::Error("open ep0: busy".into())).1.as_deref(), Some("open ep0: busy"));
+        assert_eq!(failure(&Failure::Engine(26), pc), ("更新包签名验证失败，请发送官方更新包。".into(), Some("错误代码：26".into())));
+        assert_eq!(failure(&Failure::Error("open ep0: busy".into()), pc).1.as_deref(), Some("open ep0: busy"));
+    }
+
+    #[test]
+    fn a_file_chosen_is_answered_with_choosing_another() {
+        let file = Source::File(crate::app::Place::Storage);
+        assert_eq!(refusal(&Refusal::Unknown, "ishtar", file), "无法识别该文件，请选择 A/B 完整更新包或分区镜像。");
+        assert_eq!(refusal(&Refusal::Incremental, "ishtar", file), "无法安装增量更新包，请选择完整更新包。");
+        assert_eq!(failure(&Failure::Engine(26), file).0, "更新包签名验证失败，请选择官方更新包。");
+        assert_eq!(failure(&Failure::Changed, file).0, "文件在读取过程中被修改，请重新选择。");
+        let gone = "read /sdcard/Download/ota.zip: Input/output error (os error 5)";
+        assert_eq!(failure(&Failure::Unreadable(gone.into()), file), ("读取文件失败。".into(), Some(gone.into())));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
 use skyward_ui::app::{
     Action, App, Asked, BackupEntry, Choice, Clip, Damage, Data, EraseStop, FileKind, FileOp, FileRow, FileTask, Install, JobEnd,
-    Keys, MountFailure, MountRow, Part, Pick, Screen, Touch, UsbLink, SCREEN_OFF,
+    Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
@@ -165,7 +165,7 @@ fn main() -> Result<()> {
         ),
     ];
     for (name, dark, install) in installing {
-        let mut app = opened(Screen::Sideload, w, h, ppd);
+        let mut app = opened(Screen::Installing, w, h, ppd);
         app.state.dark = dark;
         app.state.install = install;
         let path = out.join(format!("{name}.png"));
@@ -209,7 +209,34 @@ fn main() -> Result<()> {
     };
     let ota = "/sdcard/Download/OTA_ishtar_OS3.0.305.0.WMACNXM_20260412_full_package_signed_for_recovery_install.zip";
     let copying = || FileTask::Copy { path: ota.into(), into: "/sdcard/Skyward".into() };
-    let pages: [PageShot; 54] = [
+    let from_storage = |app: &mut App, install: Install| {
+        app.state.source = Source::File(Place::Storage);
+        app.state.install = install;
+    };
+    let pages: [PageShot; 61] = [
+        ("11-install-light-locked", Screen::Install, false, &|app| {
+            app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
+        }),
+        ("19-choose-storage-light", Screen::Choose(Place::Storage), false, &|app| {
+            app.set_place(Place::Storage, "Download".into(), Ok(sample_download()), LISTED)
+        }),
+        ("19-choose-storage-dark-empty", Screen::Choose(Place::Storage), true, &|app| {
+            app.set_place(Place::Storage, "Download/Skyward".into(), Ok(vec![file("notes.txt", 2_048, LISTED - 600)]), LISTED)
+        }),
+        ("20-install-storage-checking", Screen::Installing, false, &|app| {
+            from_storage(app, Install::Checking { size: 7_014_220_000 })
+        }),
+        ("20-install-storage-writing-dark", Screen::Installing, true, &|app| {
+            let stage = Some(Stage::Writing { done: 2_934_000_000, total: 7_014_220_000 });
+            from_storage(app, Install::Updating { version: Some("OS3.0.305.0.WMACNXM".into()), stage, overwriting: false })
+        }),
+        ("20-install-storage-refused", Screen::Installing, false, &|app| {
+            from_storage(app, Install::Finished { outcome: Outcome::Refused(Refusal::Unknown), damage: None })
+        }),
+        ("20-install-storage-failed", Screen::Installing, false, &|app| {
+            let gone = "read /sdcard/Download/OTA_ishtar_OS3.0.305.0.WMACNXM.zip: Input/output error (os error 5)";
+            from_storage(app, Install::Finished { outcome: Outcome::Failed(Failure::Unreadable(gone.into())), damage: Some(Damage::System) })
+        }),
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),

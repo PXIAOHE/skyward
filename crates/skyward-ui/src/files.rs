@@ -145,8 +145,9 @@ fn middle(c: &Canvas, face: &Face, px: f32, text: &str, w: f32) -> String {
 }
 
 /// The list's rows for `entries`, the first starting where an unscrolled
-/// page puts it; a row grows by a line for a name on two.
-pub fn rows(t: &Theme, f: &Fonts, entries: &[FileRow]) -> Rows {
+/// page puts it, each touched for `action`; a row grows by a line for a
+/// name on two.
+pub fn rows(t: &Theme, f: &Fonts, entries: &[FileRow], action: fn(usize) -> Action) -> Rows {
     let m = &t.m;
     let w = name_width(t);
     let mut y = m.dp(ROWS_TOP_DP).round();
@@ -157,7 +158,7 @@ pub fn rows(t: &Theme, f: &Fonts, entries: &[FileRow]) -> Rows {
         y += (m.dp(ROW_DP) + m.dp(NAME_LINE_DP) * (lines - 1) as f32).round();
         edges.push(y);
     }
-    Rows { edges, action: Action::OpenEntry }
+    Rows { edges, action }
 }
 
 /// Entry `e`'s row over the whole of `c`, sized for it: its icon, its name
@@ -241,21 +242,20 @@ fn arrow(c: &mut Canvas, t: &Theme, x: f32, cy: f32, color: Rgba) {
     c.line(b.0, b.1, d.0, d.1, sw, color);
 }
 
-/// The path over the list as capsules, the root first and the folder shown
-/// last in amber; each earlier one goes up to its folder. A path longer
-/// than the strip shows its end, as the stock strip does scrolled to it.
-pub fn strip(t: &Theme, f: &Fonts, folder: &str) -> Pinned {
+/// The path over the list as capsules, the top of the list first, named
+/// `top`, and the folder shown last in amber; each earlier one goes up to
+/// its folder. A path longer than the strip shows its end, as the stock
+/// strip does scrolled to it.
+pub fn strip(t: &Theme, f: &Fonts, top: &str, folder: &str) -> Pinned {
     let m = &t.m;
     let p = palette(t);
     let mut c = Canvas::new(m.w, m.dp(STRIP_DP).round() as u32);
     c.clear(p.page);
-    let names: Vec<String> = Path::new(folder)
-        .components()
-        .map(|part| match part {
-            Component::RootDir => "根目录".to_string(),
-            other => other.as_os_str().to_string_lossy().into_owned(),
-        })
-        .collect();
+    let below = Path::new(folder).components().filter_map(|part| match part {
+        Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+        _ => None,
+    });
+    let names: Vec<String> = std::iter::once(top.to_string()).chain(below).collect();
     let px = m.dp(PILL_TEXT_DP);
     let widths: Vec<f32> = names.iter().map(|n| c.text_width(&f.value, n, px) + m.dp(PILL_PAD_DP) * 2.0).collect();
     let step = m.dp(ARROW_GAP_DP) * 2.0 + m.dp(ARROW_DP);
@@ -320,10 +320,12 @@ mod tests {
     fn the_path_goes_up_by_its_capsules_and_shows_its_end_when_long() {
         let f = crate::font::bundled();
         let t = Theme::light(1440, 3200, 3.5);
-        let path = strip(&t, &f, "/system/bin");
+        let path = strip(&t, &f, "根目录", "/system/bin");
         let ups: Vec<Action> = path.hits.iter().map(|h| h.action).collect();
         assert_eq!(ups, [Action::OpenAncestor(0), Action::OpenAncestor(1)], "the root and system go up; bin is where we are");
-        let deep = strip(&t, &f, "/data/media/0/Android/data/com.example.something.long/files/cache/images");
+        let place = strip(&t, &f, "内部存储", "Download");
+        assert_eq!(place.hits.iter().map(|h| h.action).collect::<Vec<_>>(), [Action::OpenAncestor(0)], "a place's top goes up");
+        let deep = strip(&t, &f, "根目录", "/data/media/0/Android/data/com.example.something.long/files/cache/images");
         let last = deep.hits.last().expect("the capsules before the folder shown");
         assert!(last.rect.x + last.rect.w < t.m.w as f32, "the end shows");
         assert!(deep.hits[0].rect.x < 0.0, "the start runs off the left edge");
