@@ -1257,11 +1257,6 @@ pub fn backup_job(cx: &Ctx) -> Frame {
             widgets::list(&mut c, t, f, top, &[standing(title, color, icon, &detail)]).bottom
         }
     };
-    if !job.plan.is_empty() {
-        let states: Vec<String> = (0..job.plan.len()).map(|k| part_state(job, k)).collect();
-        let rows: Vec<Row> = job.plan.iter().zip(&states).map(|((name, _), state)| Row::new(name).trail(Trail::Text(state))).collect();
-        y = widgets::list(&mut c, t, f, y + t.m.card_gap, &rows).bottom;
-    }
     let keep = match job.place {
         Place::Storage => "请不要关机。",
         Place::UsbDrive => "请不要拔出 U 盘或关机。",
@@ -1304,6 +1299,14 @@ pub fn backup_job(cx: &Ctx) -> Frame {
             out.extend(hits(&next.rows, &acts));
             y = next.bottom;
         }
+    }
+    // The parts come after what can be done, which a long list would push
+    // off the screen.
+    if !job.plan.is_empty() {
+        let y0 = widgets::section(&mut c, t, f, y, if job.restore { "恢复内容" } else { "备份内容" });
+        let states: Vec<String> = (0..job.plan.len()).map(|k| part_state(job, k)).collect();
+        let rows: Vec<Row> = job.plan.iter().zip(&states).map(|((name, _), state)| Row::new(name).trail(Trail::Text(state))).collect();
+        y = widgets::list(&mut c, t, f, y0, &rows).bottom;
     }
     let title = match (&job.outcome, job.restore) {
         (None, false) => "正在备份",
