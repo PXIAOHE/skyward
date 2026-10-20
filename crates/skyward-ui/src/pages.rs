@@ -1052,7 +1052,7 @@ pub fn files(cx: &Ctx) -> Frame {
     let bg = files::page(t);
     let mut c = Canvas::new(t.m.w, t.m.h);
     c.clear(bg);
-    let rows = match &s.files {
+    let rows = match &s.files.entries {
         Err(why) => {
             files::note(&mut c, t, f, "无法读取该文件夹", Some(why));
             None
@@ -1063,7 +1063,7 @@ pub fn files(cx: &Ctx) -> Frame {
         }
         Ok(entries) => Some(files::rows(t, f, entries)),
     };
-    let pinned = Some(files::strip(t, f, &s.folder));
+    let pinned = Some(files::strip(t, f, &s.files.path));
     // An entry picked to copy or move goes to the folder shown, from the
     // bar held at the bottom.
     let dock = s.clip.as_ref().map(|clip| {
@@ -1082,8 +1082,9 @@ pub fn files(cx: &Ctx) -> Frame {
 pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
     match screen {
         Screen::Files => {
-            let entries = cx.state.files.as_ref().expect("a folder listed draws its rows");
-            files::row(c, cx.t, cx.f, &entries[i], cx.state.listed);
+            let folder = &cx.state.files;
+            let entries = folder.entries.as_ref().expect("a folder listed draws its rows");
+            files::row(c, cx.t, cx.f, &entries[i], folder.listed);
         }
         other => unreachable!("{other:?} draws no list row by row"),
     }
@@ -1097,7 +1098,7 @@ pub fn file_info(cx: &Ctx) -> Frame {
     let mut c = long_page(t);
     let top = t.m.content_top;
     let folder = matches!(e.kind, FileKind::Folder { .. });
-    let mut facts = vec![("名称", e.name.clone()), ("位置", Path::new(&s.folder).join(&e.name).to_string_lossy().into_owned())];
+    let mut facts = vec![("名称", e.name.clone()), ("位置", Path::new(&s.files.path).join(&e.name).to_string_lossy().into_owned())];
     match &e.kind {
         FileKind::Link { target, .. } => facts.push(("指向", target.clone())),
         FileKind::Folder { items: Some(n) } => facts.push(("内容", format!("{n} 项"))),

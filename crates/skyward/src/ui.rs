@@ -740,7 +740,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // The folder shown is read again for what the work changed.
         if worked {
             worker = None;
-            let folder = app.state.folder.clone();
+            let folder = app.state.files.path.clone();
             list(&mut app, folder)?;
         }
         if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
@@ -934,7 +934,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::Rename { path, name } => match skyward_files::rename(Path::new(&path), &name) {
                         Ok(_) => {
                             app.renamed(Ok(()), now);
-                            let folder = app.state.folder.clone();
+                            let folder = app.state.files.path.clone();
                             list(&mut app, folder)?;
                         }
                         Err(e) if e.is::<skyward_files::Taken>() => app.renamed(Err(RenameRefused::Taken), now),

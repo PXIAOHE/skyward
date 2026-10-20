@@ -201,6 +201,69 @@ pub enum FileKind {
     Special,
 }
 
+/// A folder as a list of its entries shows it: where it is, what is in it
+/// as the runtime read it or why it could not, and when it was read, in
+/// Unix seconds: dates in the list are told against that day.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Folder {
+    pub path: String,
+    pub entries: Result<Vec<FileRow>, String>,
+    pub listed: i64,
+    /// The folders left for one inside them, outermost first, with how far
+    /// each was scrolled.
+    left: Vec<(String, f32)>,
+}
+
+impl Folder {
+    /// The folder at `path`, not read yet.
+    pub fn new(path: &str) -> Folder {
+        Folder { path: path.into(), entries: Ok(Vec::new()), listed: 0, left: Vec::new() }
+    }
+
+    /// The entry at this place in the list.
+    fn entry(&self, i: usize) -> &FileRow {
+        &self.entries.as_ref().expect("an entry touched is one the list shows")[i]
+    }
+
+    /// Where the entry of this name in the folder is.
+    fn inside(&self, name: &str) -> String {
+        std::path::Path::new(&self.path).join(name).to_string_lossy().into_owned()
+    }
+
+    /// The folder this one is in; none for the root.
+    fn up(&self) -> Option<String> {
+        std::path::Path::new(&self.path).parent().map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// The folder this many levels below the root, by its place in the
+    /// path shown over the list; none for this folder itself.
+    fn ancestor(&self, depth: usize) -> Option<String> {
+        let path = std::path::Path::new(&self.path);
+        let names: Vec<_> = path.components().filter(|c| matches!(c, std::path::Component::Normal(_))).collect();
+        if depth >= names.len() {
+            return None;
+        }
+        let mut up = if path.has_root() { std::path::PathBuf::from("/") } else { std::path::PathBuf::new() };
+        up.extend(&names[..depth]);
+        Some(up.to_string_lossy().into_owned())
+    }
+
+    /// Going into a folder inside this one: this one keeps how far it was
+    /// scrolled, for coming back.
+    fn leave(&mut self, scroll: f32) {
+        self.left.push((self.path.clone(), scroll));
+    }
+
+    /// How far `path` is scrolled as it takes this folder's place: where it
+    /// was left, for a folder gone back up to; its top for any other.
+    fn scroll_for(&mut self, path: &str) -> f32 {
+        let kept = self.left.iter().position(|(left, _)| left == path);
+        let scroll = kept.map_or(0.0, |k| self.left[k].1);
+        self.left.truncate(kept.unwrap_or(self.left.len()));
+        scroll
+    }
+}
+
 /// A partition the mount page lists: its name, where it sits, and how it
 /// shows now. The runtime fills these in; the page draws them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -761,12 +824,8 @@ pub struct State {
     /// The on-screen keyboard's layer, and the key held down on it.
     pub layer: Layer,
     pub pressed: Option<Cap>,
-    /// The folder the file manager shows, what is in it as the runtime read
-    /// it or why it could not, and when it was read, in Unix seconds: dates
-    /// in the list are told against that day.
-    pub folder: String,
-    pub files: Result<Vec<FileRow>, String>,
-    pub listed: i64,
+    /// The folder the file manager shows.
+    pub files: Folder,
     /// The entry the file page describes.
     pub file: Option<FileRow>,
     pub fastboot: Fastboot,
@@ -818,9 +877,7 @@ impl Default for State {
             search: String::new(),
             layer: Layer::Letters,
             pressed: None,
-            folder: "/".into(),
-            files: Ok(Vec::new()),
-            listed: 0,
+            files: Folder::new("/"),
             file: None,
             fastboot: Fastboot { running: false, link: UsbLink::Unplugged, focus: 0 },
             erase: Erase::default(),
@@ -1110,9 +1167,6 @@ pub struct App {
     /// next rows to be drawn on.
     drawn: Vec<(usize, Canvas)>,
     spare: Vec<Canvas>,
-    /// The file manager's folders left for one inside them, outermost
-    /// first, with how far each was scrolled.
-    left: Vec<(String, f32)>,
     /// The current page's large and bar titles, for their words and the
     /// theme, with their blurred versions as they are needed. A page can
     /// change its title in place, as work on files does once it ends.
@@ -1169,7 +1223,6 @@ impl App {
             frame: None,
             drawn: Vec::new(),
             spare: Vec::new(),
-            left: Vec::new(),
             titles: None,
             chip: None,
             dither: None,
@@ -1265,7 +1318,7 @@ impl App {
         if let Drag::Press { action: Some(Action::OpenEntry(i)), at, .. } = self.drag {
             if now >= at + LONG_PRESS_MS {
                 self.drag = Drag::Held;
-                let entry = self.state.files.as_ref().expect("an entry held is one the page lists")[i].clone();
+                let entry = self.state.files.entry(i).clone();
                 self.state.file = Some(entry);
                 self.state.asking_delete = false;
                 self.open(Screen::FileInfo);
@@ -1688,19 +1741,17 @@ impl App {
     /// up to shows where it was left, as the stock file manager does; any
     /// other starts from its top.
     pub fn set_files(&mut self, folder: String, files: Result<Vec<FileRow>, String>, listed: i64) {
-        if folder != self.state.folder && self.screen() == Screen::Files {
-            let kept = self.left.iter().position(|(path, _)| *path == folder);
-            let scroll = kept.map_or(0.0, |k| self.left[k].1);
-            self.left.truncate(kept.unwrap_or(self.left.len()));
-            self.top_mut().1 = scroll;
+        if folder != self.state.files.path && self.screen() == Screen::Files {
+            self.top_mut().1 = self.state.files.scroll_for(&folder);
             self.fling = None;
             self.bounce = None;
             self.pull = 0.0;
             self.snap = true;
         }
-        self.state.folder = folder;
-        self.state.files = files;
-        self.state.listed = listed;
+        let shown = &mut self.state.files;
+        shown.path = folder;
+        shown.entries = files;
+        shown.listed = listed;
         self.refresh();
     }
 
@@ -1910,8 +1961,8 @@ impl App {
         match self.screen() {
             Screen::Mount => self.state.mount_failure = None,
             Screen::Files => {
-                if let Some(up) = std::path::Path::new(&self.state.folder).parent() {
-                    return vec![Effect::ReadDir(up.to_string_lossy().into_owned())];
+                if let Some(up) = self.state.files.up() {
+                    return vec![Effect::ReadDir(up)];
                 }
                 // Leaving the file manager puts a picked entry down.
                 self.state.clip = None;
@@ -2020,7 +2071,7 @@ impl App {
     fn arrive_at(&mut self, s: Screen) -> Vec<Effect> {
         match s {
             Screen::Mount => vec![Effect::ReadMounts],
-            Screen::Files => vec![Effect::ReadDir(self.state.folder.clone())],
+            Screen::Files => vec![Effect::ReadDir(self.state.files.path.clone())],
             Screen::Search => {
                 self.state.search.clear();
                 self.state.layer = Layer::Letters;
@@ -2149,14 +2200,14 @@ impl App {
             // folder.
             Action::Paste => {
                 let clip = self.state.clip.clone().expect("only a picked entry is pasted");
-                let (path, folder) = (std::path::Path::new(&clip.path), std::path::Path::new(&self.state.folder));
+                let (path, folder) = (std::path::Path::new(&clip.path), std::path::Path::new(&self.state.files.path));
                 let name = path.file_name().map_or_else(|| clip.path.clone(), |n| n.to_string_lossy().into_owned());
                 if folder.starts_with(path) {
                     self.say(&format!("无法将\"{name}\"放入其自身中"), now);
                 } else if clip.op == FileOp::Move && path.parent() == Some(folder) {
                     self.say(&format!("\"{name}\"已在该文件夹中"), now);
                 } else {
-                    return vec![Effect::Paste { op: clip.op, path: clip.path, into: self.state.folder.clone(), clash: None }];
+                    return vec![Effect::Paste { op: clip.op, path: clip.path, into: self.state.files.path.clone(), clash: None }];
                 }
             }
             Action::Unpick => {
@@ -2242,14 +2293,12 @@ impl App {
                 self.refresh();
             }
             Action::OpenEntry(i) => {
-                let entry = self.state.files.as_ref().expect("an entry opened is one the page lists")[i].clone();
+                let entry = self.state.files.entry(i).clone();
                 match entry.kind {
                     FileKind::Folder { .. } | FileKind::Link { folder: true, .. } => {
-                        // The folder left keeps its place for coming back.
                         let scroll = self.top().1;
-                        self.left.push((self.state.folder.clone(), scroll));
-                        let path = std::path::Path::new(&self.state.folder).join(&entry.name);
-                        return vec![Effect::ReadDir(path.to_string_lossy().into_owned())];
+                        self.state.files.leave(scroll);
+                        return vec![Effect::ReadDir(self.state.files.inside(&entry.name))];
                     }
                     FileKind::File | FileKind::Link { folder: false, .. } | FileKind::Special => {
                         self.state.file = Some(entry);
@@ -2258,10 +2307,8 @@ impl App {
                 }
             }
             Action::OpenAncestor(depth) => {
-                let parts = std::path::Path::new(&self.state.folder).components();
-                if depth + 1 < parts.clone().count() {
-                    let path: std::path::PathBuf = parts.take(depth + 1).collect();
-                    return vec![Effect::ReadDir(path.to_string_lossy().into_owned())];
+                if let Some(path) = self.state.files.ancestor(depth) {
+                    return vec![Effect::ReadDir(path)];
                 }
             }
             Action::Unavailable(text) => self.say(text, now),
@@ -2282,7 +2329,7 @@ impl App {
     /// Where the entry the file page shows is.
     fn entry_path(&self) -> String {
         let entry = self.state.file.as_ref().expect("the file page shows an entry");
-        std::path::Path::new(&self.state.folder).join(&entry.name).to_string_lossy().into_owned()
+        self.state.files.inside(&entry.name)
     }
 
     /// A key of the keyboard on the terminal page. The layer keys change
@@ -2370,7 +2417,7 @@ impl App {
                 Screen::Rename => {
                     let name = self.state.new_name.clone();
                     let current = &self.state.file.as_ref().expect("the file page shows an entry").name;
-                    let taken = self.state.files.as_ref().is_ok_and(|entries| entries.iter().any(|e| e.name == name));
+                    let taken = self.state.files.entries.as_ref().is_ok_and(|entries| entries.iter().any(|e| e.name == name));
                     match name.as_str() {
                         "" => self.say("请输入名称", now),
                         "." | ".." => self.say("名称不能为\".\"或\"..\"", now),
