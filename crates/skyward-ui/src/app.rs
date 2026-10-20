@@ -549,7 +549,9 @@ pub const SCREEN_OFF: [Option<u64>; 7] = [Some(15_000), Some(30_000), Some(60_00
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     Open(Screen),
-    /// Leave the unlock page for the home page without keeping it behind.
+    /// Leave the decrypt page for the page it was opened from; the page
+    /// the recovery started on, for the home page without keeping it
+    /// behind.
     Skip,
     /// Try opening the data partition again, after it did not open.
     OpenData,
@@ -2106,7 +2108,11 @@ impl App {
             }
             Action::OpenData => return self.open_data(),
             Action::Skip => {
-                *self.top_mut() = (Screen::Home, 0.0);
+                if self.stack.len() > 1 {
+                    self.stack.pop();
+                } else {
+                    *self.top_mut() = (Screen::Home, 0.0);
+                }
                 self.settle_page();
                 self.refresh();
             }
@@ -3877,6 +3883,18 @@ mod tests {
         assert!(tap(&mut app, &f, &i, Action::Open(Screen::Decrypt)).is_empty(), "open already, it is not opened again");
         let mut first = App::new(Screen::Decrypt, W, H, PPD);
         assert_eq!(first.arrive(), vec![Effect::OpenData], "a recovery that starts on the page opens it as well");
+    }
+
+    #[test]
+    fn leaving_the_decrypt_page_goes_back_to_where_it_was_opened_from() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Decrypt, &f, &i);
+        tap(&mut app, &f, &i, Action::Skip);
+        assert_eq!((app.screen(), app.stack.len()), (Screen::Home, 1), "back on the home page, with no other behind it");
+        let mut first = App::new(Screen::Decrypt, W, H, PPD);
+        first.arrive();
+        tap(&mut first, &f, &i, Action::Skip);
+        assert_eq!((first.screen(), first.stack.len()), (Screen::Home, 1), "a recovery that started on the page goes on to the home page");
     }
 
     #[test]
