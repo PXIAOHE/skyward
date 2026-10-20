@@ -4,7 +4,7 @@ use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
 use skyward_ui::app::{
     Action, App, Asked, BackupEntry, Choice, Clip, Damage, Data, EraseStop, FileKind, FileOp, FileRow, FileTask, Install, JobEnd,
-    Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch, UsbLink, SCREEN_OFF,
+    Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
@@ -213,9 +213,28 @@ fn main() -> Result<()> {
         app.state.source = Source::File(Place::Storage);
         app.state.install = install;
     };
-    let pages: [PageShot; 61] = [
+    let usb_page = Screen::Choose(Place::UsbDrive);
+    let pages: [PageShot; 66] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
+        }),
+        ("11-install-dark-usb", Screen::Install, true, &|app| {
+            app.set_usb_drive(Some(UsbDrive::Shown));
+        }),
+        ("19-choose-usb-light-absent", usb_page, false, &|_| {}),
+        ("19-choose-usb-dark-unreadable", usb_page, true, &|app| {
+            let why = "sdg holds no filesystem the kernel reads: sdg1 as vfat: Invalid argument (os error 22); sdg1 as exfat: Invalid argument (os error 22); sdg1 as ntfs3: No such device (os error 19); sdg1 as ext4: Invalid argument (os error 22); sdg1 as f2fs: Invalid argument (os error 22)";
+            app.set_usb_drive(Some(UsbDrive::Unreadable(why.into())));
+        }),
+        ("19-choose-usb-light", usb_page, false, &|app| {
+            app.set_usb_drive(Some(UsbDrive::Shown));
+            let made = 1_790_380_800;
+            let rows = vec![folder("ROMs", 4, made), file("boot.img", 100_663_296, made), file("ishtar-ota-OS3.0.306.0.WMACNXM.zip", 7_103_043_868, made)];
+            app.set_place(Place::UsbDrive, String::new(), Ok(rows), LISTED);
+        }),
+        ("20-install-usb-checking", Screen::Installing, false, &|app| {
+            app.state.source = Source::File(Place::UsbDrive);
+            app.state.install = Install::Checking { size: 7_103_043_868 };
         }),
         ("19-choose-storage-light", Screen::Choose(Place::Storage), false, &|app| {
             app.set_place(Place::Storage, "Download".into(), Ok(sample_download()), LISTED)

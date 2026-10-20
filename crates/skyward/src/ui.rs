@@ -13,9 +13,10 @@ use skyward_sys::bcb::{self, Work};
 use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
 use skyward_files::Ownership;
+use skyward_block::usb::{self, Drive};
 use skyward_ui::app::{
     App, Asked, ClashChoice, Data, Effect, EraseStop, FileKind, FileOp, FileRow, FileTask, JobEnd, Keys, MountFailure, Part,
-    Place, RenameRefused, Screen, Target, UsbLink, Wipe,
+    Place, RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
@@ -32,6 +33,9 @@ const USB_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the page shows that the work the system asked for is done
 /// before the phone starts the system or powers off.
 const LEAVE_AFTER_MS: u64 = 1500;
+
+/// Where the USB drive plugged in is shown.
+const USB_DRIVE: &str = "/mnt/usb";
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
@@ -185,6 +189,7 @@ fn list_place(app: &mut App, place: Place, folder: String) -> Result<()> {
 fn in_place(place: Place, path: &str) -> PathBuf {
     let top = match place {
         Place::Storage => Path::new(skyward_crypto::data::SDCARD),
+        Place::UsbDrive => Path::new(USB_DRIVE),
     };
     if path.is_empty() {
         top.to_path_buf()
@@ -196,6 +201,59 @@ fn in_place(place: Place, path: &str) -> PathBuf {
 /// Now, in Unix seconds.
 fn unix_now() -> Result<i64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_secs() as i64)
+}
+
+/// The USB drive plugged in, and whether it is shown at [`USB_DRIVE`] or
+/// why it could not be.
+struct Plugged {
+    drive: Drive,
+    shown: Result<(), String>,
+}
+
+/// Look for the USB drive plugged in: one gone is taken away from where it
+/// was shown, even with files on it still open, and one found in two looks
+/// running is shown, the kernel having listed its partitions by then.
+/// `seen` is a drive found by the look before that is not shown yet. What
+/// the pages are told comes back when it changed.
+fn look_for_drive(plugged: &mut Option<Plugged>, seen: &mut Option<String>) -> Result<Option<Option<UsbDrive>>> {
+    let found = usb::drives()?.into_iter().find(Drive::ready);
+    if let Some(p) = plugged {
+        if found.is_some_and(|d| d.disk == p.drive.disk) {
+            return Ok(None);
+        }
+        if p.shown.is_ok() {
+            skyward_block::mount::umount_detach(Path::new(USB_DRIVE))?;
+        }
+        skyward_sys::kmsg(&format!("USB drive {} is gone", p.drive.disk))?;
+        *plugged = None;
+        *seen = None;
+        return Ok(Some(None));
+    }
+    let Some(drive) = found else {
+        *seen = None;
+        return Ok(None);
+    };
+    if seen.as_deref() != Some(drive.disk.as_str()) {
+        *seen = Some(drive.disk.clone());
+        return Ok(None);
+    }
+    let shown = match usb::mount(&drive, Path::new(USB_DRIVE)) {
+        Ok((part, filesystem)) => {
+            skyward_sys::kmsg(&format!("USB drive {part} shown at {USB_DRIVE} as {filesystem}"))?;
+            Ok(())
+        }
+        Err(e) => {
+            skyward_sys::kmsg(&format!("USB drive {} not shown: {e:#}", drive.disk))?;
+            Err(format!("{e:#}"))
+        }
+    };
+    let told = match &shown {
+        Ok(()) => UsbDrive::Shown,
+        Err(why) => UsbDrive::Unreadable(why.clone()),
+    };
+    *plugged = Some(Plugged { drive, shown });
+    *seen = None;
+    Ok(Some(Some(told)))
 }
 
 /// What a choice on the clash page asks of the work on files.
@@ -302,13 +360,14 @@ fn parts_wipe(app: &mut App, steps: Vec<Step>, logs: &[String], asked: bool) -> 
     }
 }
 
-/// What the pages act on: a touch or a key, or what a program asked on the
-/// recovery socket.
+/// What the pages act on: a touch or a key, what a program asked on the
+/// recovery socket, or a USB drive plugged in or pulled out.
 enum Incoming {
     /// The page shown first, which may ask for work as it shows.
     Arrived,
     Input(Event),
     Asked(Request),
+    Drive(Option<UsbDrive>),
 }
 
 /// What a request on the recovery socket comes to. adbd asks for fastboot
@@ -580,6 +639,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut shell: Option<pty::Shell> = None;
     // Copying, moving or deleting under way.
     let mut worker: Option<filework::Worker> = None;
+    // The USB drive plugged in, looked for each second.
+    let mut plugged: Option<Plugged> = None;
+    let mut seen: Option<String> = None;
+    let mut drive_at = Instant::now();
     loop {
         let now = monotonic_ms();
         if leave_at.is_some_and(|at| now >= at) {
@@ -671,6 +734,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         wait(&fds, timeout)?;
         let now = monotonic_ms();
+        let mut drive_told = None;
+        if drive_at.elapsed().as_secs() >= 1 {
+            drive_told = look_for_drive(&mut plugged, &mut seen)?;
+            drive_at = Instant::now();
+        }
         // What the installer and the eraser told comes first, so a touch
         // acts on the page as it now stands.
         if let Some(i) = &installer {
@@ -813,10 +881,16 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             Some(c) => c.requests()?,
             None => Vec::new(),
         };
-        let incoming = arriving.take().into_iter().chain(requests.into_iter().map(Incoming::Asked)).chain(inputs.read()?.into_iter().map(Incoming::Input));
+        let incoming = arriving
+            .take()
+            .into_iter()
+            .chain(drive_told.map(Incoming::Drive))
+            .chain(requests.into_iter().map(Incoming::Asked))
+            .chain(inputs.read()?.into_iter().map(Incoming::Input));
         for came in incoming {
             let effects = match came {
                 Incoming::Arrived => app.arrive(),
+                Incoming::Drive(drive) => app.set_usb_drive(drive),
                 Incoming::Asked(asked) => {
                     skyward_sys::kmsg(&format!("asked on the recovery socket: {asked:?}"))?;
                     answer(asked, fastboot)

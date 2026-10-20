@@ -1,4 +1,4 @@
-use crate::app::{Data, EraseStop, FileKind, FileRow, MountFailure, Part, Source, BACKUP_PARTS};
+use crate::app::{Data, EraseStop, FileKind, FileRow, MountFailure, Part, Place, Source, BACKUP_PARTS};
 use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
@@ -482,7 +482,8 @@ pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
                 (Trouble::Older, _) => "更新包的版本过旧。".into(),
                 (Trouble::NoSpace, _) => "super 分区空间不足。".into(),
                 (Trouble::Transfer, Source::Computer) => "读取更新包失败，请检查数据线连接后重新发送。".into(),
-                (Trouble::Transfer, Source::File(_)) => "读取更新包失败。".into(),
+                (Trouble::Transfer, Source::File(Place::Storage)) => "读取更新包失败。".into(),
+                (Trouble::Transfer, Source::File(Place::UsbDrive)) => "读取更新包失败，请检查 U 盘连接后重试。".into(),
                 (Trouble::Write, _) => "写入分区失败。".into(),
                 (Trouble::Verify, _) => "分区校验失败。".into(),
                 (Trouble::PostInstall, _) => "完成安装失败。".into(),
@@ -492,7 +493,10 @@ pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
             (what, Some(format!("错误代码：{code}")))
         }
         Failure::Disconnected => ("电脑已停止发送，请检查数据线连接后重新发送。".into(), None),
-        Failure::Unreadable(why) => ("读取文件失败。".into(), Some(why.clone())),
+        Failure::Unreadable(why) => match source {
+            Source::File(Place::UsbDrive) => ("读取文件失败，请检查 U 盘连接后重试。".into(), Some(why.clone())),
+            _ => ("读取文件失败。".into(), Some(why.clone())),
+        },
         Failure::Changed => match source {
             Source::Computer => ("文件在发送过程中被修改，请重新发送。".into(), None),
             Source::File(_) => ("文件在读取过程中被修改，请重新选择。".into(), None),
@@ -687,13 +691,15 @@ mod tests {
 
     #[test]
     fn a_file_chosen_is_answered_with_choosing_another() {
-        let file = Source::File(crate::app::Place::Storage);
+        let file = Source::File(Place::Storage);
         assert_eq!(refusal(&Refusal::Unknown, "ishtar", file), "无法识别该文件，请选择 A/B 完整更新包或分区镜像。");
         assert_eq!(refusal(&Refusal::Incremental, "ishtar", file), "无法安装增量更新包，请选择完整更新包。");
         assert_eq!(failure(&Failure::Engine(26), file).0, "更新包签名验证失败，请选择官方更新包。");
         assert_eq!(failure(&Failure::Changed, file).0, "文件在读取过程中被修改，请重新选择。");
         let gone = "read /sdcard/Download/ota.zip: Input/output error (os error 5)";
         assert_eq!(failure(&Failure::Unreadable(gone.into()), file), ("读取文件失败。".into(), Some(gone.into())));
+        let pulled = failure(&Failure::Unreadable(gone.into()), Source::File(Place::UsbDrive));
+        assert_eq!(pulled.0, "读取文件失败，请检查 U 盘连接后重试。", "a drive that came out is checked first");
     }
 
     #[test]

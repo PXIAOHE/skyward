@@ -18,6 +18,7 @@ const fn entry(title: &'static str, place: &'static str, screen: Screen, keys: &
 pub const ENTRIES: &[Entry] = &[
     entry("安装", "主页", Screen::Install, &["anzhuang", "az", "install", "shuaji", "sj"]),
     entry("从内部存储安装", "安装", Screen::Install, &["congneibucunchuanzhuang", "cnbccaz", "neicun", "sdcard", "zip"]),
+    entry("从 U 盘安装", "安装", Screen::Install, &["congupananzhuang", "cupaz", "upan", "usb", "otg"]),
     entry("通过电脑安装", "安装", Screen::Install, &["tongguodiannaoanzhuang", "tgdnaz", "sideload", "adb"]),
     entry("备份", "主页", Screen::Backup, &["beifen", "bf", "backup"]),
     entry("恢复", "主页", Screen::Restore, &["huifu", "hf", "restore"]),

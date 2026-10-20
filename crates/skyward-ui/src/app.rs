@@ -89,6 +89,18 @@ pub enum Screen {
 pub enum Place {
     /// The owner's internal storage, which opens with the data partition.
     Storage,
+    /// A USB drive plugged into the port, which the runtime shows read
+    /// only.
+    UsbDrive,
+}
+
+/// The USB drive plugged in, as the runtime found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UsbDrive {
+    /// Shown, for a file on it to be chosen.
+    Shown,
+    /// Nothing on it could be read: why.
+    Unreadable(String),
 }
 
 /// Where the package being installed comes from.
@@ -887,6 +899,11 @@ pub struct State {
     /// The folder of internal storage a file to install is chosen in, its
     /// path from the top of the storage.
     pub storage: Folder,
+    /// The USB drive plugged in, as the runtime last found it, and the
+    /// folder of it a file to install is chosen in, its path from the top
+    /// of the drive.
+    pub usb_drive: Option<UsbDrive>,
+    pub drive: Folder,
     /// The entry the file page describes.
     pub file: Option<FileRow>,
     pub fastboot: Fastboot,
@@ -941,6 +958,8 @@ impl Default for State {
             pressed: None,
             files: Folder::new("/"),
             storage: Folder::new(""),
+            usb_drive: None,
+            drive: Folder::new(""),
             file: None,
             fastboot: Fastboot { running: false, link: UsbLink::Unplugged, focus: 0 },
             erase: Erase::default(),
@@ -961,6 +980,7 @@ impl State {
         match screen {
             Screen::Files => &self.files,
             Screen::Choose(Place::Storage) => &self.storage,
+            Screen::Choose(Place::UsbDrive) => &self.drive,
             other => unreachable!("{other:?} lists no folder"),
         }
     }
@@ -969,7 +989,17 @@ impl State {
         match screen {
             Screen::Files => &mut self.files,
             Screen::Choose(Place::Storage) => &mut self.storage,
+            Screen::Choose(Place::UsbDrive) => &mut self.drive,
             other => unreachable!("{other:?} lists no folder"),
+        }
+    }
+
+    /// Whether the files of `place` can be read: internal storage once it
+    /// is open, a USB drive once the runtime shows it.
+    pub fn place_open(&self, place: Place) -> bool {
+        match place {
+            Place::Storage => self.data.storage_open(),
+            Place::UsbDrive => self.usb_drive == Some(UsbDrive::Shown),
         }
     }
 }
@@ -1841,6 +1871,28 @@ impl App {
         self.show_folder(Screen::Choose(place), folder, files, listed);
     }
 
+    /// The runtime found the USB drive plugged in, shown or not, or found
+    /// none. Another drive, or none, starts its folders over from the top,
+    /// and one shown while its page is up is read at once.
+    pub fn set_usb_drive(&mut self, drive: Option<UsbDrive>) -> Vec<Effect> {
+        if drive == self.state.usb_drive {
+            return Vec::new();
+        }
+        self.state.usb_drive = drive;
+        self.state.drive = Folder::new("");
+        self.refresh();
+        let page = Screen::Choose(Place::UsbDrive);
+        if self.screen() != page {
+            return Vec::new();
+        }
+        self.top_mut().1 = 0.0;
+        self.fling = None;
+        self.bounce = None;
+        self.pull = 0.0;
+        self.snap = true;
+        self.arrive_at(page)
+    }
+
     /// `folder` becomes the one the list on page `screen` shows. A folder
     /// gone back up to shows where it was left, as the stock file manager
     /// does; any other starts from its top.
@@ -2182,7 +2234,7 @@ impl App {
         match s {
             Screen::Mount => vec![Effect::ReadMounts],
             Screen::Files => vec![Effect::ReadDir(self.state.files.path.clone())],
-            Screen::Choose(place) => vec![Effect::ReadPlace(place, self.state.folder(s).path.clone())],
+            Screen::Choose(place) if self.state.place_open(place) => vec![Effect::ReadPlace(place, self.state.folder(s).path.clone())],
             Screen::Search => {
                 self.state.search.clear();
                 self.state.layer = Layer::Letters;
@@ -4283,6 +4335,33 @@ mod tests {
         app.set_place(Place::Storage, String::new(), Ok(Vec::new()), LISTED);
         assert!(app.key(Key::Back, 1000).is_empty());
         assert_eq!(app.screen(), Screen::Install, "from the top, back leaves");
+    }
+
+    #[test]
+    fn a_usb_drive_shows_its_files_as_soon_as_it_is_plugged_in() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        let page = Screen::Choose(Place::UsbDrive);
+        assert!(tap(&mut app, &f, &i, Action::Open(page)).is_empty(), "with no drive, nothing to read");
+        assert_eq!(app.screen(), page);
+        assert!(app.frame(&f, &i).rows.is_none(), "the page waits for one");
+        assert_eq!(app.set_usb_drive(Some(UsbDrive::Shown)), vec![Effect::ReadPlace(Place::UsbDrive, String::new())], "read once shown");
+        app.set_place(Place::UsbDrive, String::new(), Ok(vec![entry("ROMs", folder(2))]), LISTED);
+        assert_eq!(tap(&mut app, &f, &i, Action::ChooseEntry(0)), vec![Effect::ReadPlace(Place::UsbDrive, "ROMs".into())]);
+        app.set_place(Place::UsbDrive, "ROMs".into(), Ok(vec![entry("boot.img", FileKind::File)]), LISTED);
+        assert_eq!(tap(&mut app, &f, &i, Action::ChooseEntry(0)), vec![Effect::InstallFile(Place::UsbDrive, "ROMs/boot.img".into())]);
+        assert_eq!(app.state.source, Source::File(Place::UsbDrive));
+        app.install(Event::Finished(Outcome::Failed(Failure::Unreadable("read /mnt/usb/ROMs/boot.img: Input/output error".into()))), 0);
+        tap_at(&mut app, &f, &i, Action::Back, 1000);
+        assert_eq!(app.screen(), page, "back to choose another");
+        assert!(app.set_usb_drive(None).is_empty());
+        assert_eq!(app.state.drive.path, "", "a drive pulled out leaves nothing of its folders");
+        assert!(app.frame(&f, &i).rows.is_none(), "the page waits for another");
+        assert!(app.key(Key::Back, 1000).is_empty());
+        assert_eq!(app.screen(), Screen::Install);
+        let unreadable = Some(UsbDrive::Unreadable("sdg holds no filesystem the kernel reads".into()));
+        assert!(app.set_usb_drive(unreadable).is_empty(), "another page reads nothing");
+        assert!(tap_at(&mut app, &f, &i, Action::Open(page), 1000).is_empty(), "nothing on the drive can be read");
     }
 
     #[test]

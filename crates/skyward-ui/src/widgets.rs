@@ -26,6 +26,8 @@ pub enum Icon {
     Moon,
     Terminal,
     Usb,
+    /// A USB drive: its plug over its body.
+    UsbDrive,
     Layers,
     Phone,
     Lock,
@@ -130,6 +132,13 @@ pub fn glyph(c: &mut Canvas, icon: Icon, cx: f32, cy: f32, tile: f32, fg: Rgba, 
             c.fill_round_rect(cx + 0.04 * g, cy - 0.36 * g, 0.06 * g, 0.1 * g, 0.02 * g, bg);
             c.fill_round_rect(cx - 0.27 * g, cy - 0.16 * g, 0.54 * g, 0.3 * g, 0.09 * g, fg);
             c.line(cx, cy + 0.14 * g, cx, cy + 0.44 * g, sw, fg);
+        }
+        Icon::UsbDrive => {
+            c.fill_round_rect(cx - 0.16 * g, cy - 0.44 * g, 0.32 * g, 0.26 * g, 0.04 * g, fg);
+            c.fill_round_rect(cx - 0.09 * g, cy - 0.37 * g, 0.06 * g, 0.09 * g, 0.02 * g, bg);
+            c.fill_round_rect(cx + 0.03 * g, cy - 0.37 * g, 0.06 * g, 0.09 * g, 0.02 * g, bg);
+            c.fill_round_rect(cx - 0.25 * g, cy - 0.2 * g, 0.5 * g, 0.64 * g, 0.1 * g, fg);
+            c.fill_circle(cx, cy + 0.26 * g, 0.05 * g, bg);
         }
         Icon::Layers => {
             c.line(cx - 0.4 * g, cy + 0.1 * g, cx, cy + 0.3 * g, sw, fg);

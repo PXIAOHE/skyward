@@ -1,7 +1,7 @@
 use crate::app::{
     Action, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Folder, Frame, HeroArt, Hit,
-    Install, JobEnd, Keys, Pick, Place, Screen, Source, State, Switch, Target, UsbLink, Wipe, BACKUP_PARTS, BACKUP_PLACES,
-    FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, WIPES,
+    Install, JobEnd, Keys, Pick, Place, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, BACKUP_PARTS,
+    BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, WIPES,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -612,10 +612,19 @@ pub fn install(cx: &Ctx) -> Frame {
     } else {
         ("需先完成「解密」", Action::Open(Screen::Decrypt))
     };
+    // The drive's page waits for one to be plugged in, and says why one
+    // that is cannot be read.
+    let usb = match &cx.state.usb_drive {
+        Some(UsbDrive::Shown) => "选择 U 盘中的更新包或镜像",
+        Some(UsbDrive::Unreadable(_)) => "无法读取该 U 盘",
+        None => "请通过 OTG 连接 U 盘",
+    };
     rows.push(Row::new(install_title(Source::File(Place::Storage))).icon(BLUE, Icon::Phone).subtitle(storage));
+    rows.push(Row::new(install_title(Source::File(Place::UsbDrive))).icon(PURPLE, Icon::UsbDrive).subtitle(usb));
     rows.push(Row::new(install_title(Source::Computer)).icon(GREEN, Icon::Usb).subtitle("在电脑上运行 adb sideload"));
     let methods = widgets::list(&mut c, t, f, y, &rows);
-    let out = hits(&methods.rows[methods.rows.len() - 2..], &[from_storage, Action::Sideload]);
+    let from_usb = Action::Open(Screen::Choose(Place::UsbDrive));
+    let out = hits(&methods.rows[methods.rows.len() - 3..], &[from_storage, from_usb, Action::Sideload]);
     widgets::footnote(
         &mut c,
         t,
@@ -632,6 +641,7 @@ fn install_title(source: Source) -> &'static str {
     match source {
         Source::Computer => "通过电脑安装",
         Source::File(Place::Storage) => "从内部存储安装",
+        Source::File(Place::UsbDrive) => "从 U 盘安装",
     }
 }
 
@@ -639,6 +649,7 @@ fn install_title(source: Source) -> &'static str {
 fn place_name(place: Place) -> &'static str {
     match place {
         Place::Storage => "内部存储",
+        Place::UsbDrive => "U 盘",
     }
 }
 
@@ -715,6 +726,7 @@ pub fn installing(cx: &Ctx) -> Frame {
             match s.source {
                 Source::Computer => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要断开数据线。"),
                 Source::File(Place::Storage) => y,
+                Source::File(Place::UsbDrive) => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要拔出 U 盘。"),
             }
         }
         Install::Choosing(choice) => {
@@ -782,6 +794,7 @@ pub fn installing(cx: &Ctx) -> Frame {
             let keep = match s.source {
                 Source::Computer => "安装完成前，请不要断开数据线或关机。",
                 Source::File(Place::Storage) => "安装完成前，请不要关机。",
+                Source::File(Place::UsbDrive) => "安装完成前，请不要拔出 U 盘或关机。",
             };
             let y = widgets::footnote(&mut c, t, f, y, &format!("{keep}{target}"));
             if *overwriting {
@@ -803,6 +816,7 @@ pub fn installing(cx: &Ctx) -> Frame {
             let keep = match s.source {
                 Source::Computer => "刷入完成前，请不要断开数据线。",
                 Source::File(Place::Storage) => "刷入完成前，请不要关机。",
+                Source::File(Place::UsbDrive) => "刷入完成前，请不要拔出 U 盘。",
             };
             widgets::footnote(&mut c, t, f, y, keep)
         }
@@ -1112,34 +1126,58 @@ pub fn files(cx: &Ctx) -> Frame {
         let (canvas, rects) = widgets::dock_bar(t, f, files::page(t), &["取消", go]);
         Dock { canvas, hits: hits(&rects, &[Action::Unpick, Action::Paste]) }
     });
-    Frame { dock, ..listing(cx, &s.files, "根目录", "暂无文件", Action::OpenEntry, "文件管理") }
+    Frame { dock, ..listing(cx, &s.files, "根目录", None, "暂无文件", Action::OpenEntry, "文件管理") }
 }
 
 /// A place's folders and the files in them that can be installed, to
-/// choose one.
+/// choose one. A USB drive's page waits for one to be plugged in, and the
+/// drive's files show as soon as it is.
 pub fn choose(cx: &Ctx, place: Place) -> Frame {
-    listing(cx, cx.state.folder(Screen::Choose(place)), place_name(place), "暂无可安装的文件", Action::ChooseEntry, "选择文件")
+    let s = cx.state;
+    let unreadable;
+    let absent = match (place, &s.usb_drive) {
+        (Place::UsbDrive, None) => Some(("未连接 U 盘", "通过 OTG 连接 U 盘后，将在此显示其中的文件。")),
+        (Place::UsbDrive, Some(UsbDrive::Unreadable(why))) => {
+            unreadable = format!("请使用 FAT32 或 exFAT 格式的 U 盘。{why}");
+            Some(("无法读取该 U 盘", unreadable.as_str()))
+        }
+        _ => None,
+    };
+    listing(cx, s.folder(Screen::Choose(place)), place_name(place), absent, "暂无可安装的文件", Action::ChooseEntry, "选择文件")
 }
 
 /// A folder laid out as the stock file manager lays one out: the path as
 /// capsules from `top`, held under the bar once scrolled there, then the
 /// entries in one list on the plain page, each row drawn as it scrolls into
-/// view and touched for `action`; `empty` says there are none.
-fn listing(cx: &Ctx, folder: &Folder, top: &str, empty: &str, action: fn(usize) -> Action, title: &'static str) -> Frame {
+/// view and touched for `action`. In place of the list, `absent` says why
+/// nothing of the folder can be shown, and `empty` that it holds nothing.
+fn listing(
+    cx: &Ctx,
+    folder: &Folder,
+    top: &str,
+    absent: Option<(&str, &str)>,
+    empty: &str,
+    action: fn(usize) -> Action,
+    title: &'static str,
+) -> Frame {
     let (t, f) = (cx.t, cx.f);
     let bg = files::page(t);
     let mut c = Canvas::new(t.m.w, t.m.h);
     c.clear(bg);
-    let rows = match &folder.entries {
-        Err(why) => {
+    let rows = match (absent, &folder.entries) {
+        (Some((note, why)), _) => {
+            files::note(&mut c, t, f, note, Some(why));
+            None
+        }
+        (None, Err(why)) => {
             files::note(&mut c, t, f, "无法读取该文件夹", Some(why));
             None
         }
-        Ok(entries) if entries.is_empty() => {
+        (None, Ok(entries)) if entries.is_empty() => {
             files::note(&mut c, t, f, empty, None);
             None
         }
-        Ok(entries) => Some(files::rows(t, f, entries, action)),
+        (None, Ok(entries)) => Some(files::rows(t, f, entries, action)),
     };
     let pinned = Some(files::strip(t, f, top, &folder.path));
     Frame { bg, rows, pinned, ..Frame::new(t, c, Vec::new(), title, t.m.dp(files::STRIP_TOP_DP)) }
