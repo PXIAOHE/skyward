@@ -1,8 +1,12 @@
-use crate::app::{Data, EraseStop, FileKind, FileRow, MountFailure, Part, Place, Source, BACKUP_PARTS};
+use crate::app::{Data, EraseStop, FileKind, FileRow, MountFailure, Part, Place, Source, BACKUP_PARTS, TIME_ZONES};
+use jiff::civil::DateTime;
+use jiff::tz::TimeZone;
+use jiff::Timestamp;
 use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
 use skyward_vab::{Hold, Slot, SnapshotState};
+use std::sync::OnceLock;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -264,40 +268,44 @@ pub fn patch(p: &PatchLevel) -> String {
     format!("{}年{}月{}日", p.year, p.month, p.day)
 }
 
-/// The day a Unix time falls on in China, `2026年5月8日`.
-pub fn date(unix: i64) -> String {
-    let (year, month, day) = day_in_china(unix);
-    format!("{year}年{month}月{day}日")
+/// The rules of each of [`TIME_ZONES`], read once from the ones the
+/// recovery carries.
+fn rules(zone: usize) -> &'static TimeZone {
+    static RULES: OnceLock<Vec<TimeZone>> = OnceLock::new();
+    let all = RULES.get_or_init(|| {
+        TIME_ZONES.iter().map(|&(_, _, name)| TimeZone::get(name).expect("the recovery carries the rules of every zone listed")).collect()
+    });
+    &all[zone]
 }
 
-/// The calendar day of a Unix time in China: year, month, day.
-fn day_in_china(unix: i64) -> (i64, i64, i64) {
-    // Days since 1970 to a calendar date, counting in 400-year eras that
-    // start on 1 March.
-    let z = (unix + 8 * 3600).div_euclid(86_400) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    (yoe + era * 400 + i64::from(month <= 2), month, day)
+/// A Unix time on the calendar and clock of the zone at `zone` in
+/// [`TIME_ZONES`]. A time past either end of the calendar, as a damaged
+/// file's can be, is taken as that end.
+fn local(unix: i64, zone: usize) -> DateTime {
+    let unix = unix.clamp(Timestamp::MIN.as_second(), Timestamp::MAX.as_second());
+    let at = Timestamp::from_second(unix).expect("a time within the calendar");
+    at.to_zoned(rules(zone).clone()).datetime()
+}
+
+/// The day a Unix time falls on in the zone at `zone` in [`TIME_ZONES`],
+/// `2026年5月8日`.
+pub fn date(unix: i64, zone: usize) -> String {
+    let d = local(unix, zone);
+    format!("{}年{}月{}日", d.year(), d.month(), d.day())
 }
 
 /// When a list entry last changed, as the stock file manager tells it
 /// against `now`, when the folder was read: the time for today, month and
 /// day for a file from this year, and the whole date for a folder from this
-/// year or anything older.
-pub fn file_time(unix: i64, folder: bool, now: i64) -> String {
-    let (year, month, day) = day_in_china(unix);
-    let today = day_in_china(now);
-    if (year, month, day) == today {
-        clock(unix)
-    } else if year == today.0 && !folder {
-        format!("{month:02}/{day:02}")
+/// year or anything older; all in the zone at `zone` in [`TIME_ZONES`].
+pub fn file_time(unix: i64, folder: bool, now: i64, zone: usize) -> String {
+    let (day, today) = (local(unix, zone).date(), local(now, zone).date());
+    if day == today {
+        clock(unix, zone)
+    } else if day.year() == today.year() && !folder {
+        format!("{:02}/{:02}", day.month(), day.day())
     } else {
-        format!("{year}/{month:02}/{day:02}")
+        format!("{}/{:02}/{:02}", day.year(), day.month(), day.day())
     }
 }
 
@@ -320,15 +328,17 @@ pub fn file_size(bytes: u64) -> String {
     format!("{n} {}", UNITS[unit])
 }
 
-/// A Unix time in China, to the minute: `2026年10月19日 02:31`.
-pub fn datetime(unix: i64) -> String {
-    format!("{} {}", date(unix), clock(unix))
+/// A Unix time in the zone at `zone` in [`TIME_ZONES`], to the minute:
+/// `2026年10月19日 02:31`.
+pub fn datetime(unix: i64, zone: usize) -> String {
+    format!("{} {}", date(unix, zone), clock(unix, zone))
 }
 
-/// The time of day in China, `HH:MM`, as the status bar shows it.
-pub fn clock(unix: i64) -> String {
-    let minutes = (unix + 8 * 3600).rem_euclid(86_400) / 60;
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+/// The time of day in the zone at `zone` in [`TIME_ZONES`], `HH:MM`, as
+/// the status bar shows it.
+pub fn clock(unix: i64, zone: usize) -> String {
+    let t = local(unix, zone);
+    format!("{:02}:{:02}", t.hour(), t.minute())
 }
 
 /// A file's type and permissions as `ls -l` prints them: `drwxr-xr-x`.
@@ -360,13 +370,13 @@ pub fn mode(mode: u32) -> String {
 
 /// The line under an entry's name in the file list, laid out as the stock
 /// file manager lays it out, with dates told against `now`, when the folder
-/// was read.
-pub fn file_line(f: &FileRow, now: i64) -> String {
+/// was read, in the zone at `zone` in [`TIME_ZONES`].
+pub fn file_line(f: &FileRow, now: i64, zone: usize) -> String {
     const DIVIDER: &str = "  |  ";
     match &f.kind {
-        FileKind::Folder { items: Some(n) } => format!("{}{DIVIDER}{n} 项", file_time(f.modified, true, now)),
+        FileKind::Folder { items: Some(n) } => format!("{}{DIVIDER}{n} 项", file_time(f.modified, true, now, zone)),
         FileKind::Folder { items: None } => "无法读取".to_string(),
-        FileKind::File => format!("{}{DIVIDER}{}", file_time(f.modified, false, now), file_size(f.size)),
+        FileKind::File => format!("{}{DIVIDER}{}", file_time(f.modified, false, now, zone), file_size(f.size)),
         FileKind::Link { target, .. } => format!("链接到 {target}"),
         FileKind::Special => {
             let what = match f.mode & 0o170_000 {
@@ -375,7 +385,7 @@ pub fn file_line(f: &FileRow, now: i64) -> String {
                 0o010_000 => "管道",
                 _ => "套接字",
             };
-            format!("{}{DIVIDER}{what}", file_time(f.modified, false, now))
+            format!("{}{DIVIDER}{what}", file_time(f.modified, false, now, zone))
         }
     }
 }
@@ -446,8 +456,8 @@ fn give(source: Source) -> &'static str {
 }
 
 /// Why a package from `source` was not installed, for a phone with this
-/// codename.
-pub fn refusal(r: &Refusal, codename: &str, source: Source) -> String {
+/// codename, its dates in the zone at `zone` in [`TIME_ZONES`].
+pub fn refusal(r: &Refusal, codename: &str, source: Source, zone: usize) -> String {
     let give = give(source);
     match r {
         Refusal::Unknown => format!("无法识别该文件，请{give} A/B 完整更新包或分区镜像。"),
@@ -458,7 +468,7 @@ pub fn refusal(r: &Refusal, codename: &str, source: Source) -> String {
         Refusal::OtherSerial => "该更新包仅适用于指定序列号的设备，不包括本机。".into(),
         Refusal::Incremental => format!("无法安装增量更新包，请{give}完整更新包。"),
         Refusal::Older { package, installed } => {
-            format!("该更新包的构建日期为 {}，早于当前系统的 {}。", date(*package), date(*installed))
+            format!("该更新包的构建日期为 {}，早于当前系统的 {}。", date(*package, zone), date(*installed, zone))
         }
         Refusal::OlderPatch { package, installed } => {
             format!("该更新包的安全补丁为 {package}，早于当前系统的 {installed}。")
@@ -577,11 +587,11 @@ mod tests {
         assert_eq!(bytes(131_072), "131KB");
         assert_eq!(bytes(64), "64B");
         // The Xiaomi 13 Ultra's installed system, by its ro.build.date.utc.
-        assert_eq!(date(1_778_243_655), "2026年5月8日");
-        assert_eq!(date(0), "1970年1月1日");
+        assert_eq!(date(1_778_243_655, 0), "2026年5月8日");
+        assert_eq!(date(0, 0), "1970年1月1日");
         // Midnight on a leap day in UTC is eight in the morning in China.
-        assert_eq!(date(1_709_164_800), "2024年2月29日");
-        assert_eq!(date(1_709_164_800 - 8 * 3600 - 1), "2024年2月28日");
+        assert_eq!(date(1_709_164_800, 0), "2024年2月29日");
+        assert_eq!(date(1_709_164_800 - 8 * 3600 - 1, 0), "2024年2月28日");
         assert_eq!(patch(&PatchLevel { year: 2026, month: 4, day: 1 }), "2026年4月1日");
         assert_eq!(slots(&[Slot::B]), "槽位 B");
         assert_eq!(slots(&[Slot::A, Slot::B]), "槽位 A 和 B");
@@ -596,10 +606,40 @@ mod tests {
     #[test]
     fn times_to_the_minute_in_china() {
         // 2026-10-18 18:31 UTC is 02:31 the next morning in Beijing.
-        assert_eq!(datetime(1_792_348_260), "2026年10月19日 02:31");
-        assert_eq!(clock(1_792_348_260), "02:31");
+        assert_eq!(datetime(1_792_348_260, 0), "2026年10月19日 02:31");
+        assert_eq!(clock(1_792_348_260, 0), "02:31");
         // Midnight in Beijing is 16:00 UTC the day before.
-        assert_eq!(clock(1_792_339_200), "00:00");
+        assert_eq!(clock(1_792_339_200, 0), "00:00");
+    }
+
+    /// Where a zone named in the tz database is in [`TIME_ZONES`].
+    fn zone(name: &str) -> usize {
+        TIME_ZONES.iter().position(|&(_, _, n)| n == name).expect("a zone listed")
+    }
+
+    #[test]
+    fn zones_keep_their_own_summer_time() {
+        // 2026-07-01 12:00 UTC, and 2026-01-15 12:00 UTC.
+        let (summer, winter) = (1_782_907_200, 1_768_478_400);
+        assert_eq!(clock(summer, zone("UTC")), "12:00");
+        assert_eq!(clock(summer, zone("Europe/London")), "13:00", "British Summer Time");
+        assert_eq!(clock(winter, zone("Europe/London")), "12:00");
+        assert_eq!(clock(summer, zone("Europe/Berlin")), "14:00");
+        assert_eq!(clock(winter, zone("Europe/Berlin")), "13:00");
+        assert_eq!(clock(summer, zone("America/New_York")), "08:00");
+        assert_eq!(clock(winter, zone("America/New_York")), "07:00");
+        assert_eq!(datetime(summer, zone("America/Los_Angeles")), "2026年7月1日 05:00");
+        assert_eq!(clock(summer, zone("Asia/Tokyo")), "21:00");
+        assert_eq!(clock(winter, zone("Asia/Shanghai")), "20:00", "China keeps no summer time");
+        // New York goes over to summer time at 2:00 on 2026-03-08.
+        let before = 1_772_953_200 - 60;
+        assert_eq!((clock(before, zone("America/New_York")), clock(before + 60, zone("America/New_York"))), ("01:59".into(), "03:00".into()));
+    }
+
+    #[test]
+    fn a_time_past_the_calendar_shows_as_its_end() {
+        assert_eq!(date(i64::MAX, 0), "9999年12月31日");
+        assert_eq!(date(i64::MIN, zone("UTC")), "-9999年1月2日");
     }
 
     #[test]
@@ -617,25 +657,28 @@ mod tests {
         // Changed at 2026-10-19 02:31 in Beijing; listed a week later.
         let row = |kind, size, mode| FileRow { name: "x".into(), kind, size, modified: 1_792_348_260, mode, uid: 0, gid: 0 };
         let later = 1_792_348_260 + 7 * 86_400;
-        assert_eq!(file_line(&row(FileKind::Folder { items: Some(6) }, 4096, 0o040_755), later), "2026/10/19  |  6 项");
-        assert_eq!(file_line(&row(FileKind::Folder { items: None }, 4096, 0o040_700), later), "无法读取");
-        assert_eq!(file_line(&row(FileKind::File, 26_950, 0o100_644), later), "10/19  |  26.95 KB");
+        assert_eq!(file_line(&row(FileKind::Folder { items: Some(6) }, 4096, 0o040_755), later, 0), "2026/10/19  |  6 项");
+        assert_eq!(file_line(&row(FileKind::Folder { items: None }, 4096, 0o040_700), later, 0), "无法读取");
+        assert_eq!(file_line(&row(FileKind::File, 26_950, 0o100_644), later, 0), "10/19  |  26.95 KB");
         let link = FileKind::Link { target: "/storage/self/primary".into(), folder: true };
-        assert_eq!(file_line(&row(link, 21, 0o120_777), later), "链接到 /storage/self/primary");
-        assert_eq!(file_line(&row(FileKind::Special, 0, 0o060_600), later), "10/19  |  块设备");
+        assert_eq!(file_line(&row(link, 21, 0o120_777), later, 0), "链接到 /storage/self/primary");
+        assert_eq!(file_line(&row(FileKind::Special, 0, 0o060_600), later, 0), "10/19  |  块设备");
     }
 
     #[test]
     fn list_dates_are_told_against_the_day_the_folder_was_read() {
         // 2026-10-19 02:31 in Beijing.
         let at = 1_792_348_260;
-        assert_eq!(file_time(at, false, at + 3600), "02:31", "today: the time");
-        assert_eq!(file_time(at, true, at + 3600), "02:31", "a folder today too");
-        assert_eq!(file_time(at, false, at + 86_400), "10/19", "this year: a file's month and day");
-        assert_eq!(file_time(at, true, at + 86_400), "2026/10/19", "this year: a folder's whole date");
-        assert_eq!(file_time(at, false, at + 90 * 86_400), "2026/10/19", "another year: the whole date");
+        assert_eq!(file_time(at, false, at + 3600, 0), "02:31", "today: the time");
+        assert_eq!(file_time(at, true, at + 3600, 0), "02:31", "a folder today too");
+        assert_eq!(file_time(at, false, at + 86_400, 0), "10/19", "this year: a file's month and day");
+        assert_eq!(file_time(at, true, at + 86_400, 0), "2026/10/19", "this year: a folder's whole date");
+        assert_eq!(file_time(at, false, at + 90 * 86_400, 0), "2026/10/19", "another year: the whole date");
         // 2026-10-18 23:59 UTC is already the 19th in Beijing.
-        assert_eq!(file_time(1_792_367_940, false, at), "07:59");
+        assert_eq!(file_time(1_792_367_940, false, at, 0), "07:59");
+        // In London the file changed on the evening of the 18th, the day
+        // before.
+        assert_eq!(file_time(1_792_348_260, false, 1_792_367_940, zone("Europe/London")), "10/18");
     }
 
     #[test]
@@ -675,14 +718,14 @@ mod tests {
     #[test]
     fn reasons_read_as_sentences() {
         let pc = Source::Computer;
-        assert_eq!(refusal(&Refusal::OtherDevice("nezha".into()), "ishtar", pc), "该更新包适用于 nezha，本机为 ishtar。");
+        assert_eq!(refusal(&Refusal::OtherDevice("nezha".into()), "ishtar", pc, 0), "该更新包适用于 nezha，本机为 ishtar。");
         assert_eq!(
-            refusal(&Refusal::Older { package: 1_770_000_000, installed: 1_778_243_655 }, "ishtar", pc),
+            refusal(&Refusal::Older { package: 1_770_000_000, installed: 1_778_243_655 }, "ishtar", pc, 0),
             "该更新包的构建日期为 2026年2月2日，早于当前系统的 2026年5月8日。"
         );
-        assert_eq!(refusal(&Refusal::Battery { level: 12, charging: true }, "ishtar", pc), "电量仅剩 12%，请充电至 15% 以上后重试。");
+        assert_eq!(refusal(&Refusal::Battery { level: 12, charging: true }, "ishtar", pc, 0), "电量仅剩 12%，请充电至 15% 以上后重试。");
         assert_eq!(
-            refusal(&Refusal::Pending(SnapshotState::Snapshotted), "ishtar", pc),
+            refusal(&Refusal::Pending(SnapshotState::Snapshotted), "ishtar", pc, 0),
             "更新已写入，等待合并。请重启到系统，完成上一次更新后重试。"
         );
         assert_eq!(failure(&Failure::Engine(26), pc), ("更新包签名验证失败，请发送官方更新包。".into(), Some("错误代码：26".into())));
@@ -692,8 +735,8 @@ mod tests {
     #[test]
     fn a_file_chosen_is_answered_with_choosing_another() {
         let file = Source::File(Place::Storage);
-        assert_eq!(refusal(&Refusal::Unknown, "ishtar", file), "无法识别该文件，请选择 A/B 完整更新包或分区镜像。");
-        assert_eq!(refusal(&Refusal::Incremental, "ishtar", file), "无法安装增量更新包，请选择完整更新包。");
+        assert_eq!(refusal(&Refusal::Unknown, "ishtar", file, 0), "无法识别该文件，请选择 A/B 完整更新包或分区镜像。");
+        assert_eq!(refusal(&Refusal::Incremental, "ishtar", file, 0), "无法安装增量更新包，请选择完整更新包。");
         assert_eq!(failure(&Failure::Engine(26), file).0, "更新包签名验证失败，请选择官方更新包。");
         assert_eq!(failure(&Failure::Changed, file).0, "文件在读取过程中被修改，请重新选择。");
         let gone = "read /sdcard/Download/ota.zip: Input/output error (os error 5)";

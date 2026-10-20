@@ -1,7 +1,7 @@
 use crate::app::{
     Action, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Folder, Frame, HeroArt, Hit,
     Install, JobEnd, Keys, Pick, Place, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, BACKUP_PARTS,
-    BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, WIPES,
+    BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -215,7 +215,7 @@ pub fn settings(cx: &Ctx) -> Frame {
     y = widgets::section(&mut c, t, f, slider.bottom, "通用");
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new("语言").icon(BLUE, Icon::Globe).trail(Trail::Value("简体中文")),
-        Row::new("时区").icon(ORANGE, Icon::Clock).trail(Trail::Value("中国标准时间")),
+        Row::new("时区").icon(ORANGE, Icon::Clock).trail(Trail::Value(TIME_ZONES[s.time_zone].0)),
         Row::new("触摸振动").icon(PURPLE, Icon::Vibrate).trail(Trail::Switch(s.vibrate)),
     ]);
     out.extend(hits(&general.rows, &[
@@ -865,7 +865,7 @@ fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Optio
             next.bottom
         }
         Outcome::Refused(r) => {
-            let reason = fmt::refusal(r, &cx.info.codename, source);
+            let reason = fmt::refusal(r, &cx.info.codename, source, cx.state.time_zone);
             let y = widgets::list(c, t, f, top, &[standing("无法安装", ORANGE, Icon::Install, &reason)]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[again]);
             out.extend(hits(&next.rows, &[another]));
@@ -1059,7 +1059,7 @@ pub fn restore(cx: &Ctx) -> Frame {
     let bottom = if s.backups.is_empty() {
         widgets::list(&mut c, t, f, y, &[Row::new("暂无备份").trail(Trail::None)]).bottom
     } else {
-        let titles: Vec<String> = s.backups.iter().map(|b| fmt::datetime(b.made)).collect();
+        let titles: Vec<String> = s.backups.iter().map(|b| fmt::datetime(b.made, s.time_zone)).collect();
         let subs: Vec<String> =
             s.backups.iter().map(|b| format!("{} · {} · {}", fmt::parts(&b.parts), fmt::bytes(b.size), BACKUP_PLACES[b.place])).collect();
         let rows: Vec<Row> = titles.iter().zip(&subs).map(|(title, sub)| Row::new(title).subtitle(sub)).collect();
@@ -1081,7 +1081,7 @@ pub fn restore_backup(cx: &Ctx) -> Frame {
     let mut out = Vec::new();
     let top = t.m.content_top;
     let y = widgets::info_card(&mut c, t, f, top, &[
-        ("备份时间", fmt::datetime(b.made)),
+        ("备份时间", fmt::datetime(b.made, s.time_zone)),
         ("大小", fmt::bytes(b.size)),
         ("位置", BACKUP_PLACES[b.place].to_string()),
     ]);
@@ -1190,7 +1190,7 @@ pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
         Screen::Files | Screen::Choose(_) => {
             let folder = cx.state.folder(screen);
             let entries = folder.entries.as_ref().expect("a folder listed draws its rows");
-            files::row(c, cx.t, cx.f, &entries[i], folder.listed);
+            files::row(c, cx.t, cx.f, &entries[i], folder.listed, cx.state.time_zone);
         }
         other => unreachable!("{other:?} draws no list row by row"),
     }
@@ -1211,7 +1211,7 @@ pub fn file_info(cx: &Ctx) -> Frame {
         FileKind::Folder { items: None } => facts.push(("内容", "无法读取".to_string())),
         FileKind::File | FileKind::Special => facts.push(("大小", format!("{}（{} 字节）", fmt::file_size(e.size), e.size))),
     }
-    facts.push(("修改时间", fmt::datetime(e.modified)));
+    facts.push(("修改时间", fmt::datetime(e.modified, s.time_zone)));
     facts.push(("权限", format!("{}，所有者 {}，用户组 {}", fmt::mode(e.mode), e.uid, e.gid)));
     let y = widgets::info_card(&mut c, t, f, top, &facts);
     let actions = widgets::list(&mut c, t, f, y + t.m.card_gap, &[
@@ -1360,29 +1360,17 @@ pub fn language(cx: &Ctx) -> Frame {
     Frame::new(t, c, out, "语言", top)
 }
 
-/// Time zones the status bar's clock can keep, with the cities they cover.
-const TIME_ZONES: [(&str, &str); 9] = [
-    ("中国标准时间", "北京、上海"),
-    ("香港时间", "香港"),
-    ("台北时间", "台北"),
-    ("日本标准时间", "东京"),
-    ("协调世界时", "UTC"),
-    ("英国时间", "伦敦"),
-    ("中欧时间", "柏林、巴黎"),
-    ("美国东部时间", "纽约"),
-    ("美国太平洋时间", "洛杉矶"),
-];
-
-/// The time zone of the status bar's clock.
+/// The time zone the status bar's clock and the times on the pages keep.
 pub fn time_zone(cx: &Ctx) -> Frame {
-    let (t, f) = (cx.t, cx.f);
+    let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = long_page(t);
     let top = t.m.content_top;
-    let rows: Vec<Row> = TIME_ZONES.iter().enumerate().map(|(k, &(name, cities))| Row::new(name).subtitle(cities).trail(Trail::Check(k == 0))).collect();
+    let rows: Vec<Row> =
+        TIME_ZONES.iter().enumerate().map(|(k, &(name, cities, _))| Row::new(name).subtitle(cities).trail(Trail::Check(k == s.time_zone))).collect();
     let list = widgets::list(&mut c, t, f, top, &rows);
-    let others = vec![Action::Unavailable("暂不支持修改时区"); TIME_ZONES.len() - 1];
-    let out = hits(&list.rows[1..], &others);
-    let bottom = widgets::footnote(&mut c, t, f, list.bottom, "状态栏按所选时区显示时间。");
+    let picks: Vec<Action> = (0..TIME_ZONES.len()).map(Action::TimeZone).collect();
+    let out = hits(&list.rows, &picks);
+    let bottom = widgets::footnote(&mut c, t, f, list.bottom, "状态栏和各页面中的时间按所选时区显示。");
     Frame::new(t, fit(c, t, bottom), out, "时区", top)
 }
 

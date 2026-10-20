@@ -383,11 +383,9 @@ fn answer(request: Request, fastboot: bool) -> Vec<Effect> {
     }
 }
 
-/// The time of day in China for the status bar: the recovery carries no
-/// time zone files, and China's is the time zone the settings offer.
-fn clock() -> Result<String> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?;
-    Ok(skyward_ui::fmt::clock(now.as_secs() as i64))
+/// The time of day for the status bar, in the zone the settings chose.
+fn clock(zone: usize) -> Result<String> {
+    Ok(skyward_ui::fmt::clock(unix_now()?, zone))
 }
 
 /// Tell the kernel log how the data partition was mounted, where opening
@@ -659,7 +657,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 other => unreachable!("time passing asks for nothing but a tap of the motor, not {other:?}"),
             }
         }
-        let time = clock()?;
+        let time = clock(app.state.time_zone)?;
         if time != shown_clock {
             shown_clock = time;
             app.redraw();

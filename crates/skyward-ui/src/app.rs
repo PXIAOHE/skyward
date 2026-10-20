@@ -608,6 +608,21 @@ pub struct Fastboot {
 /// the order the page lists them; `None` keeps it on.
 pub const SCREEN_OFF: [Option<u64>; 7] = [Some(15_000), Some(30_000), Some(60_000), Some(120_000), Some(300_000), Some(600_000), None];
 
+/// The time zones the clock and the times on the pages can keep, in the
+/// order their page lists them: the name, the cities it covers, and the
+/// zone's name in the tz database.
+pub const TIME_ZONES: [(&str, &str, &str); 9] = [
+    ("中国标准时间", "北京、上海", "Asia/Shanghai"),
+    ("香港时间", "香港", "Asia/Hong_Kong"),
+    ("台北时间", "台北", "Asia/Taipei"),
+    ("日本标准时间", "东京", "Asia/Tokyo"),
+    ("协调世界时", "UTC", "UTC"),
+    ("英国时间", "伦敦", "Europe/London"),
+    ("中欧时间", "柏林、巴黎", "Europe/Berlin"),
+    ("美国东部时间", "纽约", "America/New_York"),
+    ("美国太平洋时间", "洛杉矶", "America/Los_Angeles"),
+];
+
 /// What a control does when touched.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -648,6 +663,8 @@ pub enum Action {
     Dismiss,
     /// Keep the screen on for this choice in [`SCREEN_OFF`].
     ScreenOff(usize),
+    /// Keep the time zone at this place in [`TIME_ZONES`].
+    TimeZone(usize),
     /// Tick or untick a part of the backup, by its place in
     /// [`BACKUP_PARTS`].
     BackupPart(usize),
@@ -849,6 +866,9 @@ pub struct State {
     /// How long the screen stays on with nothing touched, by its place in
     /// [`SCREEN_OFF`].
     pub screen_off: usize,
+    /// The time zone the clock and the times on the pages keep, by its
+    /// place in [`TIME_ZONES`].
+    pub time_zone: usize,
     pub vibrate: bool,
     pub reboot: usize,
     /// What the wipe page has chosen, by place in [`WIPES`].
@@ -931,6 +951,7 @@ impl Default for State {
             brightness: 0.5,
             // Two minutes.
             screen_off: 3,
+            time_zone: 0,
             vibrate: true,
             reboot: 0,
             wipe: [false; WIPES.len()],
@@ -2414,6 +2435,10 @@ impl App {
             }
             Action::ScreenOff(k) => {
                 self.state.screen_off = k;
+                self.refresh();
+            }
+            Action::TimeZone(k) => {
+                self.state.time_zone = k;
                 self.refresh();
             }
             Action::BackupPart(k) => {
@@ -4004,6 +4029,19 @@ mod tests {
         let mut app = App::new(Screen::Reboot, W, H, PPD);
         tap(&mut app, &f, &i, Action::Open(Screen::Slot));
         assert_eq!(app.screen(), Screen::Slot);
+    }
+
+    #[test]
+    fn a_time_zone_chosen_is_the_one_kept() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::TimeZone));
+        assert_eq!(app.state.time_zone, 0, "China until another is chosen");
+        let london = TIME_ZONES.iter().position(|&(_, _, name)| name == "Europe/London").expect("London is listed");
+        tap(&mut app, &f, &i, Action::TimeZone(london));
+        assert_eq!(app.state.time_zone, london);
+        tap(&mut app, &f, &i, Action::TimeZone(0));
+        assert_eq!(app.state.time_zone, 0, "and China again");
     }
 
     #[test]

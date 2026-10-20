@@ -214,7 +214,7 @@ fn main() -> Result<()> {
         app.state.install = install;
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 66] = [
+    let pages: [PageShot; 67] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -295,6 +295,7 @@ fn main() -> Result<()> {
         }),
         ("55-language-light", Screen::Language, false, &|_| {}),
         ("56-time-zone-light", Screen::TimeZone, false, &|_| {}),
+        ("56-time-zone-dark-london", Screen::TimeZone, true, &|app| app.state.time_zone = 5),
         ("57-logs-light", Screen::Logs, false, &|_| {}),
         ("58-license-light", Screen::License, false, &|_| {}),
         ("59-font-license-light", Screen::FontLicense, false, &|_| {}),

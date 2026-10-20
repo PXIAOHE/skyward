@@ -162,9 +162,10 @@ pub fn rows(t: &Theme, f: &Fonts, entries: &[FileRow], action: fn(usize) -> Acti
 }
 
 /// Entry `e`'s row over the whole of `c`, sized for it: its icon, its name
-/// on up to two lines, the line under it with dates told against `now`,
-/// and a chevron for what opens as a folder.
-pub fn row(c: &mut Canvas, t: &Theme, f: &Fonts, e: &FileRow, now: i64) {
+/// on up to two lines, the line under it with dates told against `now` in
+/// the zone at `zone` in [`crate::app::TIME_ZONES`], and a chevron for what
+/// opens as a folder.
+pub fn row(c: &mut Canvas, t: &Theme, f: &Fonts, e: &FileRow, now: i64, zone: usize) {
     let m = &t.m;
     let p = palette(t);
     c.clear(p.page);
@@ -183,7 +184,7 @@ pub fn row(c: &mut Canvas, t: &Theme, f: &Fonts, e: &FileRow, now: i64) {
         c.text_top(&f.heading, line, x, m.dp(NAME_TOP_DP + NAME_LINE_DP * k as f32), m.dp(NAME_DP), p.name, None);
     }
     let base = m.dp(LINE_BASE_DP + NAME_LINE_DP * (lines.len() - 1) as f32);
-    c.text(&f.value, &fmt::file_line(e, now), x, base, m.dp(LINE_DP), p.line, Some(w));
+    c.text(&f.value, &fmt::file_line(e, now, zone), x, base, m.dp(LINE_DP), p.line, Some(w));
     if folder {
         chevron(c, t, cy, p.chevron);
     }
