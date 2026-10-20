@@ -1,4 +1,4 @@
-use crate::app::{Data, EraseStop, FileKind, FileRow, MountFailure, Part, Place, Source, BACKUP_PARTS, TIME_ZONES};
+use crate::app::{BackupRefusal, Data, EraseStop, FileKind, FileRow, MountFailure, Part, Place, Source, BACKUP_PARTS, TIME_ZONES};
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use jiff::Timestamp;
@@ -189,6 +189,36 @@ pub fn snapshot_slot_note(s: &SnapshotState) -> Option<&'static str> {
         SnapshotState::Snapshotted | SnapshotState::Merging => Some("更新合并完成前，暂不切换启动槽位。"),
         SnapshotState::MergeFailed => Some("在系统中处理完成前，暂不切换启动槽位。"),
         SnapshotState::Unknown => Some("读取到更新状态前，暂不切换启动槽位。"),
+    }
+}
+
+/// Why the slot's partitions in super are not backed up while an update is
+/// in flight; `None` when none is.
+pub fn snapshot_backup_note(s: &SnapshotState) -> Option<&'static str> {
+    match s {
+        SnapshotState::None => None,
+        SnapshotState::Snapshotted | SnapshotState::Merging => Some("更新合并完成前，暂不备份系统分区"),
+        SnapshotState::MergeFailed => Some("在系统中处理完成前，暂不备份系统分区"),
+        SnapshotState::Unknown => Some("读取到更新状态前，暂不备份系统分区"),
+    }
+}
+
+/// Why backing up, or restoring, did not start.
+pub fn backup_refusal(r: &BackupRefusal, restore: bool) -> String {
+    match r {
+        BackupRefusal::Room { needed, free } => format!("存储空间不足。备份需要 {}，可用空间为 {}。", gb(*needed), gb(*free)),
+        BackupRefusal::Update(state) => {
+            let what = if restore { "恢复启动分区和系统分区" } else { "备份系统分区" };
+            match state {
+                SnapshotState::Snapshotted | SnapshotState::Merging => format!("更新合并完成前，暂不{what}。请先启动系统，等待更新完成。"),
+                SnapshotState::MergeFailed => format!("更新合并失败。在系统中处理完成前，暂不{what}。"),
+                SnapshotState::Unknown => format!("无法读取更新状态，暂不{what}。"),
+                SnapshotState::None => unreachable!("no update in flight holds anything back"),
+            }
+        }
+        BackupRefusal::OtherPhone(device) => format!("该备份来自其他设备（{device}），无法恢复到本机。"),
+        BackupRefusal::Resized(name) => format!("{name} 的大小与备份时不同，系统可能已更新。该备份中的系统分区无法恢复到当前系统。"),
+        BackupRefusal::DataReset => "备份后 data 分区已重新创建，例如恢复过出厂设置，该备份中的 data 分区无法恢复。".into(),
     }
 }
 

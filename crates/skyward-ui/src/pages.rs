@@ -1,7 +1,7 @@
 use crate::app::{
-    Action, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Folder, Frame, HeroArt, Hit,
-    Install, JobEnd, Keys, Pick, Place, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, BACKUP_PARTS,
-    BACKUP_PLACES, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
+    Action, BackupAt, BackupEnd, BackupJob, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Folder,
+    Frame, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe,
+    BACKUP_PARTS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -57,6 +57,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Backup => backup(cx),
         Screen::Restore => restore(cx),
         Screen::RestoreBackup => restore_backup(cx),
+        Screen::BackupJob => backup_job(cx),
         Screen::Advanced => advanced(cx),
         Screen::Files => files(cx),
         Screen::FileInfo => file_info(cx),
@@ -87,7 +88,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Restore => ("滑动以恢复", true),
         Confirm::Slot => ("滑动以切换", true),
         Confirm::FactoryReset => ("滑动以恢复出厂设置", true),
-        Confirm::DeleteEntry => ("滑动以删除", true),
+        Confirm::DeleteEntry | Confirm::DeleteBackup => ("滑动以删除", true),
         Confirm::Install => ("滑动以安装", false),
         Confirm::InstallWipe => ("滑动以安装并清除", true),
     }
@@ -1020,24 +1021,35 @@ pub fn backup(cx: &Ctx) -> Frame {
     let mut c = long_page(t);
     let mut out = Vec::new();
     let top = t.m.content_top;
-    let decrypted = cx.state.data == Data::Open;
     let y = widgets::section_first(&mut c, t, f, top, "备份内容");
-    let data = if decrypted { "应用、账户和设置，不包括内部存储" } else { "应用、账户和设置，不包括内部存储，需先完成「解密」" };
-    let subs = ["boot、init_boot、vendor_boot、dtbo、vbmeta 和 recovery", "当前槽位在 super 中的分区", data, "IMEI、基带设置和传感器校准数据"];
+    let system = fmt::snapshot_backup_note(&i.snapshot).unwrap_or("当前槽位在 super 中的分区");
+    let data = if s.data == Data::Open {
+        "应用、账户和设置，不包括内部存储、锁屏密码和指纹"
+    } else {
+        "应用、账户和设置，不包括内部存储、锁屏密码和指纹，需先完成「解密」"
+    };
+    let subs = ["boot、init_boot、vendor_boot、dtbo、vbmeta 和 recovery", system, data, "IMEI、基带设置和传感器校准数据"];
     let rows: Vec<Row> =
         BACKUP_PARTS.iter().zip(subs).enumerate().map(|(k, (name, sub))| Row::new(name).subtitle(sub).trail(Trail::Check(s.backup[k]))).collect();
     let parts = widgets::list(&mut c, t, f, y, &rows);
     out.extend(hits(&parts.rows, &[0, 1, 2, 3].map(Action::BackupPart)));
     let y = widgets::section(&mut c, t, f, parts.bottom, "存放位置");
-    let storage = match (decrypted, i.storage.free) {
+    let storage = match (s.data.storage_open(), i.storage.free) {
         (true, Some(free)) => format!("剩余 {}", fmt::gb(free)),
-        _ => "需先完成「解密」".to_string(),
+        (true, None) => "无法读取剩余空间".to_string(),
+        (false, _) if s.data == Data::Erased => "data 分区已清除".to_string(),
+        (false, _) => "需先完成「解密」".to_string(),
+    };
+    let usb = match &s.usb_drive {
+        Some(UsbDrive::Shown) => "已连接",
+        Some(UsbDrive::Unreadable(_)) => "无法读取该 U 盘",
+        None => "请通过 OTG 连接 U 盘",
     };
     let places = widgets::list(&mut c, t, f, y, &[
-        Row::new(BACKUP_PLACES[0]).subtitle(&storage).trail(Trail::Check(s.backup_to == 0)),
-        Row::new(BACKUP_PLACES[1]).subtitle("通过 OTG 连接的 U 盘").trail(Trail::Check(s.backup_to == 1)),
+        Row::new(place_name(Place::Storage)).subtitle(&storage).trail(Trail::Check(s.backup_to == Place::Storage)),
+        Row::new(place_name(Place::UsbDrive)).subtitle(usb).trail(Trail::Check(s.backup_to == Place::UsbDrive)),
     ]);
-    out.extend(hits(&places.rows, &[Action::BackupTo(0), Action::BackupTo(1)]));
+    out.extend(hits(&places.rows, &[Action::BackupTo(Place::Storage), Action::BackupTo(Place::UsbDrive)]));
     let y = widgets::section(&mut c, t, f, places.bottom, "选项");
     let options = widgets::list(&mut c, t, f, y, &[
         Row::new("压缩").subtitle("备份更小，耗时更长").trail(Trail::Switch(s.compress)),
@@ -1051,7 +1063,8 @@ pub fn backup(cx: &Ctx) -> Frame {
     Frame::new(t, fit(c, t, track.y + track.h), out, "备份", top)
 }
 
-/// The backups found, newest first, to restore one.
+/// The backups found, newest first, to restore one; those that cannot be
+/// read are listed after them, to be deleted.
 pub fn restore(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = long_page(t);
@@ -1061,44 +1074,246 @@ pub fn restore(cx: &Ctx) -> Frame {
     let bottom = if s.backups.is_empty() {
         widgets::list(&mut c, t, f, y, &[Row::new("暂无备份").trail(Trail::None)]).bottom
     } else {
-        let titles: Vec<String> = s.backups.iter().map(|b| fmt::datetime(b.made, s.time_zone)).collect();
-        let subs: Vec<String> =
-            s.backups.iter().map(|b| format!("{} · {} · {}", fmt::parts(&b.parts), fmt::bytes(b.size), BACKUP_PLACES[b.place])).collect();
-        let rows: Vec<Row> = titles.iter().zip(&subs).map(|(title, sub)| Row::new(title).subtitle(sub)).collect();
+        let texts: Vec<(String, String)> = s
+            .backups
+            .iter()
+            .map(|b| match &b.held {
+                Ok(h) => (fmt::datetime(h.made, s.time_zone), format!("{} · {} · {}", fmt::parts(&h.parts), fmt::bytes(h.size), place_name(b.place))),
+                Err(_) => (b.name.clone(), format!("无法读取 · {}", place_name(b.place))),
+            })
+            .collect();
+        let rows: Vec<Row> = texts.iter().map(|(title, sub)| Row::new(title).subtitle(sub)).collect();
         let list = widgets::list(&mut c, t, f, y, &rows);
         out.extend(list.rows.iter().enumerate().map(|(k, &rect)| Hit { rect, action: Action::OpenBackup(k) }));
         list.bottom
     };
-    let bottom = widgets::footnote(&mut c, t, f, bottom, "将在内部存储的 Skyward/backups 文件夹和 U 盘中查找备份，查找内部存储需先完成「解密」。");
+    let bottom = widgets::footnote(&mut c, t, f, bottom, "将在内部存储和 U 盘中的 Skyward/backups 文件夹查找备份，查找内部存储需先完成「解密」。");
     Frame::new(t, fit(c, t, bottom), out, "恢复", top)
 }
 
 /// One backup: when and where it was made, and which of its parts to
-/// restore.
+/// restore. One made on another phone is not restored here, and one that
+/// cannot be read can only be deleted.
 pub fn restore_backup(cx: &Ctx) -> Frame {
-    let (t, f, s) = (cx.t, cx.f, cx.state);
-    let (i, chosen) = s.restore.expect("the restore page shows a backup");
-    let b = &s.backups[i];
+    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
+    let (entry, chosen) = s.restore.as_ref().expect("the restore page shows a backup");
     let mut c = long_page(t);
     let mut out = Vec::new();
     let top = t.m.content_top;
-    let y = widgets::info_card(&mut c, t, f, top, &[
-        ("备份时间", fmt::datetime(b.made, s.time_zone)),
-        ("大小", fmt::bytes(b.size)),
-        ("位置", BACKUP_PLACES[b.place].to_string()),
-    ]);
-    let y = widgets::section(&mut c, t, f, y, "恢复内容");
-    let held: Vec<usize> = (0..BACKUP_PARTS.len()).filter(|&k| b.parts[k]).collect();
-    let rows: Vec<Row> = held.iter().map(|&k| Row::new(BACKUP_PARTS[k]).trail(Trail::Check(chosen[k]))).collect();
-    let list = widgets::list(&mut c, t, f, y, &rows);
-    out.extend(list.rows.iter().zip(&held).map(|(&rect, &k)| Hit { rect, action: Action::RestorePart(k) }));
-    let y = widgets::footnote(&mut c, t, f, list.bottom, "恢复后，对应分区中的现有内容将被备份覆盖。");
-    let (label, danger) = confirm_label(Confirm::Restore);
-    let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
-    out.push(Hit { rect: track, action: Action::Confirm(Confirm::Restore) });
-    let delete = widgets::list(&mut c, t, f, track.y + track.h + t.m.dp(28.0), &[Row::new("删除备份").tint(t.pal.danger).trail(Trail::None)]);
-    out.extend(hits(&delete.rows, &[Action::Unavailable("暂不支持删除备份")]));
-    Frame::new(t, fit(c, t, delete.bottom), out, "恢复备份", top)
+    let y = match &entry.held {
+        Err(why) => {
+            let y = widgets::info_card(&mut c, t, f, top, &[("文件夹", entry.name.clone()), ("位置", place_name(entry.place).to_string())]);
+            widgets::footnote(&mut c, t, f, y, &format!("无法读取该备份，备份可能未完成或已损坏。{why}"))
+        }
+        Ok(held) => {
+            let mut facts = vec![
+                ("备份时间", fmt::datetime(held.made, s.time_zone)),
+                ("大小", fmt::bytes(held.size)),
+                ("位置", place_name(entry.place).to_string()),
+            ];
+            if let Some(system) = &held.system {
+                facts.push(("系统版本", system.clone()));
+            }
+            if let Some(slot) = held.slot {
+                facts.push(("槽位", slot.letter().to_string()));
+            }
+            let y = widgets::info_card(&mut c, t, f, top, &facts);
+            if held.device != i.codename {
+                widgets::footnote(&mut c, t, f, y, &format!("该备份来自其他设备（{}），无法恢复到本机。", held.device))
+            } else {
+                let y = widgets::section(&mut c, t, f, y, "恢复内容");
+                let kept: Vec<usize> = (0..BACKUP_PARTS.len()).filter(|&k| held.parts[k]).collect();
+                let rows: Vec<Row> = kept.iter().map(|&k| Row::new(BACKUP_PARTS[k]).trail(Trail::Check(chosen[k]))).collect();
+                let list = widgets::list(&mut c, t, f, y, &rows);
+                out.extend(list.rows.iter().zip(&kept).map(|(&rect, &k)| Hit { rect, action: Action::RestorePart(k) }));
+                let mut y = widgets::footnote(&mut c, t, f, list.bottom, "恢复后，所选内容的现有数据将被备份覆盖。");
+                if chosen[2] {
+                    y = widgets::footnote(
+                        &mut c,
+                        t,
+                        f,
+                        y,
+                        "data 分区将恢复应用、账户和设置，内部存储、锁屏密码和指纹保持不变。恢复出厂设置后，无法再恢复此前的 data 分区备份。",
+                    );
+                }
+                // The boot partitions' vbmeta checks the system's: one of
+                // another version without the other may not start.
+                if let (Some(was), Some(now)) = (&held.system, &i.os_version) {
+                    if was != now && chosen[0] != chosen[1] {
+                        let warn = format!("该备份来自 {was}，本机当前为 {now}。仅恢复启动分区或系统分区中的一项，可能导致无法开机。");
+                        y = widgets::footnote(&mut c, t, f, y, &warn);
+                    }
+                }
+                let (label, danger) = confirm_label(Confirm::Restore);
+                let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+                out.push(Hit { rect: track, action: Action::Confirm(Confirm::Restore) });
+                track.y + track.h
+            }
+        }
+    };
+    let delete = widgets::list(&mut c, t, f, y + t.m.dp(28.0), &[Row::new("删除备份").tint(t.pal.danger).trail(Trail::None)]);
+    out.extend(hits(&delete.rows, &[Action::AskDelete]));
+    let mut bottom = delete.bottom;
+    if s.asking_delete {
+        let y = widgets::footnote(&mut c, t, f, delete.bottom, "删除该备份？删除后无法恢复。");
+        let (label, danger) = confirm_label(Confirm::DeleteBackup);
+        let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+        out.push(Hit { rect: track, action: Action::Confirm(Confirm::DeleteBackup) });
+        bottom = track.y + track.h;
+    }
+    Frame::new(t, fit(c, t, bottom), out, "恢复备份", top)
+}
+
+/// The share of its pass the part under way has done.
+fn part_share(a: &BackupAt) -> f32 {
+    if a.of == 0 {
+        1.0
+    } else {
+        share(a.done, a.of).min(1.0)
+    }
+}
+
+/// How far backing up or restoring has come over all, 0 to 1, and the
+/// bytes of the parts the pass under way has gone through, the part under
+/// way by its share. Each part counts by its bytes in each pass: a restore
+/// checks all its parts first, and a backup checks them last.
+fn job_progress(job: &BackupJob, a: &BackupAt) -> (f32, u64) {
+    let total: u64 = job.plan.iter().map(|(_, n)| n).sum();
+    let before: u64 = job.plan[..a.item].iter().map(|(_, n)| n).sum();
+    let passed = before as f64 + f64::from(part_share(a)) * job.plan[a.item].1 as f64;
+    let second = job.checks && a.checking != job.restore;
+    let passes = if job.checks { 2.0 } else { 1.0 };
+    let over = (if second { total as f64 } else { 0.0 } + passed) / (passes * total.max(1) as f64);
+    (over as f32, passed as u64)
+}
+
+/// Where part `k` of a backup or restore stands, as its row says it.
+fn part_state(job: &BackupJob, k: usize) -> String {
+    use std::cmp::Ordering;
+    let (did, doing) = if job.restore { ("已恢复", "正在恢复") } else { ("已备份", "正在备份") };
+    let ended = job.outcome.is_some();
+    let a = match (&job.outcome, job.at) {
+        (Some(BackupEnd::Saved(_)), _) => return if job.checks { "已校验" } else { did }.to_string(),
+        (Some(BackupEnd::Restored { .. }), _) => return did.to_string(),
+        (_, None) => return if ended { "未开始" } else { "等待中" }.to_string(),
+        (_, Some(a)) => a,
+    };
+    match k.cmp(&a.item) {
+        Ordering::Less if a.checking => "已校验".to_string(),
+        Ordering::Less => did.to_string(),
+        Ordering::Equal if ended => "未完成".to_string(),
+        Ordering::Equal => format!("{} {}%", if a.checking { "正在校验" } else { doing }, percent(part_share(&a))),
+        // Ahead of the pass under way: a backup checks its parts once all
+        // are written, and a restore writes them once all are checked.
+        Ordering::Greater => match (a.checking, job.restore, ended) {
+            (true, false, false) => did,
+            (true, false, true) => "未校验",
+            (false, false, false) | (true, true, false) => "等待中",
+            (false, false, true) => "未备份",
+            (false, true, false) => "已校验",
+            (_, true, true) => "未恢复",
+        }
+        .to_string(),
+    }
+}
+
+/// Backing up or restoring: how far it has come over all, each part and
+/// where it stands, and a way to stop while stopping breaks nothing. Once
+/// it has ended, how, and where to go.
+pub fn backup_job(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let job = s.backup_job.as_ref().expect("the backup page shows work");
+    let mut c = long_page(t);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let (did, doing, icon) = if job.restore { ("已恢复", "正在恢复", Icon::Restore) } else { ("已备份", "正在备份", Icon::Backup) };
+    let writing = job.at.is_some_and(|a| !a.checking);
+    let mut y = match &job.outcome {
+        None => {
+            let (title, detail, done) = match job.at {
+                Some(a) => {
+                    let (over, passed) = job_progress(job, &a);
+                    let total: u64 = job.plan.iter().map(|(_, n)| n).sum();
+                    let (verb, past) = if a.checking { ("正在校验", "已校验") } else { (doing, did) };
+                    (format!("{verb} {}", job.plan[a.item].0), format!("{past} {}，共 {}", fmt::bytes(passed), fmt::bytes(total)), over)
+                }
+                None if job.restore => ("正在读取备份".to_string(), "正在核对备份与本机".to_string(), 0.0),
+                None => ("正在准备".to_string(), "正在计算备份大小".to_string(), 0.0),
+            };
+            widgets::progress_card(&mut c, t, f, top, &title, &detail, Some(done))
+        }
+        Some(end) => {
+            let gone = if job.restore { "未写入任何内容。" } else { "未保存任何备份。" };
+            let (title, color, detail) = match end {
+                BackupEnd::Saved(name) => ("备份完成", GREEN, format!("已保存到{}的 Skyward/backups/{name}", place_name(job.place))),
+                BackupEnd::Restored { .. } => ("恢复完成", GREEN, "重启手机后，将使用恢复的内容。".to_string()),
+                BackupEnd::Stopped => ("已停止", SLATE, gone.to_string()),
+                BackupEnd::Refused(r) => (if job.restore { "无法恢复" } else { "无法备份" }, ORANGE, fmt::backup_refusal(r, job.restore)),
+                BackupEnd::Failed(_) if job.restore && writing => {
+                    ("恢复失败", RED, "部分内容已写入，重启后可能无法正常启动。请重新恢复，完成后再重启。".to_string())
+                }
+                BackupEnd::Failed(_) => (if job.restore { "恢复失败" } else { "备份失败" }, RED, gone.to_string()),
+            };
+            widgets::list(&mut c, t, f, top, &[standing(title, color, icon, &detail)]).bottom
+        }
+    };
+    if !job.plan.is_empty() {
+        let states: Vec<String> = (0..job.plan.len()).map(|k| part_state(job, k)).collect();
+        let rows: Vec<Row> = job.plan.iter().zip(&states).map(|((name, _), state)| Row::new(name).trail(Trail::Text(state))).collect();
+        y = widgets::list(&mut c, t, f, y + t.m.card_gap, &rows).bottom;
+    }
+    let keep = match job.place {
+        Place::Storage => "请不要关机。",
+        Place::UsbDrive => "请不要拔出 U 盘或关机。",
+    };
+    match &job.outcome {
+        None => {
+            let note = match (job.restore, job.at) {
+                (false, _) => format!("备份完成前，{keep}停止后将删除未完成的备份。"),
+                (true, Some(a)) if !a.checking => format!("恢复完成前，{keep}"),
+                (true, _) => "校验备份完成前，不会写入任何内容。".to_string(),
+            };
+            y = widgets::footnote(&mut c, t, f, y, &note);
+            // A restore that has begun writing goes on to its end.
+            if !(job.restore && writing) {
+                let label = if job.stopping { "正在停止" } else { "停止" };
+                let stop = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(label).trail(Trail::None)]);
+                if !job.stopping {
+                    out.extend(hits(&stop.rows, &[Action::StopBackup]));
+                }
+                y = stop.bottom;
+            }
+        }
+        Some(end) => {
+            match end {
+                BackupEnd::Restored { unmade } if !unmade.is_empty() => {
+                    let note = format!("以下文件夹所属的用户已不存在，其中的内容未恢复：{}", unmade.join("、"));
+                    y = widgets::footnote(&mut c, t, f, y, &note);
+                }
+                BackupEnd::Failed(why) => y = widgets::footnote(&mut c, t, f, y, why),
+                _ => {}
+            }
+            let (rows, acts): (Vec<Row>, Vec<Action>) = match end {
+                BackupEnd::Restored { .. } => (
+                    vec![Row::new("重启到系统").icon(ORANGE, Icon::Power), Row::new("完成").trail(Trail::None)],
+                    vec![Action::RebootTo(Target::System), Action::Back],
+                ),
+                _ => (vec![Row::new("完成").trail(Trail::None)], vec![Action::Back]),
+            };
+            let next = widgets::list(&mut c, t, f, y + t.m.card_gap, &rows);
+            out.extend(hits(&next.rows, &acts));
+            y = next.bottom;
+        }
+    }
+    let title = match (&job.outcome, job.restore) {
+        (None, false) => "正在备份",
+        (None, true) => "正在恢复",
+        (Some(BackupEnd::Saved(_)), _) => "备份完成",
+        (Some(BackupEnd::Restored { .. }), _) => "恢复完成",
+        (Some(_), false) => "备份未完成",
+        (Some(_), true) => "恢复未完成",
+    };
+    Frame { back: job.outcome.is_some(), ..Frame::new(t, fit(c, t, y), out, title, top) }
 }
 
 /// Tools for the experienced.
@@ -1679,4 +1894,55 @@ pub fn unhandled(cx: &Ctx) -> Frame {
     let y = widgets::section(&mut c, t, f, y, "操作");
     afterwards(&mut c, t, f, y, true, &mut out);
     Frame { back: false, ..Frame::new(t, c, out, "无法处理该请求", top) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::BackupRefusal;
+
+    fn job(restore: bool, checks: bool) -> BackupJob {
+        let plan = vec![("boot".into(), 200), ("system".into(), 800)];
+        BackupJob { restore, place: Place::Storage, checks, plan, at: None, outcome: None, stopping: false }
+    }
+
+    fn at(item: usize, done: u64, of: u64, checking: bool) -> BackupAt {
+        BackupAt { item, done, of, checking }
+    }
+
+    #[test]
+    fn a_backup_checks_its_parts_last_and_a_restore_first() {
+        // Halfway through writing system, 600 of the 1000 bytes: the first
+        // of two passes, then the second.
+        assert_eq!(job_progress(&job(false, true), &at(1, 400, 800, false)), (0.3, 600));
+        assert_eq!(job_progress(&job(false, true), &at(1, 400, 800, true)), (0.8, 600));
+        assert_eq!(job_progress(&job(false, false), &at(1, 400, 800, false)), (0.6, 600), "without a check, writing is all");
+        assert_eq!(job_progress(&job(true, true), &at(0, 100, 200, true)), (0.05, 100));
+        assert_eq!(job_progress(&job(true, true), &at(0, 100, 200, false)), (0.55, 100));
+    }
+
+    #[test]
+    fn each_part_says_where_it_stands() {
+        let states = |j: &BackupJob| (0..2).map(|k| part_state(j, k)).collect::<Vec<_>>();
+        let mut b = job(false, true);
+        assert_eq!(states(&b), ["等待中", "等待中"]);
+        b.at = Some(at(1, 400, 800, false));
+        assert_eq!(states(&b), ["已备份", "正在备份 50%"]);
+        b.at = Some(at(0, 50, 200, true));
+        assert_eq!(states(&b), ["正在校验 25%", "已备份"]);
+        b.outcome = Some(BackupEnd::Failed("the backup does not hold what was stored".into()));
+        assert_eq!(states(&b), ["未完成", "未校验"]);
+        b.outcome = Some(BackupEnd::Saved("20261021-141639".into()));
+        assert_eq!(states(&b), ["已校验", "已校验"]);
+        let mut r = job(true, true);
+        r.at = Some(at(1, 0, 800, true));
+        assert_eq!(states(&r), ["已校验", "正在校验 0%"]);
+        r.at = Some(at(0, 200, 400, false));
+        assert_eq!(states(&r), ["正在恢复 50%", "已校验"]);
+        r.outcome = Some(BackupEnd::Failed("write /dev/block/by-name/boot_b".into()));
+        assert_eq!(states(&r), ["未完成", "未恢复"]);
+        r.at = None;
+        r.outcome = Some(BackupEnd::Refused(BackupRefusal::DataReset));
+        assert_eq!(states(&r), ["未开始", "未开始"]);
+    }
 }

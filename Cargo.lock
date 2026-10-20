@@ -1207,6 +1207,7 @@ dependencies = [
  "evdev",
  "libc",
  "procfs",
+ "skyward-backup",
  "skyward-binder",
  "skyward-block",
  "skyward-config",

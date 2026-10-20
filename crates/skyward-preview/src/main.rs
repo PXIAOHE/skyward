@@ -3,11 +3,12 @@ use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
 use skyward_ui::app::{
-    Action, App, Asked, BackupEntry, Choice, Clip, Damage, Data, EraseStop, FileKind, FileOp, FileRow, FileTask, Install, JobEnd,
-    Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
+    Action, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, EraseStop, FileKind,
+    FileOp, FileRow, FileTask, Held, Install, JobEnd, Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch, UsbDrive,
+    UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
-use skyward_ui::{pages, Canvas, Ctx, Fonts, Theme};
+use skyward_ui::{fmt, pages, Canvas, Ctx, Fonts, Theme};
 use skyward_vab::{BootSlots, Hold, Slot, SnapshotState};
 use std::fs::File;
 use std::io::BufWriter;
@@ -198,10 +199,48 @@ fn main() -> Result<()> {
     }
 
     // The pages the remaining features open, each with what it would show.
+    let made = |place, made, size, parts, system: &str| {
+        let held = Held { made, size, parts, device: cfg.device.codename.clone(), system: Some(system.into()), slot: Some(Slot::B) };
+        BackupEntry { place, name: fmt::stamp(made, 0), held: Ok(held) }
+    };
     let backups = vec![
-        BackupEntry { made: 1_792_348_260, size: 6_214_000_000, place: 0, parts: [true, true, false, true] },
-        BackupEntry { made: 1_791_830_000, size: 141_000_000, place: 1, parts: [true, false, false, false] },
+        made(Place::Storage, 1_792_348_260, 6_214_000_000, [true, true, false, true], "OS4.0.4.0.XPACNXM"),
+        made(Place::UsbDrive, 1_791_830_000, 141_000_000, [true, false, false, false], "OS4.0.3.0.XPACNXM"),
+        BackupEntry {
+            place: Place::Storage,
+            name: "20261020-221500".into(),
+            held: Err("read /sdcard/Skyward/backups/20261020-221500/backup.toml: No such file or directory (os error 2)".into()),
+        },
     ];
+    // What a backup of the slot's partitions and the baseband goes through.
+    let plan = || -> Vec<(String, u64)> {
+        [
+            ("boot", 100_663_296),
+            ("init_boot", 8_388_608),
+            ("vendor_boot", 100_663_296),
+            ("dtbo", 25_165_824),
+            ("vbmeta", 65_536),
+            ("vbmeta_system", 65_536),
+            ("recovery", 104_857_600),
+            ("system", 1_253_212_160),
+            ("system_ext", 702_984_192),
+            ("product", 4_312_031_232),
+            ("vendor", 2_101_317_632),
+            ("odm", 1_420_455_936),
+            ("vendor_dlkm", 104_177_664),
+            ("system_dlkm", 26_177_536),
+            ("modemst1", 2_097_152),
+            ("modemst2", 2_097_152),
+            ("fsg", 8_388_608),
+            ("fsc", 131_072),
+            ("persist", 67_108_864),
+        ]
+        .map(|(name, size)| (name.to_string(), size))
+        .to_vec()
+    };
+    let job = |restore, plan: Vec<(String, u64)>, at, outcome| {
+        Some(BackupJob { restore, place: Place::Storage, checks: true, plan, at, outcome, stopping: false })
+    };
     let reset_asked = || Asked { reason: Some("factroy_reset(1217)".into()), ..Asked::default() };
     let in_download = |app: &mut App, name: &str| {
         app.set_files("/sdcard/Download".into(), Ok(sample_download()), LISTED);
@@ -214,7 +253,7 @@ fn main() -> Result<()> {
         app.state.install = install;
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 68] = [
+    let pages: [PageShot; 81] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -260,12 +299,55 @@ fn main() -> Result<()> {
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
         ("44-backup-light", Screen::Backup, false, &|_| {}),
-        ("45-backup-dark", Screen::Backup, true, &|app| app.state.backup_to = 1),
+        ("45-backup-dark", Screen::Backup, true, &|app| {
+            app.set_usb_drive(Some(UsbDrive::Shown));
+            app.state.backup_to = Place::UsbDrive;
+        }),
         ("46-restore-light-none", Screen::Restore, false, &|_| {}),
-        ("47-restore-light", Screen::Restore, false, &|app| app.state.backups = backups.clone()),
+        ("47-restore-light", Screen::Restore, false, &|app| app.set_backups(backups.clone())),
         ("48-restore-backup-light", Screen::RestoreBackup, false, &|app| {
-            app.state.backups = backups.clone();
-            app.state.restore = Some((0, [true, false, false, true]));
+            app.state.restore = Some((backups[0].clone(), [true, false, false, true]));
+        }),
+        ("48-restore-backup-dark-deleting", Screen::RestoreBackup, true, &|app| {
+            app.state.restore = Some((backups[0].clone(), [true, true, false, true]));
+            app.state.asking_delete = true;
+        }),
+        ("48-restore-backup-light-other-version", Screen::RestoreBackup, false, &|app| {
+            app.state.restore = Some((backups[1].clone(), [true, false, false, false]));
+        }),
+        ("48-restore-backup-light-unreadable", Screen::RestoreBackup, false, &|app| {
+            app.state.restore = Some((backups[2].clone(), [false; 4]));
+        }),
+        ("100-backup-job-light-measuring", Screen::BackupJob, false, &|app| app.state.backup_job = job(false, Vec::new(), None, None)),
+        ("101-backup-job-light", Screen::BackupJob, false, &|app| {
+            app.state.backup_job = job(false, plan(), Some(BackupAt { item: 9, done: 1_820_000_000, of: 4_312_031_232, checking: false }), None)
+        }),
+        ("102-backup-job-dark-checking", Screen::BackupJob, true, &|app| {
+            app.state.backup_job = job(false, plan(), Some(BackupAt { item: 11, done: 300_000_000, of: 1_420_455_936, checking: true }), None)
+        }),
+        ("103-backup-job-light-saved", Screen::BackupJob, false, &|app| {
+            app.state.backup_job = job(false, plan(), None, Some(BackupEnd::Saved("20261021-200110".into())))
+        }),
+        ("104-backup-job-light-room", Screen::BackupJob, false, &|app| {
+            let room = BackupRefusal::Room { needed: 52_400_000_000, free: 31_200_000_000 };
+            app.state.backup_job = job(false, Vec::new(), None, Some(BackupEnd::Refused(room)))
+        }),
+        ("105-restore-job-light-checking", Screen::BackupJob, false, &|app| {
+            app.state.backup_job = job(true, plan(), Some(BackupAt { item: 3, done: 12_000_000, of: 25_165_824, checking: true }), None)
+        }),
+        ("106-restore-job-dark-writing", Screen::BackupJob, true, &|app| {
+            app.state.backup_job = job(true, plan(), Some(BackupAt { item: 10, done: 2_600_000_000, of: 4_202_635_264, checking: false }), None)
+        }),
+        ("107-restore-job-light-done", Screen::BackupJob, false, &|app| {
+            let unmade = vec!["/data/user/10".into(), "/data/user_de/10".into(), "/data/misc_ce/10".into()];
+            app.state.backup_job = job(true, plan(), None, Some(BackupEnd::Restored { unmade }))
+        }),
+        ("108-restore-job-light-failed", Screen::BackupJob, false, &|app| {
+            let at = Some(BackupAt { item: 8, done: 400_000_000, of: 1_405_968_384, checking: false });
+            app.state.backup_job = job(true, plan(), at, Some(BackupEnd::Failed("write /dev/block/dm-61: Input/output error (os error 5)".into())))
+        }),
+        ("109-restore-job-dark-refused", Screen::BackupJob, true, &|app| {
+            app.state.backup_job = job(true, Vec::new(), None, Some(BackupEnd::Refused(BackupRefusal::DataReset)))
         }),
         ("49-advanced-light", Screen::Advanced, false, &|_| {}),
         ("50-files-light", Screen::Files, false, &|app| app.set_files("/".into(), Ok(sample_root()), LISTED)),

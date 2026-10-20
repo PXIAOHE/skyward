@@ -1,3 +1,4 @@
+use crate::backup;
 use crate::decrypt::{self, Decryptor};
 use crate::filework;
 use crate::haptics::Haptics;
@@ -15,12 +16,12 @@ use skyward_sys::Power;
 use skyward_files::Ownership;
 use skyward_block::usb::{self, Drive};
 use skyward_ui::app::{
-    App, Asked, ClashChoice, Data, Effect, EraseStop, FileKind, FileOp, FileRow, FileTask, JobEnd, Keys, MountFailure, Part,
-    Place, RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe,
+    App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, Effect, EraseStop, FileKind, FileOp, FileRow,
+    FileTask, Held, JobEnd, Keys, MountFailure, Part, Place, RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
@@ -232,6 +233,96 @@ fn export_logs(recovery: bool, kernel: bool, into: &Path, zone: usize) -> Result
         save("kernel.log", skyward_sys::kernel_log()?.as_bytes())?;
     }
     Ok(folder)
+}
+
+/// The folder backups go in and are found in, in `place`.
+fn backups_in(place: Place) -> PathBuf {
+    in_place(place, skyward_backup::FOLDER)
+}
+
+/// The backups in `place`: each folder in its backups folder, with what its
+/// manifest records or why that cannot be read. A place with no backups
+/// folder has none.
+fn backups_at(place: Place) -> Result<Vec<BackupEntry>> {
+    let folder = backups_in(place);
+    let entries = match fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", folder.display())),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read {}", folder.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !entry.file_type().with_context(|| format!("look at {}", entry.path().display()))?.is_dir() {
+            continue;
+        }
+        let held = skyward_backup::Manifest::read(&entry.path()).map(|m| held(&m)).map_err(|e| format!("{e:#}"));
+        found.push(BackupEntry { place, name, held });
+    }
+    Ok(found)
+}
+
+/// What a backup's manifest records, as the pages show it.
+fn held(m: &skyward_backup::Manifest) -> Held {
+    Held {
+        made: m.made,
+        size: m.size(),
+        parts: m.parts(),
+        device: m.device.clone(),
+        system: m.system.clone(),
+        slot: skyward_vab::Slot::from_suffix(&m.slot),
+    }
+}
+
+/// Look for backups in the places asked, the restore page showing what is
+/// found and saying why a place could not be looked in.
+fn find_backups(app: &mut App, storage: bool, usb: bool, now: u64) {
+    let mut found = Vec::new();
+    for (place, look) in [(Place::Storage, storage), (Place::UsbDrive, usb)] {
+        if look {
+            match backups_at(place) {
+                Ok(mut there) => found.append(&mut there),
+                Err(e) => app.report(&format!("{e:#}"), now),
+            }
+        }
+    }
+    app.set_backups(found);
+}
+
+/// Delete the backup in `folder` of `place`; a USB drive, shown read-only,
+/// is made writable for it and read-only again after.
+fn delete_backup(place: Place, folder: &Path) -> Result<()> {
+    let drive = Path::new(USB_DRIVE);
+    if place == Place::UsbDrive {
+        skyward_block::mount::remount_writable(drive, true)?;
+    }
+    let deleted = fs::remove_dir_all(folder).with_context(|| format!("delete {}", folder.display()));
+    if place == Place::UsbDrive {
+        let read_only = skyward_block::mount::remount_writable(drive, false);
+        deleted?;
+        return read_only;
+    }
+    deleted
+}
+
+/// How backing up or restoring ended, as its page tells it.
+fn backup_end(end: backup::End) -> BackupEnd {
+    match end {
+        backup::End::Saved(folder) => {
+            BackupEnd::Saved(folder.file_name().expect("a backup's folder has a name").to_string_lossy().into_owned())
+        }
+        backup::End::Restored { unmade } => BackupEnd::Restored { unmade: unmade.iter().map(|p| p.display().to_string()).collect() },
+        backup::End::Stopped => BackupEnd::Stopped,
+        backup::End::Refused(refusal) => BackupEnd::Refused(match refusal {
+            backup::Refusal::Room { needed, free } => BackupRefusal::Room { needed, free },
+            backup::Refusal::Update(state) => BackupRefusal::Update(state),
+            backup::Refusal::OtherPhone(device) => BackupRefusal::OtherPhone(device),
+            backup::Refusal::Resized(name) => BackupRefusal::Resized(name),
+            backup::Refusal::DataReset => BackupRefusal::DataReset,
+        }),
+        backup::End::Failed(why) => BackupEnd::Failed(why),
+    }
 }
 
 /// Now, in Unix seconds.
@@ -700,6 +791,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut shell: Option<pty::Shell> = None;
     // Copying, moving or deleting under way.
     let mut worker: Option<filework::Worker> = None;
+    // Backing up or restoring under way.
+    let mut backuper: Option<backup::Worker> = None;
     // The USB drive plugged in, looked for each second.
     let mut plugged: Option<Plugged> = None;
     let mut seen: Option<String> = None;
@@ -789,6 +882,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(w) = &worker {
             fds.push(w.fd());
+        }
+        if let Some(b) = &backuper {
+            fds.push(b.fd());
         }
         if let Some(d) = &decryptor {
             fds.push(d.fd());
@@ -897,6 +993,22 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             let folder = app.state.files.path.clone();
             list(&mut app, folder)?;
         }
+        let mut backed = false;
+        if let Some(b) = &backuper {
+            for ev in b.events() {
+                match ev {
+                    backup::Event::Plan(plan) => app.backup_plan(plan),
+                    backup::Event::At { item, done, of, checking } => app.backup_at(BackupAt { item, done, of, checking }),
+                    backup::Event::Ended(end) => {
+                        app.backup_ended(backup_end(end), now);
+                        backed = true;
+                    }
+                }
+            }
+        }
+        if backed {
+            backuper = None;
+        }
         if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
             decryptor = None;
             match ended {
@@ -959,7 +1071,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 Incoming::Input(Event::Touch(t, at)) => app.touch(t, &fonts, at),
                 Incoming::Input(Event::Key(k)) => app.key(k, now),
             };
-            for fx in effects {
+            // What the pages ask for in answer to the work done goes on
+            // after it.
+            let mut queue = VecDeque::from(effects);
+            while let Some(fx) = queue.pop_front() {
                 eprintln!("effect {fx:?}");
                 match fx {
                     // Leaving is the user's answer to whatever the request
@@ -1098,6 +1213,63 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.file_job_started(FileTask::Delete { path });
                     }
                     Effect::StopJob => worker.as_ref().context("there is no work on files to stop")?.stop(),
+                    // An install still stopping may yet write; a backup or
+                    // restore waits for it.
+                    Effect::Backup { parts, place, compress, verify } => {
+                        ensure!(backuper.is_none(), "a backup or restore is under way already");
+                        if installer.is_some() {
+                            app.report("上一次安装尚未结束，请稍后再试", now);
+                            continue;
+                        }
+                        let into = backups_in(place);
+                        let there = into.ancestors().find(|p| p.exists()).context("the root is always there")?;
+                        let ownership = match ownership(there) {
+                            Ok(ownership) => ownership,
+                            Err(e) => {
+                                app.report(&format!("{e:#}"), now);
+                                continue;
+                            }
+                        };
+                        let made = unix_now()?;
+                        let task = backup::BackupTask {
+                            parts,
+                            stamp: skyward_ui::fmt::stamp(made, app.state.time_zone),
+                            into,
+                            ownership,
+                            compress,
+                            verify,
+                            remount: (place == Place::UsbDrive).then(|| PathBuf::from(USB_DRIVE)),
+                            made,
+                            device: cfg.device.codename.clone(),
+                            system: info.os_version.clone(),
+                            efs: cfg.backup.efs.clone(),
+                            skipped: backup::data_skipped(&cfg.backup.data_skipped),
+                        };
+                        backuper = Some(backup::Worker::start(backup::Task::Backup(task))?);
+                        app.backup_started(false, place, verify);
+                    }
+                    Effect::Restore { place, name, parts } => {
+                        ensure!(backuper.is_none(), "a backup or restore is under way already");
+                        if installer.is_some() {
+                            app.report("上一次安装尚未结束，请稍后再试", now);
+                            continue;
+                        }
+                        let task = backup::RestoreTask {
+                            folder: backups_in(place).join(&name),
+                            parts,
+                            device: cfg.device.codename.clone(),
+                            skipped: backup::data_skipped(&cfg.backup.data_skipped),
+                            detach: detach(cfg.services.clone()),
+                        };
+                        backuper = Some(backup::Worker::start(backup::Task::Restore(task))?);
+                        app.backup_started(true, place, true);
+                    }
+                    Effect::FindBackups { storage, usb } => find_backups(&mut app, storage, usb, now),
+                    Effect::DeleteBackup { place, name } => {
+                        let deleted = delete_backup(place, &backups_in(place).join(&name)).map_err(|e| format!("{e:#}"));
+                        queue.extend(app.backup_deleted(deleted, now));
+                    }
+                    Effect::StopBackup => backuper.as_ref().context("there is no backup or restore to stop")?.stop(),
                     // Logs that cannot be saved are the page's to report;
                     // the recovery carries on.
                     Effect::ExportLogs { recovery, kernel, storage } => {

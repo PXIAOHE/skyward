@@ -22,6 +22,7 @@ skyward-lp = { path = "../skyward-lp" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 evdev = "0.13.2"
+skyward-backup = { path = "../skyward-backup" }
 skyward-binder = { path = "../skyward-binder" }
 skyward-crypto = { path = "../skyward-crypto" }
 skyward-files = { path = "../skyward-files" }
