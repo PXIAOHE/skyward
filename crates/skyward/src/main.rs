@@ -446,13 +446,15 @@ fn adopt_installed_version(slot: skyward_vab::Slot) -> Result<()> {
     Ok(())
 }
 
-/// The recovery service. adb comes up first so a failure later on can be
-/// inspected, then the boot request in misc is read. A request whose work
+/// The recovery service. Its log is kept from the start, and adb comes up
+/// first so a failure later on can be inspected; then the boot request in
+/// misc is read. A request whose work
 /// goes on stays in misc until the work is done; any other is cleared at
 /// once, so that any reboot from here boots the system. Failures go to the
 /// kernel log and still end the process, which init then starts again.
 fn recovery() -> Result<()> {
     let run = || -> Result<()> {
+        skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
         skyward_sys::set_prop("sys.usb.config", "adb")?;
         let misc = bcb::misc();
         let message = bcb::read(&misc)?;

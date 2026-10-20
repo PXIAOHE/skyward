@@ -1,6 +1,8 @@
-use anyhow::{bail, Result};
-use std::fs::OpenOptions;
+use anyhow::{anyhow, bail, Context, Result};
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub mod bcb;
@@ -137,17 +139,87 @@ pub fn power(target: Power) -> Result<()> {
     set_prop("sys.powerctl", target.command())
 }
 
+/// Where the recovery service keeps the lines it writes to the kernel log
+/// for as long as the phone stays in recovery, as the stock recovery keeps
+/// its own log there.
+pub const LOG: &str = "/tmp/recovery.log";
+
+/// The file [`kmsg`] writes its lines to as well, once [`keep_log`] opened
+/// it.
+static KEPT: OnceLock<Mutex<File>> = OnceLock::new();
+
+/// Keep every line [`kmsg`] writes from now on in the file at `path` as
+/// well, after what an earlier run left there.
+pub fn keep_log(path: &Path) -> Result<()> {
+    let file = OpenOptions::new().create(true).append(true).open(path).with_context(|| format!("open {}", path.display()))?;
+    KEPT.set(Mutex::new(file)).map_err(|_| anyhow!("the log is kept in a file already"))
+}
+
 /// Append a line to the kernel log, where it survives until the next boot
-/// and shows in `dmesg`.
+/// and shows in `dmesg`, and to the file [`keep_log`] opened, stamped with
+/// the seconds since the phone started as the kernel log stamps it.
 pub fn kmsg(line: &str) -> Result<()> {
     let mut f = OpenOptions::new().write(true).open("/dev/kmsg")?;
     f.write_all(format!("<6>skyward: {line}\n").as_bytes())?;
+    if let Some(kept) = KEPT.get() {
+        let mut kept = kept.lock().expect("nothing panics while writing the log");
+        writeln!(kept, "[{:>12.6}] {line}", since_boot()?.as_secs_f64()).with_context(|| format!("write {LOG}"))?;
+    }
     Ok(())
+}
+
+/// How long the phone has been running, on the clock the kernel stamps its
+/// log with.
+fn since_boot() -> Result<Duration> {
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("read the time since the phone started");
+    }
+    Ok(Duration::new(t.tv_sec as u64, t.tv_nsec as u32))
+}
+
+/// The kernel log as `dmesg` prints it: as much of it as the kernel still
+/// holds, each line without the level it was written at.
+#[cfg(target_os = "android")]
+pub fn kernel_log() -> Result<String> {
+    const READ_ALL: libc::c_int = 3;
+    const SIZE_BUFFER: libc::c_int = 10;
+    let size = unsafe { libc::klogctl(SIZE_BUFFER, std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(std::io::Error::last_os_error()).context("ask the kernel how much log it holds");
+    }
+    let mut held = vec![0u8; size as usize];
+    let n = unsafe { libc::klogctl(READ_ALL, held.as_mut_ptr().cast(), size) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error()).context("read the kernel log");
+    }
+    held.truncate(n as usize);
+    Ok(without_levels(&String::from_utf8_lossy(&held)))
+}
+
+/// Kernel log lines without the `<6>` and the like that say the level each
+/// was written at.
+#[cfg(any(target_os = "android", test))]
+fn without_levels(log: &str) -> String {
+    log.lines().map(|line| line.strip_prefix('<').and_then(|l| l.split_once('>')).map_or(line, |(_, rest)| rest)).fold(
+        String::with_capacity(log.len()),
+        |mut out, line| {
+            out.push_str(line);
+            out.push('\n');
+            out
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_log_lines_lose_their_levels() {
+        let held = "<6>[    5.499346] skyward: ro.build.version.release is 16\n<3>[    6.1] dwc3 a600000.dwc3: a > b\nno level\n";
+        assert_eq!(without_levels(held), "[    5.499346] skyward: ro.build.version.release is 16\n[    6.1] dwc3 a600000.dwc3: a > b\nno level\n");
+    }
 
     #[test]
     fn power_names_round_trip() {
