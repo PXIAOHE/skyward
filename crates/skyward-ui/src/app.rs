@@ -158,7 +158,7 @@ pub enum Switch {
 }
 
 /// What a backup can take, in the order the backup page lists it.
-pub const BACKUP_PARTS: [&str; 4] = ["启动分区", "系统分区", "数据", "基带与 EFS"];
+pub const BACKUP_PARTS: [&str; 4] = ["启动分区", "系统分区", "data 分区", "基带与 EFS"];
 
 /// Where a backup can go, in the order the backup page lists it.
 pub const BACKUP_PLACES: [&str; 2] = ["内部存储", "U 盘"];
@@ -2358,7 +2358,7 @@ impl App {
                         return self.act(Action::Open(first.screen), now);
                     }
                 }
-                Screen::Decrypt if self.state.code.is_empty() => self.say("先输入锁屏密码", now),
+                Screen::Decrypt if self.state.code.is_empty() => self.say("请输入锁屏密码", now),
                 Screen::Decrypt => {
                     let code = std::mem::take(&mut self.state.code);
                     return self.unlock(code);
@@ -2577,11 +2577,11 @@ impl App {
                                     self.refresh();
                                 }
                             }
-                            Confirm::Backup => self.say("备份还没实现", now),
-                            Confirm::Restore => self.say("恢复还没实现", now),
+                            Confirm::Backup => self.say("暂不支持备份", now),
+                            Confirm::Restore => self.say("暂不支持恢复", now),
                             Confirm::Slot => match self.state.next_slot {
-                                None => self.say("已经从这个槽位启动", now),
-                                Some(_) => self.say("切换槽位还没实现", now),
+                                None => self.say("已从该槽位启动", now),
+                                Some(_) => self.say("暂不支持切换槽位", now),
                             },
                             Confirm::FactoryReset => fx.push(Effect::FactoryReset),
                             Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
@@ -2603,7 +2603,7 @@ impl App {
                     self.repaint_pattern(&t);
                     match drawn.len() >= 4 {
                         true => fx.extend(self.unlock(drawn.iter().map(|i| (b'1' + *i as u8) as char).collect())),
-                        false => self.say("至少连接 4 个点", now),
+                        false => self.say("请至少连接 4 个点", now),
                     }
                 }
                 _ => {}

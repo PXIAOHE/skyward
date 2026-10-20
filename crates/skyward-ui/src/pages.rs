@@ -267,10 +267,10 @@ pub fn mount(cx: &Ctx) -> Frame {
     };
     let bottom = match &s.mounts {
         Err(why) => {
-            let y = widgets::list(&mut c, t, f, y, &[Row::new("读不到分区").trail(Trail::None)]).bottom;
+            let y = widgets::list(&mut c, t, f, y, &[Row::new("无法读取分区").trail(Trail::None)]).bottom;
             widgets::footnote(&mut c, t, f, y, why)
         }
-        Ok(mounts) if mounts.is_empty() => widgets::list(&mut c, t, f, y, &[Row::new("没有可挂载的分区").trail(Trail::None)]).bottom,
+        Ok(mounts) if mounts.is_empty() => widgets::list(&mut c, t, f, y, &[Row::new("暂无可挂载的分区").trail(Trail::None)]).bottom,
         Ok(mounts) => {
             let subs: Vec<String> = mounts
                 .iter()
@@ -287,7 +287,7 @@ pub fn mount(cx: &Ctx) -> Frame {
             let list = widgets::list(&mut c, t, f, y, &rows);
             out.extend(list.rows.iter().zip(mounts).enumerate().map(|(i, (&rect, m))| {
                 let action = match (m.holders.is_empty(), m.mounted, pending) {
-                    (false, _, _) => Action::Unavailable("正在使用的分区不能卸载"),
+                    (false, _, _) => Action::Unavailable("无法卸载正在使用的分区"),
                     (true, false, Some(note)) => Action::Unavailable(note),
                     _ => Action::MountToggle(i),
                 };
@@ -298,8 +298,8 @@ pub fn mount(cx: &Ctx) -> Frame {
                 None => list.bottom,
             };
             let about = match cx.info.slot {
-                Some(slot) => format!("这里列出当前槽位 {} 在 super 里的分区，都以只读方式挂载。", slot.letter()),
-                None => "这里列出 super 里的分区，都以只读方式挂载。".into(),
+                Some(slot) => format!("仅显示当前槽位 {} 在 super 中的分区，挂载后均为只读。", slot.letter()),
+                None => "仅显示 super 中的分区，挂载后均为只读。".into(),
             };
             widgets::footnote(&mut c, t, f, y, &about)
         }
@@ -447,10 +447,10 @@ pub fn decrypt(cx: &Ctx) -> Frame {
     let c = page(cx.t);
     match &cx.state.data {
         Data::Locked { user, keys, checking } => code(cx, c, *user, *keys, *checking),
-        Data::Closed | Data::Opening => data_status(cx, c, Icon::Lock, "解密数据分区", Some("正在读取锁屏方式"), None),
-        Data::Open => data_status(cx, c, Icon::Folder, "数据分区已解密", Some("文件管理里可以看到手机上的文件"), None),
-        Data::Failed(why) => data_status(cx, c, Icon::Lock, "数据分区没有打开", None, Some(why)),
-        Data::Erased => data_status(cx, c, Icon::Wipe, "data 分区已清除", Some("下次开机时将重新建立"), None),
+        Data::Closed | Data::Opening => data_status(cx, c, Icon::Lock, "解密 data 分区", Some("正在读取锁屏方式"), None),
+        Data::Open => data_status(cx, c, Icon::Folder, "data 分区已解密", Some("你可以在「文件管理」中查看本机文件"), None),
+        Data::Failed(why) => data_status(cx, c, Icon::Lock, "未能打开 data 分区", None, Some(why)),
+        Data::Erased => data_status(cx, c, Icon::Wipe, "data 分区已清除", Some("下次开机时将重新创建"), None),
     }
 }
 
@@ -487,11 +487,12 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
     let m = &t.m;
     let x = m.w as f32 / 2.0;
     let mut out = Vec::new();
+    let (what, lock) = if keys == Keys::Pattern { ("绘制", "锁屏图案") } else { ("输入", "锁屏密码") };
     let title = match user {
-        0 => "输入锁屏密码".to_string(),
-        other => format!("输入用户 {other} 的锁屏密码"),
+        0 => format!("{what}{lock}"),
+        other => format!("{what}用户 {other} 的{lock}"),
     };
-    let note = if checking { "正在验证" } else { "解开后才能看到手机上的文件" };
+    let note = if checking { "正在验证" } else { "解密后可查看本机文件" };
     c.text_center(&f.heading, &title, x, m.dp(130.0), m.dp(24.0), t.pal.text);
     c.text_center(&f.body, note, x, m.dp(166.0), m.sub_px, t.pal.subtitle);
     let mut pattern = None;
@@ -936,8 +937,8 @@ pub fn backup(cx: &Ctx) -> Frame {
     let top = t.m.content_top;
     let decrypted = cx.state.data == Data::Open;
     let y = widgets::section_first(&mut c, t, f, top, "备份内容");
-    let data = if decrypted { "应用、账户与设置，不含照片和下载的文件" } else { "应用、账户与设置，不含照片和下载的文件；需要先解密" };
-    let subs = ["boot、init_boot、vendor_boot、dtbo、vbmeta 和 recovery", "当前槽位在 super 里的分区", data, "IMEI、基带设置和传感器校准，刷坏后靠它恢复"];
+    let data = if decrypted { "应用、账户和设置，不包括内部存储" } else { "应用、账户和设置，不包括内部存储，需先完成「解密」" };
+    let subs = ["boot、init_boot、vendor_boot、dtbo、vbmeta 和 recovery", "当前槽位在 super 中的分区", data, "IMEI、基带设置和传感器校准数据"];
     let rows: Vec<Row> =
         BACKUP_PARTS.iter().zip(subs).enumerate().map(|(k, (name, sub))| Row::new(name).subtitle(sub).trail(Trail::Check(s.backup[k]))).collect();
     let parts = widgets::list(&mut c, t, f, y, &rows);
@@ -945,20 +946,20 @@ pub fn backup(cx: &Ctx) -> Frame {
     let y = widgets::section(&mut c, t, f, parts.bottom, "存放位置");
     let storage = match (decrypted, i.storage.free) {
         (true, Some(free)) => format!("剩余 {}", fmt::gb(free)),
-        _ => "需要先解密数据分区".to_string(),
+        _ => "需先完成「解密」".to_string(),
     };
     let places = widgets::list(&mut c, t, f, y, &[
         Row::new(BACKUP_PLACES[0]).subtitle(&storage).trail(Trail::Check(s.backup_to == 0)),
-        Row::new(BACKUP_PLACES[1]).subtitle("通过 OTG 接入的 U 盘").trail(Trail::Check(s.backup_to == 1)),
+        Row::new(BACKUP_PLACES[1]).subtitle("通过 OTG 连接的 U 盘").trail(Trail::Check(s.backup_to == 1)),
     ]);
     out.extend(hits(&places.rows, &[Action::BackupTo(0), Action::BackupTo(1)]));
     let y = widgets::section(&mut c, t, f, places.bottom, "选项");
     let options = widgets::list(&mut c, t, f, y, &[
         Row::new("压缩").subtitle("备份更小，耗时更长").trail(Trail::Switch(s.compress)),
-        Row::new("完成后校验").subtitle("逐个读回，确认备份完整").trail(Trail::Switch(s.verify)),
+        Row::new("完成后校验").subtitle("确认备份文件完整").trail(Trail::Switch(s.verify)),
     ]);
     out.extend(hits(&options.rows, &[Action::Toggle(Switch::Compress), Action::Toggle(Switch::Verify)]));
-    let y = widgets::footnote(&mut c, t, f, options.bottom, "备份放在 Skyward/backups 文件夹里，按开始备份的时间命名。");
+    let y = widgets::footnote(&mut c, t, f, options.bottom, "备份将保存在 Skyward/backups 文件夹中，以开始备份的时间命名。");
     let (label, danger) = confirm_label(Confirm::Backup);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Backup) });
@@ -973,7 +974,7 @@ pub fn restore(cx: &Ctx) -> Frame {
     let top = t.m.content_top;
     let y = widgets::section_first(&mut c, t, f, top, "备份");
     let bottom = if s.backups.is_empty() {
-        widgets::list(&mut c, t, f, y, &[Row::new("没有找到备份").trail(Trail::None)]).bottom
+        widgets::list(&mut c, t, f, y, &[Row::new("暂无备份").trail(Trail::None)]).bottom
     } else {
         let titles: Vec<String> = s.backups.iter().map(|b| fmt::datetime(b.made)).collect();
         let subs: Vec<String> =
@@ -983,7 +984,7 @@ pub fn restore(cx: &Ctx) -> Frame {
         out.extend(list.rows.iter().enumerate().map(|(k, &rect)| Hit { rect, action: Action::OpenBackup(k) }));
         list.bottom
     };
-    let bottom = widgets::footnote(&mut c, t, f, bottom, "恢复会在内部存储的 Skyward/backups 文件夹和 U 盘里查找备份，内部存储需要先解密数据分区。");
+    let bottom = widgets::footnote(&mut c, t, f, bottom, "将在内部存储的 Skyward/backups 文件夹和 U 盘中查找备份，查找内部存储需先完成「解密」。");
     Frame::new(t, fit(c, t, bottom), out, "恢复", top)
 }
 
@@ -1006,12 +1007,12 @@ pub fn restore_backup(cx: &Ctx) -> Frame {
     let rows: Vec<Row> = held.iter().map(|&k| Row::new(BACKUP_PARTS[k]).trail(Trail::Check(chosen[k]))).collect();
     let list = widgets::list(&mut c, t, f, y, &rows);
     out.extend(list.rows.iter().zip(&held).map(|(&rect, &k)| Hit { rect, action: Action::RestorePart(k) }));
-    let y = widgets::footnote(&mut c, t, f, list.bottom, "恢复会用备份覆盖手机上对应分区现有的内容。");
+    let y = widgets::footnote(&mut c, t, f, list.bottom, "恢复后，对应分区中的现有内容将被备份覆盖。");
     let (label, danger) = confirm_label(Confirm::Restore);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Restore) });
-    let delete = widgets::list(&mut c, t, f, track.y + track.h + t.m.dp(28.0), &[Row::new("删除这个备份").tint(t.pal.danger).trail(Trail::None)]);
-    out.extend(hits(&delete.rows, &[Action::Unavailable("删除备份还没实现")]));
+    let delete = widgets::list(&mut c, t, f, track.y + track.h + t.m.dp(28.0), &[Row::new("删除备份").tint(t.pal.danger).trail(Trail::None)]);
+    out.extend(hits(&delete.rows, &[Action::Unavailable("暂不支持删除备份")]));
     Frame::new(t, fit(c, t, delete.bottom), out, "恢复备份", top)
 }
 
@@ -1359,7 +1360,7 @@ pub fn slot(cx: &Ctx) -> Frame {
     let mut out = Vec::new();
     let top = t.m.content_top;
     let Some(current) = i.slot else {
-        widgets::list(&mut c, t, f, top, &[Row::new("这台手机没有 A/B 槽位").trail(Trail::None)]);
+        widgets::list(&mut c, t, f, top, &[Row::new("本机没有 A/B 槽位").trail(Trail::None)]);
         return Frame::new(t, c, out, "启动槽位", top);
     };
     let chosen = s.next_slot.unwrap_or(current);
@@ -1369,14 +1370,14 @@ pub fn slot(cx: &Ctx) -> Frame {
         .iter()
         .zip(&titles)
         .map(|(&slot, title)| {
-            let sub = if slot == current { "现在运行的系统" } else { "另一个槽位" };
+            let sub = if slot == current { "当前运行的系统" } else { "另一个槽位" };
             Row::new(title).subtitle(sub).trail(Trail::Check(slot == chosen))
         })
         .collect();
     let list = widgets::list(&mut c, t, f, y, &rows);
     let picks = [Slot::A, Slot::B].map(|slot| Action::PickSlot((slot != current).then_some(slot)));
     out.extend(hits(&list.rows, &picks));
-    let y = widgets::footnote(&mut c, t, f, list.bottom, "另一个槽位里没有完整的系统时，切换后手机会无法开机。");
+    let y = widgets::footnote(&mut c, t, f, list.bottom, "另一个槽位中没有完整的系统时，切换后将无法开机。");
     let (label, danger) = confirm_label(Confirm::Slot);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Slot) });
@@ -1390,11 +1391,11 @@ pub fn fastboot(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
     let mut c = page(t);
     let top = t.m.content_top;
-    let running = if s.fastboot.running { "正在运行" } else { "没有运行" };
+    let running = if s.fastboot.running { "正在运行" } else { "未运行" };
     let link = match s.fastboot.link {
         UsbLink::Connected => "已连接电脑",
         UsbLink::Connecting => "正在连接",
-        UsbLink::Unplugged => "没有连接电脑",
+        UsbLink::Unplugged => "未连接电脑",
     };
     let slot = i.slot.map(|s| s.letter());
     let mut facts = vec![
@@ -1407,8 +1408,8 @@ pub fn fastboot(cx: &Ctx) -> Frame {
     }
     let y = widgets::section_first(&mut c, t, f, top, "状态");
     let state = widgets::list(&mut c, t, f, y, &facts);
-    let y = widgets::footnote(&mut c, t, f, state.bottom, "现在可以用电脑上的 fastboot 命令刷写分区，包括 super 里的逻辑分区。");
-    let y = widgets::section(&mut c, t, f, y, "离开 fastboot");
+    let y = widgets::footnote(&mut c, t, f, state.bottom, "你可以在电脑上使用 fastboot 命令刷写分区，包括 super 中的逻辑分区。");
+    let y = widgets::section(&mut c, t, f, y, "退出 fastboot");
     let rows: Vec<Row> = FASTBOOT_CHOICES.iter().map(|&(title, _)| Row::new(title).trail(Trail::None)).collect();
     let choices = widgets::list_focused(&mut c, t, f, y, &rows, s.fastboot.focus);
     let actions: Vec<Action> = FASTBOOT_CHOICES.iter().map(|&(_, action)| action).collect();
