@@ -39,7 +39,8 @@ enum Cmd {
         #[arg(long)]
         config: String,
     },
-    /// Print the active slot suffix.
+    /// Print the suffix of the slot the phone runs from and, where the
+    /// phone's boot control runs, what it holds of each slot.
     Slot,
     /// List modules in dependency load order from a source directory.
     Modules {
@@ -591,6 +592,23 @@ fn slot() -> Result<()> {
     match skyward_vab::current_slot()? {
         Some(s) => println!("{}", s.suffix()),
         None => println!("(not A/B)"),
+    }
+    #[cfg(target_os = "android")]
+    {
+        use skyward_vab::boot::BootControl;
+        let binder = skyward_binder::driver::Binder::hardware()?;
+        let opened = BootControl::open(&binder);
+        match opened {
+            Ok(control) => {
+                let slots = control.slots()?;
+                println!("next {}", slots.active.suffix());
+                for slot in [skyward_vab::Slot::A, skyward_vab::Slot::B] {
+                    let k = slot.number() as usize;
+                    println!("{} bootable {} successful {}", slot.suffix(), slots.bootable[k], slots.successful[k]);
+                }
+            }
+            Err(e) => println!("{e:#}"),
+        }
     }
     Ok(())
 }

@@ -4,6 +4,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
+#[cfg(target_os = "android")]
+pub mod boot;
 mod partitions;
 
 pub use partitions::{
@@ -54,6 +56,17 @@ impl Slot {
             _ => None,
         }
     }
+}
+
+/// What the phone's boot control holds of the slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootSlots {
+    /// The slot the bootloader starts next.
+    pub active: Slot,
+    /// Of each slot, A first: whether the bootloader may start it, and
+    /// whether its system has started fully since it was written.
+    pub bootable: [bool; 2],
+    pub successful: [bool; 2],
 }
 
 /// The booted slot, or `None` on devices that are not A/B.
