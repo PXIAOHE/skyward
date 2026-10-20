@@ -1525,7 +1525,7 @@ impl App {
     /// Enter starts another.
     pub fn term_ended(&mut self, how: &str) {
         let term = self.term.as_mut().expect("only a shell that started ends");
-        term.feed(format!("\r\n[shell 已结束，{how}。按回车重新开始]\r\n").as_bytes());
+        term.feed(format!("\r\n[{how}。按「回车」重新启动]\r\n").as_bytes());
         term.running = false;
         if self.screen() == Screen::Terminal {
             self.refresh();
@@ -1612,7 +1612,7 @@ impl App {
 
     /// The name typed for an entry is another entry's in the folder.
     fn say_taken(&mut self, now: u64) {
-        let said = format!("这个文件夹里已经有「{}」", self.state.new_name);
+        let said = format!("该文件夹中已有\"{}\"", self.state.new_name);
         self.say(&said, now);
     }
 
@@ -1923,7 +1923,7 @@ impl App {
             Screen::Clash => self.state.clash = None,
             Screen::FileJob => {
                 if self.state.job.as_ref().is_some_and(|j| j.outcome.is_none()) {
-                    self.say("完成或停止之后才能返回", now);
+                    self.say("请等待完成或停止后再返回", now);
                     return fx;
                 }
                 self.state.job = None;
@@ -2150,9 +2150,9 @@ impl App {
                 let (path, folder) = (std::path::Path::new(&clip.path), std::path::Path::new(&self.state.folder));
                 let name = path.file_name().map_or_else(|| clip.path.clone(), |n| n.to_string_lossy().into_owned());
                 if folder.starts_with(path) {
-                    self.say(&format!("不能把「{name}」放进它自己里面"), now);
+                    self.say(&format!("无法将\"{name}\"放入其自身中"), now);
                 } else if clip.op == FileOp::Move && path.parent() == Some(folder) {
-                    self.say(&format!("「{name}」已经在这个文件夹里"), now);
+                    self.say(&format!("\"{name}\"已在该文件夹中"), now);
                 } else {
                     return vec![Effect::Paste { op: clip.op, path: clip.path, into: self.state.folder.clone(), clash: None }];
                 }
@@ -2370,9 +2370,9 @@ impl App {
                     let current = &self.state.file.as_ref().expect("the file page shows an entry").name;
                     let taken = self.state.files.as_ref().is_ok_and(|entries| entries.iter().any(|e| e.name == name));
                     match name.as_str() {
-                        "" => self.say("先输入名称", now),
-                        "." | ".." => self.say("名称不能是「.」或「..」", now),
-                        _ if name.contains('/') => self.say("名称里不能有「/」", now),
+                        "" => self.say("请输入名称", now),
+                        "." | ".." => self.say("名称不能为\".\"或\"..\"", now),
+                        _ if name.contains('/') => self.say("名称不能包含\"/\"", now),
                         _ if name == *current => return self.back(now),
                         _ if taken => self.say_taken(now),
                         _ => return vec![Effect::Rename { path: self.entry_path(), name }],
@@ -3977,7 +3977,7 @@ mod tests {
         app.term_output(b"ishtar:/ # ");
         tap_back(&mut app, &f, &i, 0);
         assert!(tap(&mut app, &f, &i, Action::Open(Screen::Terminal)).is_empty(), "the same shell goes on");
-        app.term_ended("退出码 0");
+        app.term_ended("shell 已退出，退出码 0");
         assert!(tap(&mut app, &f, &i, Action::Type(Cap::Char('l'))).is_empty(), "nothing runs to take the keys");
         assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![Effect::StartShell]);
     }
@@ -4090,9 +4090,9 @@ mod tests {
             tap(app, &f, &i, Action::Paste)
         };
         assert!(paste(&mut app, FileOp::Copy, "/sdcard").is_empty());
-        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("不能把「sdcard」放进它自己里面"));
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("无法将\"sdcard\"放入其自身中"));
         assert!(paste(&mut app, FileOp::Move, "/sdcard/a.zip").is_empty());
-        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("「a.zip」已经在这个文件夹里"));
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("\"a.zip\"已在该文件夹中"));
         assert!(app.state.clip.is_some(), "the entry stays picked, for another folder");
         let copy = Effect::Paste { op: FileOp::Copy, path: "/sdcard/a.zip".into(), into: "/sdcard".into(), clash: None };
         assert_eq!(paste(&mut app, FileOp::Copy, "/sdcard/a.zip"), vec![copy], "a copy where the entry is makes a second one");
@@ -4136,7 +4136,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::Rename, "a name refused can be typed again");
         app.toast = None;
         app.renamed(Err(RenameRefused::Taken), 0);
-        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("这个文件夹里已经有「ab」"), "as the folder compares names");
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("该文件夹中已有\"ab\""), "as the folder compares names");
         app.renamed(Ok(()), 0);
         assert_eq!(app.screen(), Screen::Files, "renamed, the folder shows again");
     }
@@ -4148,7 +4148,7 @@ mod tests {
         tap(&mut app, &f, &i, Action::OpenEntry(1));
         tap(&mut app, &f, &i, Action::RenameEntry);
         let refused =
-            [("", "先输入名称"), ("..", "名称不能是「.」或「..」"), ("x/y", "名称里不能有「/」"), ("DCIM", "这个文件夹里已经有「DCIM」")];
+            [("", "请输入名称"), ("..", "名称不能为\".\"或\"..\""), ("x/y", "名称不能包含\"/\""), ("DCIM", "该文件夹中已有\"DCIM\"")];
         for (name, said) in refused {
             app.state.new_name = name.into();
             app.toast = None;
@@ -4189,7 +4189,7 @@ mod tests {
         app.compose(&mut c, &f, &i, "12:00", 0);
         app.file_job_ended(JobEnd::Stopped, 0);
         app.compose(&mut c, &f, &i, "12:00", 16);
-        assert_eq!(app.titles.as_ref().map(|((title, _), _, _)| *title), Some("复制没有完成"));
+        assert_eq!(app.titles.as_ref().map(|((title, _), _, _)| *title), Some("复制未完成"));
     }
 
     #[test]

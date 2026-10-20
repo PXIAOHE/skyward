@@ -125,8 +125,8 @@ impl Shell {
 /// How a shell's end reads on the terminal page.
 pub fn how(status: ExitStatus) -> String {
     match (status.code(), status.signal()) {
-        (Some(code), _) => format!("退出码 {code}"),
-        (None, Some(signal)) => format!("被信号 {signal} 结束"),
-        (None, None) => format!("{status}"),
+        (Some(code), _) => format!("shell 已退出，退出码 {code}"),
+        (None, Some(signal)) => format!("shell 已被信号 {signal} 终止"),
+        (None, None) => format!("shell 已结束：{status}"),
     }
 }

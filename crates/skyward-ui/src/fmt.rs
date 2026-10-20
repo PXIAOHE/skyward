@@ -358,14 +358,14 @@ pub fn mode(mode: u32) -> String {
     out
 }
 
-/// What the file manager says under an entry's name.
-/// The line under an entry's name in the file list, in the stock file
-/// manager's words, with dates told against `now`, when the folder was read.
+/// The line under an entry's name in the file list, laid out as the stock
+/// file manager lays it out, with dates told against `now`, when the folder
+/// was read.
 pub fn file_line(f: &FileRow, now: i64) -> String {
     const DIVIDER: &str = "  |  ";
     match &f.kind {
-        FileKind::Folder { items: Some(n) } => format!("{}{DIVIDER}{n}项", file_time(f.modified, true, now)),
-        FileKind::Folder { items: None } => "访问限制".to_string(),
+        FileKind::Folder { items: Some(n) } => format!("{}{DIVIDER}{n} 项", file_time(f.modified, true, now)),
+        FileKind::Folder { items: None } => "无法读取".to_string(),
         FileKind::File => format!("{}{DIVIDER}{}", file_time(f.modified, false, now), file_size(f.size)),
         FileKind::Link { target, .. } => format!("链接到 {target}"),
         FileKind::Special => {
@@ -596,8 +596,8 @@ mod tests {
         // Changed at 2026-10-19 02:31 in Beijing; listed a week later.
         let row = |kind, size, mode| FileRow { name: "x".into(), kind, size, modified: 1_792_348_260, mode, uid: 0, gid: 0 };
         let later = 1_792_348_260 + 7 * 86_400;
-        assert_eq!(file_line(&row(FileKind::Folder { items: Some(6) }, 4096, 0o040_755), later), "2026/10/19  |  6项");
-        assert_eq!(file_line(&row(FileKind::Folder { items: None }, 4096, 0o040_700), later), "访问限制");
+        assert_eq!(file_line(&row(FileKind::Folder { items: Some(6) }, 4096, 0o040_755), later), "2026/10/19  |  6 项");
+        assert_eq!(file_line(&row(FileKind::Folder { items: None }, 4096, 0o040_700), later), "无法读取");
         assert_eq!(file_line(&row(FileKind::File, 26_950, 0o100_644), later), "10/19  |  26.95 KB");
         let link = FileKind::Link { target: "/storage/self/primary".into(), folder: true };
         assert_eq!(file_line(&row(link, 21, 0o120_777), later), "链接到 /storage/self/primary");

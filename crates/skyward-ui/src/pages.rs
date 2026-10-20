@@ -1040,11 +1040,11 @@ pub fn files(cx: &Ctx) -> Frame {
     c.clear(bg);
     let rows = match &s.files {
         Err(why) => {
-            files::note(&mut c, t, f, "读不到这个文件夹", Some(why));
+            files::note(&mut c, t, f, "无法读取该文件夹", Some(why));
             None
         }
         Ok(entries) if entries.is_empty() => {
-            files::note(&mut c, t, f, "没有文件", None);
+            files::note(&mut c, t, f, "暂无文件", None);
             None
         }
         Ok(entries) => Some(files::rows(t, f, entries)),
@@ -1054,8 +1054,8 @@ pub fn files(cx: &Ctx) -> Frame {
     // bar held at the bottom.
     let dock = s.clip.as_ref().map(|clip| {
         let go = match clip.op {
-            FileOp::Copy => "复制到这里",
-            FileOp::Move => "移动到这里",
+            FileOp::Copy => "复制到此处",
+            FileOp::Move => "移动到此处",
         };
         let (canvas, rects) = widgets::dock_bar(t, f, bg, &["取消", go]);
         Dock { canvas, hits: hits(&rects, &[Action::Unpick, Action::Paste]) }
@@ -1087,7 +1087,7 @@ pub fn file_info(cx: &Ctx) -> Frame {
     match &e.kind {
         FileKind::Link { target, .. } => facts.push(("指向", target.clone())),
         FileKind::Folder { items: Some(n) } => facts.push(("内容", format!("{n} 项"))),
-        FileKind::Folder { items: None } => facts.push(("内容", "访问限制".to_string())),
+        FileKind::Folder { items: None } => facts.push(("内容", "无法读取".to_string())),
         FileKind::File | FileKind::Special => facts.push(("大小", format!("{}（{} 字节）", fmt::file_size(e.size), e.size))),
     }
     facts.push(("修改时间", fmt::datetime(e.modified)));
@@ -1108,9 +1108,9 @@ pub fn file_info(cx: &Ctx) -> Frame {
     let mut bottom = actions.bottom;
     if s.asking_delete {
         let what = if folder {
-            format!("「{}」和里面的全部内容都会删除，删除后无法恢复。", e.name)
+            format!("删除\"{}\"及其中的全部内容？删除后无法恢复。", e.name)
         } else {
-            format!("「{}」会被删除，删除后无法恢复。", e.name)
+            format!("删除\"{}\"？删除后无法恢复。", e.name)
         };
         let y = widgets::footnote(&mut c, t, f, actions.bottom, &what);
         let (label, danger) = confirm_label(Confirm::DeleteEntry);
@@ -1129,7 +1129,7 @@ pub fn rename(cx: &Ctx) -> Frame {
     let mut out = Vec::new();
     let top = t.m.content_top;
     let y = widgets::text_field(&mut c, t, f, top, &s.new_name);
-    widgets::footnote(&mut c, t, f, y, "名称里不能有「/」。按「完成」改名。");
+    widgets::footnote(&mut c, t, f, y, "名称不能包含\"/\"。点击「完成」保存。");
     keyboard_hits(&mut c, t, f, s, "完成", &mut out);
     Frame::new(t, c, out, "重命名", top)
 }
@@ -1145,12 +1145,12 @@ pub fn clash(cx: &Ctx) -> Frame {
     };
     let mut c = page(t);
     let top = t.m.content_top;
-    let y = widgets::paragraph(&mut c, t, f, top, &format!("「{into}」里已经有一项叫「{name}」。"));
-    let skip = format!("保留已有的，不{verb}这一项");
+    let y = widgets::paragraph(&mut c, t, f, top, &format!("\"{into}\"中已有同名的\"{name}\"。"));
+    let skip = format!("保留已有的同名项，不{verb}该项");
     let choices = widgets::list(&mut c, t, f, y + t.m.dp(12.0), &[
-        Row::new("替换").subtitle("删除已有的，换成这一项"),
+        Row::new("替换").subtitle("覆盖已有的同名项"),
         Row::new("跳过").subtitle(&skip),
-        Row::new("两者都保留").subtitle("这一项改个名字，放在已有的旁边"),
+        Row::new("保留两者").subtitle("自动为该项重新命名"),
     ]);
     let out = hits(&choices.rows, &[
         Action::Resolve(ClashChoice::Replace),
@@ -1165,10 +1165,10 @@ pub fn clash(cx: &Ctx) -> Frame {
 pub fn file_job(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let job = s.job.as_ref().expect("the job page shows work on files");
-    let (verb, path, titles) = match &job.task {
-        FileTask::Copy { path, .. } => ("复制", path, ("正在复制", "复制没有完成")),
-        FileTask::Move { path, .. } => ("移动", path, ("正在移动", "移动没有完成")),
-        FileTask::Delete { path } => ("删除", path, ("正在删除", "删除没有完成")),
+    let (verb, path, titles, stopped) = match &job.task {
+        FileTask::Copy { path, .. } => ("复制", path, ("正在复制", "复制未完成"), "已停止，部分内容可能已复制到目标文件夹。"),
+        FileTask::Move { path, .. } => ("移动", path, ("正在移动", "移动未完成"), "已停止，部分内容可能已移动到目标文件夹。"),
+        FileTask::Delete { path } => ("删除", path, ("正在删除", "删除未完成"), "已停止，部分内容可能已删除。"),
     };
     let name = Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
     let share = |(done, total): (u64, u64)| if total == 0 { 0.0 } else { done as f32 / total as f32 };
@@ -1196,8 +1196,8 @@ pub fn file_job(cx: &Ctx) -> Frame {
         }
         Some(end) => {
             let why = match end {
-                JobEnd::Stopped => format!("已停止。停止前已经{verb}的部分保持原样。"),
-                JobEnd::Failed(why) => why.clone(),
+                JobEnd::Stopped => stopped.to_string(),
+                JobEnd::Failed(why) => format!("{verb}失败：{why}"),
                 JobEnd::Done => unreachable!("work done leaves its page"),
             };
             let y = widgets::footnote(&mut c, t, f, y, &why);

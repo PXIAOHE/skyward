@@ -244,7 +244,7 @@ fn main() -> Result<()> {
             let (rows, cols) = app.term_size(&fonts);
             app.term_started(rows, cols);
             app.term_output(b"ishtar:/ # exit\r\n");
-            app.term_ended("退出码 0");
+            app.term_ended("shell 已退出，退出码 0");
         }),
         ("55-language-light", Screen::Language, false, &|_| {}),
         ("56-time-zone-light", Screen::TimeZone, false, &|_| {}),
