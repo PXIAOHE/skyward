@@ -1,6 +1,6 @@
-//! Installing what a computer sends with `adb sideload`: A/B update
-//! packages, which the phone's own update_engine applies, and partition
-//! images, which are written here.
+//! Installing a package that a computer sends with `adb sideload`, or that
+//! is a file on the phone: A/B update packages, which the phone's own
+//! update_engine applies, and partition images, which are written here.
 
 pub mod adb;
 pub mod fuse;
@@ -23,13 +23,15 @@ use skyward_vab::{Slot, SnapshotState};
 pub enum Event {
     /// USB is ready for `adb sideload`.
     Waiting,
-    /// The computer started sending a package of this many bytes, which is
-    /// being looked at.
+    /// A package of this many bytes is being looked at: one the computer
+    /// started sending, or a file on the phone.
     Checking { size: u64 },
-    /// An update package that passed the checks needs all user data erased
-    /// before the system it brings starts; the version it brings. It waits
-    /// for [`Command::Install`] before anything is written.
-    Wipes { version: Option<String> },
+    /// An update package passed the checks and waits for
+    /// [`Command::Install`] before anything is written: the version it
+    /// brings, and whether all user data is to be erased before that
+    /// system starts. One that erases always waits, and so does one from a
+    /// file on the phone, which a single tap picks.
+    Ready { version: Option<String>, wipe: bool },
     /// An update package passed the checks and is being installed; the
     /// version it brings.
     Installing { version: Option<String> },
@@ -112,7 +114,11 @@ pub enum Failure {
     /// The computer stopped sending: the cable came out or `adb sideload`
     /// was stopped.
     Disconnected,
-    /// The file changed on the computer while it was being sent.
+    /// Reading the file on the phone failed, for this reason: the USB
+    /// drive came out, or the storage failed.
+    Unreadable(String),
+    /// The package changed where it is while it was being read: on the
+    /// computer as it was sent, or the file on the phone.
     Changed,
     /// Anything else: the error and its causes.
     Error(String),
@@ -124,9 +130,8 @@ pub enum Command {
     /// Write the image held in [`Event::Image`] to `partition` in these
     /// slots.
     Flash { partition: &'static str, slots: Vec<Slot> },
-    /// Install the update held in [`Event::Wipes`], all user data to be
-    /// erased after it.
+    /// Install the update held in [`Event::Ready`].
     Install,
-    /// Leave sideload without installing anything.
+    /// Stop without installing anything.
     Cancel,
 }

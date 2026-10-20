@@ -267,6 +267,8 @@ pub enum Confirm {
     FactoryReset,
     /// Delete the entry the file page shows.
     DeleteEntry,
+    /// Install the update that waits to be agreed to.
+    Install,
     /// Install an update that erases all user data after it.
     InstallWipe,
 }
@@ -399,9 +401,9 @@ pub enum Install {
     Checking { size: u64 },
     /// An image waits to be told where it goes.
     Choosing(Choice),
-    /// An update that erases all user data after it waits for the user to
-    /// agree; the version it brings.
-    Confirming { version: Option<String> },
+    /// An update waits for the user to agree: the version it brings, and
+    /// whether all user data is erased after it.
+    Confirming { version: Option<String>, wipe: bool },
     /// `overwriting` says whether the update writes over the running
     /// system.
     Updating { version: Option<String>, stage: Option<Stage>, overwriting: bool },
@@ -1970,14 +1972,14 @@ impl App {
             }
             return;
         }
-        if matches!(ev, Event::Image { .. } | Event::Wipes { .. } | Event::Finished(_)) {
+        if matches!(ev, Event::Image { .. } | Event::Ready { .. } | Event::Finished(_)) {
             self.wake(now);
         }
         let install = &mut self.state.install;
         match ev {
             Event::Waiting => *install = Install::Waiting,
             Event::Checking { size } => *install = Install::Checking { size },
-            Event::Wipes { version } => *install = Install::Confirming { version },
+            Event::Ready { version, wipe } => *install = Install::Confirming { version, wipe },
             Event::Installing { version } => *install = Install::Updating { version, stage: None, overwriting: false },
             Event::Overwriting => {
                 if let Install::Updating { overwriting, .. } = install {
@@ -2570,8 +2572,8 @@ impl App {
                                     false => fx.push(Effect::Wipe(chosen)),
                                 }
                             }
-                            Confirm::InstallWipe => {
-                                if let Install::Confirming { version } = &self.state.install {
+                            Confirm::Install | Confirm::InstallWipe => {
+                                if let Install::Confirming { version, .. } = &self.state.install {
                                     self.state.install = Install::Updating { version: version.clone(), stage: None, overwriting: false };
                                     fx.push(Effect::Install);
                                     self.refresh();
@@ -3684,8 +3686,8 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
         app.install(Event::Checking { size: 7_103_043_868 }, 0);
-        app.install(Event::Wipes { version: Some("OS3.0.306.0.WMACNXM".into()) }, 0);
-        assert_eq!(app.state.install, Install::Confirming { version: Some("OS3.0.306.0.WMACNXM".into()) });
+        app.install(Event::Ready { version: Some("OS3.0.306.0.WMACNXM".into()), wipe: true }, 0);
+        assert_eq!(app.state.install, Install::Confirming { version: Some("OS3.0.306.0.WMACNXM".into()), wipe: true });
         // The question lit the panel, so the user swipes past the wake guard.
         let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::InstallWipe)).unwrap().rect;
         let y = track.centre().1 - app.top().1;
@@ -3697,7 +3699,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::Sideload, "an update being written keeps the page");
 
         let mut app = sideloading(&f, &i);
-        app.install(Event::Wipes { version: None }, 0);
+        app.install(Event::Ready { version: None, wipe: true }, 0);
         assert_eq!(app.key(Key::Back, 1000), vec![Effect::Cancel], "turning it down cancels before anything is written");
         assert_eq!(app.state.install, Install::Ending);
         assert_eq!(app.screen(), Screen::Install);

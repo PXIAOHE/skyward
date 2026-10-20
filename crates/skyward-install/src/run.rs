@@ -1,10 +1,11 @@
-//! The installer: a thread that takes USB over for sideload, receives one
-//! package, installs it, and hands USB back to adb, telling the screen how
-//! it goes.
+//! The installer: a thread that installs one package, telling the screen
+//! how it goes. A package from the computer comes over USB, taken over for
+//! sideload and handed back to adb after; a file on the phone is read
+//! where it is.
 
 use crate::adb::{self, Connection, Offer};
 use crate::ffs::{Endpoints, Shared, Usb};
-use crate::fuse::{self, Fault, Mount};
+use crate::fuse::{self, Fault, LocalFile, Mount};
 use crate::image::{self, ImageKind};
 use crate::ota::{self, Log, Status};
 use crate::package::{self, Build, Package, Phone, Update};
@@ -17,7 +18,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -55,15 +56,25 @@ impl Installer {
     /// Take USB over and wait for `adb sideload`, from a thread of its own.
     /// `detach` runs before an update package is written.
     pub fn start(detach: Detach) -> Result<Installer> {
+        Installer::spawn(Origin::Computer, detach, run)
+    }
+
+    /// Install the file at `path`, from a thread of its own. `detach` runs
+    /// before an update package is written.
+    pub fn open(path: PathBuf, detach: Detach) -> Result<Installer> {
+        Installer::spawn(Origin::File, detach, move |ctx| run_file(ctx, &path))
+    }
+
+    fn spawn(origin: Origin, detach: Detach, work: impl FnOnce(&mut Context) -> Outcome + Send + 'static) -> Result<Installer> {
         let (wake, signal) = pipe(libc::O_NONBLOCK)?;
         let (event_tx, events) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let shared = Arc::new(Shared::default());
-        let mut ctx = Context { events: event_tx, signal, commands: command_rx, shared: shared.clone(), detach: Some(detach) };
+        let mut ctx = Context { events: event_tx, signal, commands: command_rx, shared: shared.clone(), detach: Some(detach), origin };
         let thread = thread::Builder::new()
             .name("installer".into())
             .spawn(move || {
-                let outcome = run(&mut ctx);
+                let outcome = work(&mut ctx);
                 let _ = kmsg(&format!("install: {outcome:?}"));
                 ctx.send(Event::Finished(outcome));
             })
@@ -89,13 +100,13 @@ impl Installer {
         let _ = self.commands.send(Command::Flash { partition, slots });
     }
 
-    /// Install the update the installer holds, which erases all user data
-    /// after it.
+    /// Install the update the installer holds.
     pub fn install(&self) {
         let _ = self.commands.send(Command::Install);
     }
 
-    /// Stop waiting for the computer, or for where an image goes.
+    /// Stop waiting for the computer, for where an image goes, or for an
+    /// update to be agreed to.
     pub fn cancel(&self) -> Result<()> {
         let _ = self.commands.send(Command::Cancel);
         if self.shared.cancel() {
@@ -116,6 +127,15 @@ impl Drop for Installer {
     }
 }
 
+/// Where the package comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The computer, with `adb sideload`.
+    Computer,
+    /// A file on the phone.
+    File,
+}
+
 struct Context {
     events: Sender<Event>,
     /// The write end of the wake pipe.
@@ -123,6 +143,7 @@ struct Context {
     commands: Receiver<Command>,
     shared: Arc<Shared>,
     detach: Option<Detach>,
+    origin: Origin,
 }
 
 impl Context {
@@ -191,7 +212,31 @@ fn receive(ctx: &mut Context, mut conn: Connection<Endpoints>, offer: Offer) -> 
     let done = install(ctx, &mount, offer.size).unwrap_or_else(Done::Error);
     let (mut conn, served) = mount.unmount();
     finish(&mut conn);
-    (conclude(done, served), conn)
+    (conclude(done, served, ctx.origin), conn)
+}
+
+/// Install the file at `path`, read where it is.
+fn run_file(ctx: &mut Context, path: &Path) -> Outcome {
+    let (file, offer) = match LocalFile::open(path) {
+        Ok(opened) => opened,
+        Err(e) => return failed(e),
+    };
+    let _ = kmsg(&format!("install: {}, {} bytes", path.display(), offer.size));
+    if offer.size == 0 {
+        return Outcome::Refused(Refusal::Unknown);
+    }
+    if let Err(e) = offer.check() {
+        return failed(anyhow!(e).context(format!("serve {}", path.display())));
+    }
+    ctx.send(Event::Checking { size: offer.size });
+    let mounted = match fuse::mount(offer) {
+        Ok(mounted) => mounted,
+        Err(e) => return failed(e),
+    };
+    let mount = mounted.serve(file);
+    let done = install(ctx, &mount, offer.size).unwrap_or_else(Done::Error);
+    let (_, served) = mount.unmount();
+    conclude(done, served, ctx.origin)
 }
 
 /// Tell the computer the package has been read, so `adb sideload` ends.
@@ -203,7 +248,7 @@ fn finish(conn: &mut Connection<Endpoints>) {
 
 /// The outcome, given how serving the package went: a package that stopped
 /// being readable explains whatever failed after.
-fn conclude(done: Done, served: Result<Option<Fault>>) -> Outcome {
+fn conclude(done: Done, served: Result<Option<Fault>>, origin: Origin) -> Outcome {
     match (done, served) {
         (Done::Decided(outcome), served) => {
             if let Err(e) = served {
@@ -212,7 +257,10 @@ fn conclude(done: Done, served: Result<Option<Fault>>) -> Outcome {
             outcome
         }
         (_, Err(e)) => failed(e.context("serve the package")),
-        (_, Ok(Some(Fault::Transfer(_)))) => Outcome::Failed(Failure::Disconnected),
+        (_, Ok(Some(Fault::Transfer(why)))) => Outcome::Failed(match origin {
+            Origin::Computer => Failure::Disconnected,
+            Origin::File => Failure::Unreadable(why),
+        }),
         (_, Ok(Some(Fault::Changed(_)))) => Outcome::Failed(Failure::Changed),
         (Done::Engine(code), Ok(None)) => Outcome::Failed(Failure::Engine(code)),
         (Done::Error(e), Ok(None)) => failed(e),
@@ -259,9 +307,10 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
     let version = update.version().map(str::to_string);
     let wipe = update.wipes();
     // Erasing all user data is the user's to agree to before the system
-    // they would come back to is written over.
-    if wipe {
-        ctx.send(Event::Wipes { version: version.clone() });
+    // they would come back to is written over, and so is an update a
+    // single tap on a file picked.
+    if wipe || ctx.origin == Origin::File {
+        ctx.send(Event::Ready { version: version.clone(), wipe });
         match ctx.commands.recv() {
             Ok(Command::Install) => {}
             Ok(Command::Cancel) | Err(_) => return Ok(Done::Decided(Outcome::Cancelled)),

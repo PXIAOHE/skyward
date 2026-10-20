@@ -4,14 +4,17 @@
 //! time, so whoever reads the file sees one package even if the copy it
 //! comes from changes underneath.
 
-use crate::adb::{Connection, Link, Offer};
-use anyhow::{anyhow, Result};
+use crate::adb::{Connection, Link, Offer, MAX_BLOCKS};
+use anyhow::{anyhow, Context, Result};
 use polyfuse_kernel::{
     fuse_attr, fuse_attr_out, fuse_entry_out, fuse_in_header, fuse_init_in, fuse_init_out, fuse_opcode, fuse_open_out,
     fuse_out_header, fuse_read_in, FUSE_COMPAT_22_INIT_OUT_SIZE, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION,
 };
 use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::mem::size_of;
+use std::os::unix::fs::FileExt;
+use std::path::Path;
 use zerocopy::{FromBytes, IntoBytes};
 
 pub const MOUNT_POINT: &str = "/sideload";
@@ -67,6 +70,41 @@ impl<L: Link> Source for Connection<L> {
     fn read_block(&mut self, index: u64, out: &mut [u8]) -> Result<(), String> {
         self.fetch(index, out).map_err(|e| e.to_string())
     }
+}
+
+/// The block size a file on the phone is served in, as the stock recovery
+/// serves one.
+const FILE_BLOCK: u32 = 64 * 1024;
+
+/// A package that is a file on the phone: in internal storage, or on a USB
+/// drive.
+pub struct LocalFile {
+    file: File,
+    block_size: u64,
+}
+
+impl LocalFile {
+    /// Open the file at `path` to serve, with its size and the block size
+    /// it is served in.
+    pub fn open(path: &Path) -> Result<(LocalFile, Offer)> {
+        let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let size = file.metadata().with_context(|| format!("look at {}", path.display()))?.len();
+        let block_size = file_block(size);
+        Ok((LocalFile { file, block_size: u64::from(block_size) }, Offer { size, block_size }))
+    }
+}
+
+impl Source for LocalFile {
+    fn read_block(&mut self, index: u64, out: &mut [u8]) -> Result<(), String> {
+        self.file.read_exact_at(out, index * self.block_size).map_err(|e| e.to_string())
+    }
+}
+
+/// The block size for a file of `size` bytes: the usual one, or a bigger
+/// one when the file has more blocks of it than the package may.
+fn file_block(size: u64) -> u32 {
+    let fits = size.div_ceil(MAX_BLOCKS).next_power_of_two();
+    u32::try_from(fits).map_or(u32::MAX, |b| b.max(FILE_BLOCK))
 }
 
 /// The filesystem's state: the package's blocks as served so far.
@@ -528,5 +566,50 @@ mod tests {
         let (h, _) = split(server.handle(&odd, &mut fetch).unwrap());
         assert_eq!(h.error, -libc::ENOSYS);
         assert!(server.handle(&[0; 8], &mut fetch).is_err());
+    }
+
+    #[test]
+    fn a_file_on_the_phone_is_served_in_blocks_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boot.img");
+        let content: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+        let (mut file, offer) = LocalFile::open(&path).unwrap();
+        assert_eq!(offer, Offer { size: 150_000, block_size: FILE_BLOCK });
+        assert!(offer.check().is_ok());
+        let mut server = Server::new(offer);
+        let mut fetch = |index: u64, out: &mut [u8]| file.read_block(index, out);
+        // Across the first block into the second, and the short last one.
+        let (h, body) = split(server.handle(&read_request(65_000, 1_000), &mut fetch).unwrap());
+        assert_eq!(h.error, 0);
+        assert_eq!(body, content[65_000..66_000]);
+        let (_, body) = split(server.handle(&read_request(131_072, 65_536), &mut fetch).unwrap());
+        assert_eq!(body[..18_928], content[131_072..]);
+        assert!(body[18_928..].iter().all(|&b| b == 0), "zeros past the end");
+    }
+
+    #[test]
+    fn a_file_cut_short_while_served_fails_the_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update.zip");
+        std::fs::write(&path, vec![7u8; 200_000]).unwrap();
+        let (mut file, offer) = LocalFile::open(&path).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_len(70_000).unwrap();
+        let mut server = Server::new(offer);
+        let mut fetch = |index: u64, out: &mut [u8]| file.read_block(index, out);
+        let (h, _) = split(server.handle(&read_request(65_536, 4096), &mut fetch).unwrap());
+        assert_eq!(h.error, -libc::EIO);
+        assert!(matches!(server.fault(), Some(Fault::Transfer(_))));
+    }
+
+    #[test]
+    fn a_file_too_big_for_the_usual_blocks_gets_bigger_ones() {
+        assert_eq!(file_block(0), FILE_BLOCK);
+        assert_eq!(file_block(7_103_041_280), FILE_BLOCK, "a whole system update");
+        assert_eq!(file_block(16 << 30), FILE_BLOCK, "the most the usual blocks hold");
+        assert_eq!(file_block((16 << 30) + 1), 2 * FILE_BLOCK);
+        let size = 100 << 30;
+        let offer = Offer { size, block_size: file_block(size) };
+        assert!(offer.check().is_ok());
     }
 }

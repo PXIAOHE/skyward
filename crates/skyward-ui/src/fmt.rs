@@ -479,6 +479,7 @@ pub fn failure(f: &Failure) -> (String, Option<String>) {
             (what.into(), Some(format!("错误代码：{code}")))
         }
         Failure::Disconnected => ("电脑已停止发送，请检查数据线连接后重新发送。".into(), None),
+        Failure::Unreadable(why) => ("读取文件失败。".into(), Some(why.clone())),
         Failure::Changed => ("文件在发送过程中被修改，请重新发送。".into(), None),
         Failure::Error(detail) => ("发生意外错误。".into(), Some(detail.clone())),
     }

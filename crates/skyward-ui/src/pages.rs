@@ -87,6 +87,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Slot => ("滑动以切换", true),
         Confirm::FactoryReset => ("滑动以恢复出厂设置", true),
         Confirm::DeleteEntry => ("滑动以删除", true),
+        Confirm::Install => ("滑动以安装", false),
         Confirm::InstallWipe => ("滑动以安装并清除", true),
     }
 }
@@ -706,16 +707,28 @@ pub fn sideload(cx: &Ctx) -> Frame {
             out.push(Hit { rect: track, action: Action::Confirm(Confirm::Flash) });
             widgets::footnote(&mut c, t, f, track.y + track.h, "刷入将覆盖分区中的原有内容。返回将取消刷入，并结束电脑上的 adb sideload。")
         }
-        Install::Confirming { version } => {
-            let what = match version {
-                Some(v) => format!("安装 {v} 后"),
-                None => "安装该更新后".into(),
+        Install::Confirming { version, wipe } => {
+            let (title, color, icon, detail, which) = if *wipe {
+                let what = match version {
+                    Some(v) => format!("安装 {v} 后"),
+                    None => "安装该更新后".into(),
+                };
+                ("需清除全部数据".to_string(), ORANGE, Icon::Wipe, format!("{what}将{}。", factory_reset(s)), Confirm::InstallWipe)
+            } else {
+                let title = match version {
+                    Some(v) => format!("安装 {v}"),
+                    None => "安装系统更新".into(),
+                };
+                let detail = match i.slot {
+                    Some(slot) => format!("新系统将安装到槽位 {}，重启后将从该槽位启动。", slot.other().letter()),
+                    None => "重启后将从新系统启动。".into(),
+                };
+                (title, GREEN, Icon::Install, detail, Confirm::Install)
             };
-            let detail = format!("{what}将{}。", factory_reset(s));
-            let y = widgets::list(&mut c, t, f, top, &[standing("需清除全部数据", ORANGE, Icon::Wipe, &detail)]).bottom;
-            let (label, danger) = confirm_label(Confirm::InstallWipe);
+            let y = widgets::list(&mut c, t, f, top, &[standing(&title, color, icon, &detail)]).bottom;
+            let (label, danger) = confirm_label(which);
             let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
-            out.push(Hit { rect: track, action: Action::Confirm(Confirm::InstallWipe) });
+            out.push(Hit { rect: track, action: Action::Confirm(which) });
             widgets::footnote(&mut c, t, f, track.y + track.h, "返回将取消安装，不会写入任何内容。")
         }
         Install::Updating { version, stage, overwriting } => {
