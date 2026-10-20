@@ -18,6 +18,10 @@ pub use image::{ImageKind, Ramdisk};
 pub use run::{Detach, Installer};
 use skyward_vab::{Slot, SnapshotState};
 
+/// Where the installer keeps what update_engine wrote while it last
+/// installed an update.
+pub const ENGINE_LOG: &str = "/tmp/update_engine.log";
+
 /// What the installer tells the screen, in the order it happens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {

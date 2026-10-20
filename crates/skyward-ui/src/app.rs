@@ -678,6 +678,8 @@ pub enum Action {
     LogPart(usize),
     /// Save the logs to /tmp, or to internal storage.
     LogsTo(usize),
+    /// Save the logs ticked where they are to go.
+    ExportLogs,
     /// Start next from this slot; `None` is the one running now.
     PickSlot(Option<Slot>),
     /// A key of the on-screen keyboard.
@@ -1108,6 +1110,10 @@ pub enum Effect {
     Delete(String),
     /// Stop the work on files under way.
     StopJob,
+    /// Save the logs chosen, the recovery's own and the kernel's, into a
+    /// folder of their own in internal storage or the temporary folder,
+    /// saying where with [`App::report`].
+    ExportLogs { recovery: bool, kernel: bool, storage: bool },
 }
 
 enum Drag {
@@ -2465,6 +2471,16 @@ impl App {
             Action::LogsTo(k) => {
                 self.state.logs_to = k;
                 self.refresh();
+            }
+            Action::ExportLogs => {
+                let ([recovery, kernel], storage) = (self.state.logs, self.state.logs_to == 1);
+                if !recovery && !kernel {
+                    self.say("请选择要导出的日志", now);
+                } else if storage && !self.state.data.storage_open() {
+                    self.say("请先完成「解密」", now);
+                } else {
+                    return vec![Effect::ExportLogs { recovery, kernel, storage }];
+                }
             }
             Action::PickSlot(slot) => {
                 self.state.next_slot = slot;
@@ -4032,6 +4048,22 @@ mod tests {
     }
 
     #[test]
+    fn logs_are_exported_as_ticked_where_they_can_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Logs, W, H, PPD);
+        let both = Effect::ExportLogs { recovery: true, kernel: true, storage: false };
+        assert_eq!(tap(&mut app, &f, &i, Action::ExportLogs), vec![both], "both, to the temporary folder, at first");
+        tap(&mut app, &f, &i, Action::LogPart(0));
+        tap(&mut app, &f, &i, Action::LogsTo(1));
+        assert!(tap(&mut app, &f, &i, Action::ExportLogs).is_empty(), "internal storage waits for the data partition");
+        assert_eq!(app.deadline(0), Some(TOAST_MS), "and says so");
+        app.data_waiting(None);
+        assert_eq!(tap(&mut app, &f, &i, Action::ExportLogs), vec![Effect::ExportLogs { recovery: false, kernel: true, storage: true }]);
+        tap(&mut app, &f, &i, Action::LogPart(1));
+        assert!(tap(&mut app, &f, &i, Action::ExportLogs).is_empty(), "nothing ticked, nothing saved");
+    }
+
+    #[test]
     fn a_time_zone_chosen_is_the_one_kept() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
@@ -4689,18 +4721,6 @@ mod tests {
         assert_eq!(rows.within(351.0, 700.0), 0..3);
         assert_eq!(rows.within(700.0, 5000.0), 2..3);
         assert_eq!(rows.within(934.0, 5000.0), 3..3);
-    }
-
-    #[test]
-    fn logs_are_chosen_and_their_place_picked() {
-        let (f, i) = (fonts(), info());
-        let mut app = App::new(Screen::Logs, W, H, PPD);
-        tap(&mut app, &f, &i, Action::LogPart(1));
-        assert_eq!(app.state.logs, [true, false]);
-        tap(&mut app, &f, &i, Action::LogsTo(1));
-        assert_eq!(app.state.logs_to, 1);
-        tap(&mut app, &f, &i, Action::Unavailable("暂不支持导出日志"));
-        assert_eq!(app.deadline(0), Some(TOAST_MS));
     }
 
     #[test]

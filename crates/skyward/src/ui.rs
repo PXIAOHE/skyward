@@ -22,6 +22,7 @@ use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -36,6 +37,11 @@ const LEAVE_AFTER_MS: u64 = 1500;
 
 /// Where the USB drive plugged in is shown.
 const USB_DRIVE: &str = "/mnt/usb";
+
+/// Where logs saved to the temporary folder go, and where in internal
+/// storage the others do.
+const TMP_LOGS: &str = "/tmp/skyward-logs";
+const STORAGE_LOGS: &str = "Skyward/logs";
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
@@ -196,6 +202,36 @@ fn in_place(place: Place, path: &str) -> PathBuf {
     } else {
         top.join(path)
     }
+}
+
+/// Save the logs chosen into a folder of their own in `into`, named by when
+/// they were saved in the zone the settings chose: the recovery's own, with
+/// what update_engine wrote while it last installed an update, and the
+/// kernel's. Each file is owned as a copy into the folder would be. Gives
+/// the folder.
+fn export_logs(recovery: bool, kernel: bool, into: &Path, zone: usize) -> Result<PathBuf> {
+    let there = into.ancestors().find(|p| p.exists()).context("the root is always there")?;
+    let ownership = ownership(there)?;
+    let folder = into.join(skyward_ui::fmt::stamp(unix_now()?, zone));
+    skyward_files::make_folders(&folder, ownership)?;
+    let save = |name: &str, contents: &[u8]| -> Result<()> {
+        let path = folder.join(name);
+        let mut file = skyward_files::make_file(&path, ownership)?;
+        file.write_all(contents).with_context(|| format!("write {}", path.display()))?;
+        file.sync_all().with_context(|| format!("write {}", path.display()))
+    };
+    if recovery {
+        save("recovery.log", &fs::read(skyward_sys::LOG).with_context(|| format!("read {}", skyward_sys::LOG))?)?;
+        match fs::read(skyward_install::ENGINE_LOG) {
+            Ok(engine) => save("update_engine.log", &engine)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("read {}", skyward_install::ENGINE_LOG)),
+        }
+    }
+    if kernel {
+        save("kernel.log", skyward_sys::kernel_log()?.as_bytes())?;
+    }
+    Ok(folder)
 }
 
 /// Now, in Unix seconds.
@@ -1033,6 +1069,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.file_job_started(FileTask::Delete { path });
                     }
                     Effect::StopJob => worker.as_ref().context("there is no work on files to stop")?.stop(),
+                    // Logs that cannot be saved are the page's to report;
+                    // the recovery carries on.
+                    Effect::ExportLogs { recovery, kernel, storage } => {
+                        let into = match storage {
+                            true => Path::new(skyward_crypto::data::SDCARD).join(STORAGE_LOGS),
+                            false => PathBuf::from(TMP_LOGS),
+                        };
+                        match export_logs(recovery, kernel, &into, app.state.time_zone) {
+                            Ok(folder) => app.report(&format!("已导出到 {}", folder.display()), now),
+                            Err(e) => app.report(&format!("导出失败：{e:#}"), now),
+                        }
+                    }
                     Effect::Rename { path, name } => match skyward_files::rename(Path::new(&path), &name) {
                         Ok(_) => {
                             app.renamed(Ok(()), now);

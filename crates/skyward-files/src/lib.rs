@@ -1,7 +1,8 @@
 //! Copying, moving, renaming and deleting files and folders the way a file
-//! manager does: folders whole, links as links, times kept, each new entry
-//! owned as asked, by what the original had or by what the folder it goes
-//! into gives its own, and how far the work has come told as it goes.
+//! manager does, and making new ones: folders whole, links as links, times
+//! kept, each new entry owned as asked, by what the original had or by
+//! what the folder it goes into gives its own, and how far the work has
+//! come told as it goes.
 
 use anyhow::{bail, ensure, Context, Result};
 use std::ffi::OsStr;
@@ -355,6 +356,47 @@ pub fn move_into(
             }
             Err(e) => return Err(e).with_context(|| format!("move {} to {}", from.display(), to.display())),
         }
+    }
+    Ok(())
+}
+
+/// Make the folder `path` and each folder it is in that is not there yet,
+/// each new one given what `ownership` says, as a copy into the folder it
+/// is in would be.
+pub fn make_folders(path: &Path, ownership: Ownership) -> Result<()> {
+    if exists(path)? {
+        return Ok(());
+    }
+    let into = path.parent().filter(|p| !p.as_os_str().is_empty()).with_context(|| format!("{} is in no folder", path.display()))?;
+    make_folders(into, ownership)?;
+    let give = give(into, ownership)?;
+    fs::create_dir(path).with_context(|| format!("make {}", path.display()))?;
+    given(path, &give, true)
+}
+
+/// Make the file `path`, which is not there yet, given what `ownership`
+/// says as a copy into its folder would be, and open it to be written.
+pub fn make_file(path: &Path, ownership: Ownership) -> Result<File> {
+    let into = path.parent().filter(|p| !p.as_os_str().is_empty()).with_context(|| format!("{} is in no folder", path.display()))?;
+    let give = give(into, ownership)?;
+    let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).with_context(|| format!("make {}", path.display()))?;
+    given(path, &give, false)?;
+    Ok(file)
+}
+
+/// Give an entry just made what `give` says, where it is the folder's: its
+/// label and owner and, in shared storage, its permissions, a file's
+/// without execute. One that keeps an original's keeps what it was made
+/// with, as there is no original.
+fn given(path: &Path, give: &Give, folder: bool) -> Result<()> {
+    let Give::Folder(like) = give else { return Ok(()) };
+    if let Some(label) = &like.label {
+        set_label(path, label)?;
+    }
+    std::os::unix::fs::lchown(path, Some(like.uid), Some(like.gid)).with_context(|| format!("give {} its owner", path.display()))?;
+    if let Some(mode) = like.mode {
+        let mode = if folder { mode } else { mode & 0o666 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).with_context(|| format!("give {} its permissions", path.display()))?;
     }
     Ok(())
 }
@@ -726,6 +768,20 @@ mod tests {
         assert_eq!(fs::read(at.join(".profile")).unwrap(), b"x", "the original stays");
         assert_eq!(fs::read(at.join(".profile (1)")).unwrap(), b"x");
         assert_eq!(fs::read(at.join(".profile (2)")).unwrap(), b"x", "whatever is chosen for names taken by others");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn folders_and_files_are_made_where_they_are_missing() {
+        let at = scratch("make");
+        let deep = at.join("Skyward").join("logs").join("20261021-133000");
+        make_folders(&deep, Ownership::Kept).unwrap();
+        assert!(deep.is_dir(), "with every folder on the way");
+        make_folders(&deep, Ownership::Kept).unwrap();
+        let mut log = make_file(&deep.join("kernel.log"), Ownership::Kept).unwrap();
+        log.write_all(b"x").unwrap();
+        assert_eq!(fs::read(deep.join("kernel.log")).unwrap(), b"x");
+        assert!(make_file(&deep.join("kernel.log"), Ownership::Kept).is_err(), "a file there already is not made over");
         fs::remove_dir_all(&at).unwrap();
     }
 

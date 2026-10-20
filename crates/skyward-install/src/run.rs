@@ -9,7 +9,7 @@ use crate::fuse::{self, Fault, LocalFile, Mount};
 use crate::image::{self, ImageKind};
 use crate::ota::{self, Log, Status};
 use crate::package::{self, Build, Package, Phone, Update};
-use crate::{Command, Event, Failure, Outcome, Refusal, Stage};
+use crate::{Command, Event, Failure, Outcome, Refusal, Stage, ENGINE_LOG};
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
 use skyward_info::Charge;
 use skyward_sys::{kmsg, prop};
@@ -29,9 +29,6 @@ use std::time::{Duration, Instant};
 /// the installed system's partitions, so whatever still runs from them has
 /// to move off first.
 pub type Detach = Box<dyn FnOnce() -> Result<()> + Send>;
-
-/// update_engine's log, kept for looking into an install afterwards.
-const ENGINE_LOG: &str = "/tmp/update_engine.log";
 
 const METADATA: &str = "/metadata";
 

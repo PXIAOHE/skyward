@@ -341,6 +341,13 @@ pub fn clock(unix: i64, zone: usize) -> String {
     format!("{:02}:{:02}", t.hour(), t.minute())
 }
 
+/// A Unix time in the zone at `zone` in [`TIME_ZONES`], to the second, as
+/// the name of what is saved then, which sorts by it: `20261021-133000`.
+pub fn stamp(unix: i64, zone: usize) -> String {
+    let t = local(unix, zone);
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", t.year(), t.month(), t.day(), t.hour(), t.minute(), t.second())
+}
+
 /// A file's type and permissions as `ls -l` prints them: `drwxr-xr-x`.
 pub fn mode(mode: u32) -> String {
     let kind = match mode & 0o170_000 {
@@ -610,6 +617,7 @@ mod tests {
         assert_eq!(clock(1_792_348_260, 0), "02:31");
         // Midnight in Beijing is 16:00 UTC the day before.
         assert_eq!(clock(1_792_339_200, 0), "00:00");
+        assert_eq!(stamp(1_792_348_265, 0), "20261019-023105");
     }
 
     /// Where a zone named in the tz database is in [`TIME_ZONES`].

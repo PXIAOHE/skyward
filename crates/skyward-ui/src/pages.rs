@@ -1387,15 +1387,15 @@ pub fn logs(cx: &Ctx) -> Frame {
     ]);
     out.extend(hits(&parts.rows, &[Action::LogPart(0), Action::LogPart(1)]));
     let y = widgets::section(&mut c, t, f, parts.bottom, "保存到");
-    let storage = if cx.state.data == Data::Open { "Skyward/logs 文件夹" } else { "需先完成「解密」" };
+    let storage = if cx.state.data.storage_open() { "Skyward/logs 文件夹" } else { "需先完成「解密」" };
     let places = widgets::list(&mut c, t, f, y, &[
         Row::new("临时文件夹").subtitle("/tmp/skyward-logs，可通过 adb pull 导出到电脑").trail(Trail::Check(s.logs_to == 0)),
         Row::new("内部存储").subtitle(storage).trail(Trail::Check(s.logs_to == 1)),
     ]);
     out.extend(hits(&places.rows, &[Action::LogsTo(0), Action::LogsTo(1)]));
-    let y = widgets::footnote(&mut c, t, f, places.bottom, "重启后将清空临时文件夹。");
+    let y = widgets::footnote(&mut c, t, f, places.bottom, "每次导出保存在以导出时间命名的文件夹中。重启后将清空临时文件夹。");
     let export = widgets::button(&mut c, t, f, y + t.m.dp(24.0), "导出");
-    out.push(Hit { rect: export, action: Action::Unavailable("暂不支持导出日志") });
+    out.push(Hit { rect: export, action: Action::ExportLogs });
     Frame::new(t, c, out, "导出日志", top)
 }
 
