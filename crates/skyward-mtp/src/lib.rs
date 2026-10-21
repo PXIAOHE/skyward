@@ -8,4 +8,11 @@ pub mod responder;
 pub mod store;
 pub mod time;
 
+#[cfg(target_os = "android")]
+mod service;
+#[cfg(target_os = "android")]
+mod usb;
+
 pub use responder::{Device, Storage};
+#[cfg(target_os = "android")]
+pub use service::Service;

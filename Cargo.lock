@@ -1343,9 +1343,11 @@ dependencies = [
 name = "skyward-mtp"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "jiff",
  "libc",
  "skyward-files",
+ "skyward-sys",
  "zerocopy",
 ]
 
