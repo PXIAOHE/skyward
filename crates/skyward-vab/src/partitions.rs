@@ -166,6 +166,39 @@ pub fn unmap_whole(whole: &Whole) -> Result<()> {
     dm::remove(&whole.name)
 }
 
+/// Map each of the slot's logical partitions that is not mapped yet,
+/// writable and under its own name, as recoveries map them for install
+/// scripts, which look for them at /dev/block/mapper/<name>; while no
+/// update snapshot is outstanding. Gives the names it mapped.
+pub fn map_slot(slot: Slot) -> Result<Vec<String>> {
+    ensure_no_snapshot()?;
+    let super_dev = super_device();
+    let md = skyward_lp::read(&super_dev, slot.number())?;
+    let devices = block_devices(&md, &super_dev)?;
+    let mut mapped = Vec::new();
+    for p in slot_partitions(&md, slot) {
+        if dm::status(&p.name)?.is_some() {
+            continue;
+        }
+        if let Err(e) = dm::create(&p.name, &targets(p, &devices), false) {
+            return Err(match unmap_slot(&mapped) {
+                Ok(()) => e,
+                Err(r) => e.context(format!("removing what was mapped before failed too: {r:#}")),
+            });
+        }
+        mapped.push(p.name.clone());
+    }
+    Ok(mapped)
+}
+
+/// Remove the mappings [`map_slot`] made.
+pub fn unmap_slot(names: &[String]) -> Result<()> {
+    for name in names {
+        dm::remove(name)?;
+    }
+    Ok(())
+}
+
 /// Map and mount one of the slot's logical partitions read-only by its base
 /// name (such as `system` or `vendor`), while no update snapshot is
 /// outstanding.

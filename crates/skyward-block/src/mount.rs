@@ -143,6 +143,12 @@ mod sys {
         Ok(mounts()?.iter().any(|m| m.mount_point == path))
     }
 
+    /// Every mount by its id, which no other mount has while it stays, and
+    /// where it is, in the order they were made.
+    pub fn mount_ids() -> Result<Vec<(i32, PathBuf)>> {
+        Ok(mounts()?.into_iter().map(|m| (m.mnt_id, m.mount_point)).collect())
+    }
+
     /// Where the device numbered `device` is mounted.
     pub fn points_of(device: (u32, u32)) -> Result<Vec<PathBuf>> {
         let mut out = Vec::new();
@@ -433,6 +439,10 @@ mod sys {
         bail!("this host has no mount table to look up")
     }
 
+    pub fn mount_ids() -> Result<Vec<(i32, std::path::PathBuf)>> {
+        bail!("this host has no mount table to look up")
+    }
+
     pub fn remount_writable(target: &Path, _writable: bool) -> Result<()> {
         bail!("this host does not mount {}", target.display())
     }
@@ -447,8 +457,8 @@ mod sys {
 }
 
 pub use sys::{
-    bind, holders, holding, is_mount_point, mount, mount_ro, mount_ro_over, points_of, remount_writable, umount, umount_detach,
-    umount_detach_over, umount_over, visible,
+    bind, holders, holding, is_mount_point, mount, mount_ids, mount_ro, mount_ro_over, points_of, remount_writable, umount,
+    umount_detach, umount_detach_over, umount_over, visible,
 };
 
 #[cfg(test)]
