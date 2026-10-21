@@ -458,6 +458,11 @@ fn adopt_installed_version(slot: skyward_vab::Slot) -> Result<()> {
 fn recovery() -> Result<()> {
     let run = || -> Result<()> {
         skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
+        // A recovery that ended with a function of its own in the port took
+        // the port with it; going through "none" takes that function off.
+        if skyward_sys::prop("sys.usb.state").is_some_and(|s| s != "adb") {
+            skyward_sys::usb::set("none", std::time::Duration::from_secs(5))?;
+        }
         skyward_sys::set_prop("sys.usb.config", "adb")?;
         let misc = bcb::misc();
         let message = bcb::read(&misc)?;

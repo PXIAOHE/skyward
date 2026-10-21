@@ -9,6 +9,7 @@ pub mod bcb;
 pub mod clock;
 pub mod control;
 pub mod ueventd;
+pub mod usb;
 
 /// A system property, or `None` when it is unset.
 #[cfg(target_os = "android")]

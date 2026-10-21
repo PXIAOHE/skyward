@@ -1,10 +1,12 @@
 //! The adb function over USB through FunctionFS, set up the way the
-//! recovery's own adbd sets it up, and moving the phone's USB between adb
-//! and sideload with the init rules the recovery ramdisk has.
+//! recovery's own adbd sets it up, and moving the phone's USB between what
+//! it offers at rest and sideload with the init rules the recovery ramdisk
+//! has.
 
 use crate::adb::Link;
 use anyhow::{bail, ensure, Context, Result};
-use skyward_sys::{prop, set_prop};
+use skyward_sys::set_prop;
+use skyward_sys::usb::{resting, set};
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem::size_of;
@@ -12,7 +14,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use zerocopy::little_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -409,11 +411,12 @@ pub struct Usb {
 impl Usb {
     /// Take USB over from adbd and offer the adb function for sideload;
     /// `shared` is how the endpoints' users are told to stop waiting. If
-    /// that fails, adb comes back before the error is returned.
+    /// that fails, the port goes back to what it offers at rest before the
+    /// error is returned.
     pub fn open(shared: Arc<Shared>) -> Result<(Usb, Endpoints)> {
-        switch("none")?;
+        set("none", SWITCH)?;
         Usb::take(shared).or_else(|e| {
-            switch("adb").with_context(|| format!("after {e:#}"))?;
+            set(resting(), SWITCH).with_context(|| format!("after {e:#}"))?;
             Err(e)
         })
     }
@@ -446,19 +449,19 @@ impl Usb {
         let usb = Usb { stop: Some(stop), control: Some(control) };
 
         set_prop("sys.usb.ffs.ready", "1")?;
-        switch("sideload")?;
+        set("sideload", SWITCH)?;
         Ok((usb, Endpoints { out, inn, shared }))
     }
 
-    /// Hand USB back to adbd. Every endpoint closes first, so adbd finds
-    /// the function free; adb comes back before any error from the control
-    /// thread is returned.
+    /// Hand USB back to what it offers at rest. Every endpoint closes
+    /// first, so adbd finds the function free; the port is back before any
+    /// error from the control thread is returned.
     pub fn close(mut self, endpoints: Endpoints) -> Result<()> {
-        switch("none")?;
+        set("none", SWITCH)?;
         drop(endpoints);
         let answered = self.stop_control();
         drop(self);
-        switch("adb")?;
+        set(resting(), SWITCH)?;
         answered
     }
 
@@ -518,24 +521,4 @@ fn answer(ep0: &File, stop: &OwnedFd, shared: &Shared) -> Result<()> {
             other => bail!("unknown USB control event {other}"),
         }
     }
-}
-
-/// Ask init for USB configuration `config` and wait until it is in place.
-/// Leaving adb also waits for adbd to be gone, so its ep0 is closed.
-fn switch(config: &str) -> Result<()> {
-    set_prop("sys.usb.config", config)?;
-    wait_for(&format!("sys.usb.state to become {config}"), || prop("sys.usb.state").as_deref() == Some(config))?;
-    if config == "none" {
-        wait_for("adbd to stop", || matches!(prop("init.svc.adbd").as_deref(), None | Some("stopped")))?;
-    }
-    Ok(())
-}
-
-fn wait_for(what: &str, done: impl Fn() -> bool) -> Result<()> {
-    let start = Instant::now();
-    while !done() {
-        ensure!(start.elapsed() < SWITCH, "gave up waiting for {what}");
-        thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
 }

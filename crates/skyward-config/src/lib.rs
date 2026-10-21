@@ -20,6 +20,8 @@ pub mod ramdisk {
     pub const PROP_DEFAULT: &str = "prop.default";
     /// The scheduling profiles libprocessgroup reads.
     pub const TASK_PROFILES: &str = "system/etc/task_profiles.json";
+    /// The init rules that set up file transfer's USB function.
+    pub const MTP_RC: &str = "system/etc/init/skyward-mtp.rc";
 
     /// Whether the running root is Skyward's recovery ramdisk.
     pub fn in_recovery() -> bool {
