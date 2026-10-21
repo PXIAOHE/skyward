@@ -39,6 +39,10 @@ const STORAGE_NAME: &str = "内部存储设备";
 /// before the phone starts the system or powers off.
 const LEAVE_AFTER_MS: u64 = 1500;
 
+/// How long after the screen starts a touch panel may still come up; with
+/// none by then, the pages are worked with the keys, their light shown.
+const TOUCH_WAIT: Duration = Duration::from_secs(5);
+
 /// Where the USB drive plugged in is shown.
 const USB_DRIVE: &str = "/mnt/usb";
 
@@ -756,6 +760,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h)?;
+    let started = Instant::now();
+    let mut touch_known = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
@@ -890,6 +896,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if leave_at.is_some_and(|at| now >= at) {
             leave_at = None;
             power(leave)?;
+        }
+        if !touch_known && started.elapsed() >= TOUCH_WAIT {
+            touch_known = true;
+            if !inputs.has_panel() {
+                skyward_sys::kmsg("no touch panel came up; the pages are worked with the keys")?;
+                app.touchscreen_missing();
+            }
         }
         for fx in app.tick(now) {
             match fx {

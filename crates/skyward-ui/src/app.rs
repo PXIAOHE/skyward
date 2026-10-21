@@ -3400,6 +3400,13 @@ impl App {
         fx
     }
 
+    /// No touchscreen answers: the keys work the pages, their light shown
+    /// from now on.
+    pub fn touchscreen_missing(&mut self) {
+        self.keys = true;
+        self.dirty = true;
+    }
+
     /// A button went down. With the keys working the page, the volume keys
     /// move the light from control to control and the power key works the
     /// one lit as it comes back up; otherwise the first volume press lights
@@ -4839,6 +4846,18 @@ mod tests {
         app.touch(Touch::Up, &f, 0);
         assert!(app.key(Key::Power, 0).is_empty());
         assert!(!app.display_on(), "with the light put out, power turns the panel off");
+    }
+
+    #[test]
+    fn without_a_touchscreen_the_first_control_is_lit_at_once() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.frame(&f, &i);
+        assert_eq!(app.light(0.0), None, "a page opens to the touch");
+        app.touchscreen_missing();
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))));
+        assert!(app.light(0.0).is_some(), "lit before any key is pressed");
+        assert!(app.take_dirty(), "and shown");
     }
 
     #[test]

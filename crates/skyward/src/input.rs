@@ -249,6 +249,11 @@ impl Inputs {
         }
     }
 
+    /// Whether a touch panel has come up.
+    pub fn has_panel(&self) -> bool {
+        self.panel.is_some()
+    }
+
     pub fn fds(&self) -> Vec<RawFd> {
         let mut fds = vec![self.watch.as_raw_fd()];
         fds.extend(self.panel.iter().map(|p| p.dev.as_raw_fd()));
