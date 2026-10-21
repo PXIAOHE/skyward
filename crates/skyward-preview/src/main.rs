@@ -253,7 +253,7 @@ fn main() -> Result<()> {
         app.state.install = install;
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 81] = [
+    let pages: [PageShot; 83] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -354,6 +354,8 @@ fn main() -> Result<()> {
         ("51-files-dark", Screen::Files, true, &|app| app.set_files("/".into(), Ok(sample_root()), LISTED)),
         ("52-file-info-light", Screen::FileInfo, false, &|app| app.state.file = sample_root().into_iter().find(|e| e.name == "init.environ.rc")),
         ("61-files-names-light", Screen::Files, false, &|app| app.set_files("/sdcard/Download".into(), Ok(sample_download()), LISTED)),
+        ("110-files-types-light", Screen::Files, false, &|app| app.set_files("/sdcard/Download".into(), Ok(sample_types()), LISTED)),
+        ("110-files-types-dark", Screen::Files, true, &|app| app.set_files("/sdcard/Download".into(), Ok(sample_types()), LISTED)),
         ("62-files-empty-light", Screen::Files, false, &|app| app.set_files("/cust".into(), Ok(Vec::new()), LISTED)),
         ("63-files-unreadable-dark", Screen::Files, true, &|app| {
             app.set_files("/sys/kernel/debug".into(), Err("read /sys/kernel/debug: Permission denied (os error 13)".into()), LISTED)
@@ -692,6 +694,32 @@ fn sample_download() -> Vec<FileRow> {
         file("README.txt", 900, today),
         file("skyward-recovery-ishtar.img", 104_857_600, today),
     ]
+}
+
+/// A folder holding a file of each type the list draws an icon of its own
+/// for, and one it does not know, in the file manager's order.
+fn sample_types() -> Vec<FileRow> {
+    let made = LISTED - 2 * 3600;
+    let mut rows: Vec<FileRow> = [
+        ("boot.img", 100_663_296),
+        ("IMG_20261021_143005.jpg", 4_812_000),
+        ("update-ishtar.zip", 1_402_000_000),
+        ("app-release.apk", 11_300_000),
+        ("recovery.log", 486_000),
+        ("VID_20261020_201512.mp4", 182_400_000),
+        ("会议录音.m4a", 8_900_000),
+        ("build.prop", 3_200),
+        ("年度报告.docx", 268_000),
+        ("预算.xlsx", 54_000),
+        ("方案汇报.pptx", 6_100_000),
+        ("用户手册.pdf", 2_300_000),
+        ("persist.bak", 33_554_432),
+    ]
+    .into_iter()
+    .map(|(name, size)| file(name, size, made))
+    .collect();
+    rows.sort_by_key(|r| r.name.to_lowercase());
+    rows
 }
 
 /// A Xiaomi 13 Ultra's /system/bin: programs, and the links to toybox that

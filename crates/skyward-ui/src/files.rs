@@ -6,6 +6,7 @@ use crate::font::{Face, Fonts};
 use crate::geom::Rect;
 use crate::theme::Theme;
 use crate::widgets;
+use std::f32::consts::FRAC_PI_2;
 use std::path::{Component, Path};
 
 // The file manager's list as the stock file manager draws a folder: rows
@@ -94,6 +95,64 @@ pub fn page(t: &Theme) -> Rgba {
     palette(t).page
 }
 
+/// What a file holds, as its icon shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileType {
+    Archive,
+    /// A partition's image, as a recovery installs it.
+    DiskImage,
+    Picture,
+    Video,
+    Audio,
+    /// An Android app to install.
+    Package,
+    Text,
+    /// Scripts, markup and settings.
+    Code,
+    Document,
+    Spreadsheet,
+    Presentation,
+    Pdf,
+    Other,
+}
+
+/// The extensions of each type, in lower case: those the stock file
+/// manager gives an icon of their own, grouped as it colours them, and the
+/// compressed files and images a recovery handles besides.
+const TYPES: [(FileType, &[&str]); 12] = [
+    (FileType::Archive, &["zip", "rar", "7z", "tar", "gz", "tgz", "xz", "bz2", "lz4", "zst"]),
+    (FileType::DiskImage, &["img", "iso"]),
+    (FileType::Picture, &["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "dng", "svg", "tif", "tiff", "ico", "avif", "arw", "cr2", "nef", "psd"]),
+    (FileType::Video, &["mp4", "mkv", "mov", "avi", "3gp", "3gpp", "webm", "m4v", "ts", "flv", "wmv", "mpeg", "mpg", "rm", "rmvb", "vob", "mts", "m2ts", "f4v"]),
+    (FileType::Audio, &["mp3", "flac", "aac", "m4a", "wav", "ogg", "oga", "opus", "amr", "ape", "wma", "mid", "midi", "mka", "aif", "aiff", "ac3", "dsf", "dff", "awb"]),
+    (FileType::Package, &["apk", "apks", "xapk"]),
+    (FileType::Text, &["txt", "log", "md", "ini", "lrc"]),
+    (FileType::Code, &["xml", "html", "htm", "json", "sh", "py", "js", "css", "cfg", "conf", "prop", "rc", "yaml", "yml", "toml"]),
+    (FileType::Document, &["doc", "docx", "wps", "wpt", "odt", "rtf", "pages"]),
+    (FileType::Spreadsheet, &["xls", "xlsx", "et", "ett", "ods", "csv", "numbers"]),
+    (FileType::Presentation, &["ppt", "pptx", "pps", "dps", "dpt", "odp"]),
+    (FileType::Pdf, &["pdf"]),
+];
+
+/// What the file called `name` holds, by its extension in any case.
+pub fn file_type(name: &str) -> FileType {
+    let Some(ext) = Path::new(name).extension() else { return FileType::Other };
+    let ext = ext.to_string_lossy().to_ascii_lowercase();
+    TYPES.iter().find(|(_, exts)| exts.contains(&ext.as_str())).map_or(FileType::Other, |&(kind, _)| kind)
+}
+
+/// The colour of a type's sheet, as the stock list colours it.
+fn sheet(kind: FileType) -> Rgba {
+    match kind {
+        FileType::Archive | FileType::DiskImage | FileType::Code | FileType::Document => Rgba::rgb(52, 130, 255),
+        FileType::Picture | FileType::Video => Rgba::rgb(119, 103, 249),
+        FileType::Audio | FileType::Pdf => Rgba::rgb(250, 56, 46),
+        FileType::Package | FileType::Spreadsheet => Rgba::rgb(29, 205, 58),
+        FileType::Presentation => Rgba::rgb(255, 105, 0),
+        FileType::Text | FileType::Other => Rgba::rgb(140, 157, 176),
+    }
+}
+
 fn name_width(t: &Theme) -> f32 {
     t.m.w as f32 - t.m.dp(TEXT_X_DP) - t.m.dp(TEXT_RIGHT_DP)
 }
@@ -176,7 +235,11 @@ pub fn row(c: &mut Canvas, t: &Theme, f: &Fonts, e: &FileRow, now: i64, zone: us
     if folder {
         folder_icon(c, ix, iy, size);
     } else {
-        file_icon(c, ix, iy, size, p.page);
+        let kind = match e.kind {
+            FileKind::Special => FileType::Other,
+            _ => file_type(&e.name),
+        };
+        file_icon(c, f, ix, iy, size, p.page, kind);
     }
     let (x, w) = (m.dp(TEXT_X_DP), name_width(t));
     let lines = name_lines(&f.heading, m.dp(NAME_DP), &e.name, w);
@@ -210,16 +273,143 @@ fn folder_icon(c: &mut Canvas, x: f32, y: f32, size: f32) {
     c.fill_round_rect_paint(x + 3.0 * u, y0, 34.0 * u, 10.0 * u, 1.45 * u, &front);
 }
 
-/// A plain document 40 units square scaled to `size`, in slate with its top
-/// right corner folded over; `page` is the colour around it.
-fn file_icon(c: &mut Canvas, x: f32, y: f32, size: f32, page: Rgba) {
+/// A file 40 units square scaled to `size`: a sheet with its top right
+/// corner folded down, in the colour of what the file holds, and a sign of
+/// that in white; `page` is the colour around it.
+fn file_icon(c: &mut Canvas, f: &Fonts, x: f32, y: f32, size: f32, page: Rgba, kind: FileType) {
     let u = size / 40.0;
     let at = |v: f32, w: f32| (x + v * u, y + w * u);
-    let sheet = Rgba::rgb(140, 157, 176);
-    c.fill_round_rect(x + 4.0 * u, y, 32.0 * u, 40.0 * u, 7.0 * u, sheet);
-    // The corner cut away, and the flap folded down over the sheet.
-    c.fill_convex(&[at(25.0, -0.5), at(36.5, -0.5), at(36.5, 11.0)], page);
-    c.fill_convex(&[at(25.0, 0.0), at(25.0, 11.0), at(36.0, 11.0)], mix(sheet, Rgba::rgb(255, 255, 255), 0.3));
+    let color = sheet(kind);
+    c.fill_round_rect(x + 4.0 * u, y, 32.0 * u, 40.0 * u, 8.0 * u, color);
+    // The corner cut away along the fold, and the flap folded down over the
+    // sheet, its inner corner rounded.
+    c.fill_convex(&[at(25.5, -0.5), at(36.5, -0.5), at(36.5, 10.5)], page);
+    let mut flap = vec![at(25.0, 0.0), at(26.0, 0.0), at(36.0, 10.0), at(36.0, 11.0)];
+    flap.extend((0..=8).map(|k| {
+        let a = FRAC_PI_2 * (1.0 + k as f32 / 8.0);
+        at(31.4 + 6.4 * a.cos(), 4.6 + 6.4 * a.sin())
+    }));
+    c.fill_convex(&flap, mix(color, WHITE, 0.3));
+    sign(c, f, kind, x, y, u, color);
+}
+
+const WHITE: Rgba = Rgba::rgb(255, 255, 255);
+
+/// The white sign of what a file holds, on its sheet at (`x`, `y`) in
+/// units of `u` pixels; `sheet` is the sheet's colour, for what is cut out
+/// of the sign.
+fn sign(c: &mut Canvas, f: &Fonts, kind: FileType, x: f32, y: f32, u: f32, sheet: Rgba) {
+    let at = |v: f32, w: f32| (x + v * u, y + w * u);
+    let line = |c: &mut Canvas, a: (f32, f32), b: (f32, f32), t: f32, color: Rgba| {
+        let (p, q) = (at(a.0, a.1), at(b.0, b.1));
+        c.line(p.0, p.1, q.0, q.1, t * u, color);
+    };
+    // A sector of a circle, from straight up to straight right.
+    let quarter = |cx: f32, cy: f32, r: f32| -> Vec<(f32, f32)> {
+        let arc = (0..=8).map(|k| {
+            let a = FRAC_PI_2 * (k as f32 / 8.0 - 1.0);
+            at(cx + r * a.cos(), cy + r * a.sin())
+        });
+        std::iter::once(at(cx, cy)).chain(arc).collect()
+    };
+    match kind {
+        // The zip's teeth down from the top edge, and its pull.
+        FileType::Archive => {
+            for k in 0..7 {
+                let left = if k % 2 == 0 { 20.0 } else { 18.3 };
+                c.fill_rect(x + left * u, y + (1.6 + 2.5 * k as f32) * u, 1.7 * u, 1.5 * u, WHITE);
+            }
+            c.fill_round_rect(x + 17.3 * u, y + 19.6 * u, 5.4 * u, 10.2 * u, 1.1 * u, WHITE);
+            c.fill_round_rect(x + 18.7 * u, y + 23.4 * u, 2.6 * u, 4.6 * u, 0.6 * u, sheet);
+        }
+        // A drive, with its slot and its light.
+        FileType::DiskImage => {
+            c.fill_round_rect(x + 12.2 * u, y + 18.0 * u, 15.6 * u, 11.0 * u, 2.2 * u, WHITE);
+            line(c, (14.9, 25.3), (20.3, 25.3), 1.2, sheet);
+            let (lx, ly) = at(24.8, 25.3);
+            c.fill_circle(lx, ly, 1.0 * u, sheet);
+        }
+        // A framed view of hills under the sun.
+        FileType::Picture => {
+            c.stroke_round_rect(x + 11.6 * u, y + 15.6 * u, 16.8 * u, 14.4 * u, 2.6 * u, 1.6 * u, WHITE);
+            let (sx, sy) = at(23.7, 19.8);
+            c.fill_circle(sx, sy, 1.6 * u, WHITE);
+            c.fill_convex(&[at(13.4, 28.6), at(18.2, 21.8), at(23.0, 28.6)], WHITE);
+            c.fill_convex(&[at(19.8, 28.6), at(23.6, 24.2), at(27.0, 28.6)], WHITE);
+        }
+        // Play, its corners rounded by the strokes around it.
+        FileType::Video => {
+            let corners = [(16.4, 17.4), (25.4, 23.0), (16.4, 28.6)];
+            c.fill_convex(&corners.map(|(v, w)| at(v, w)), WHITE);
+            for k in 0..3 {
+                line(c, corners[k], corners[(k + 1) % 3], 2.2, WHITE);
+            }
+        }
+        // A quaver.
+        FileType::Audio => {
+            let (hx, hy) = at(19.4, 27.3);
+            c.fill_circle(hx, hy, 2.9 * u, WHITE);
+            line(c, (21.6, 27.3), (21.6, 16.4), 1.8, WHITE);
+            line(c, (21.6, 16.4), (26.6, 18.2), 2.4, WHITE);
+            line(c, (26.6, 18.2), (26.6, 20.6), 1.8, WHITE);
+        }
+        // A box seen from above, its faces parted.
+        FileType::Package => {
+            let corner = |deg: f32| {
+                let a = deg.to_radians();
+                (20.0 + 7.2 * a.cos(), 23.2 + 7.2 * a.sin())
+            };
+            c.fill_convex(&[30.0, 90.0, 150.0, 210.0, 270.0, 330.0].map(|deg| {
+                let (v, w) = corner(deg);
+                at(v, w)
+            }), WHITE);
+            for deg in [90.0, 210.0, 330.0] {
+                line(c, (20.0, 23.2), corner(deg), 1.3, sheet);
+            }
+        }
+        // Lines of text, the last one short.
+        FileType::Text => {
+            for (k, end) in [27.0, 27.0, 27.0, 21.6].into_iter().enumerate() {
+                let row = 17.4 + 3.9 * k as f32;
+                line(c, (13.0, row), (end, row), 1.8, WHITE);
+            }
+        }
+        // Angle brackets around a slash.
+        FileType::Code => {
+            for (a, b) in [((17.0, 18.8), (13.6, 23.0)), ((13.6, 23.0), (17.0, 27.2)), ((23.0, 18.8), (26.4, 23.0)), ((26.4, 23.0), (23.0, 27.2))] {
+                line(c, a, b, 1.8, WHITE);
+            }
+            line(c, (21.3, 17.8), (18.7, 28.2), 1.8, WHITE);
+        }
+        // A W, for a word processor's document.
+        FileType::Document => {
+            let w = [(13.4, 17.8), (16.2, 28.2), (20.0, 20.6), (23.8, 28.2), (26.6, 17.8)];
+            for pair in w.windows(2) {
+                line(c, pair[0], pair[1], 2.0, WHITE);
+            }
+        }
+        // A table with a heading row and column.
+        FileType::Spreadsheet => {
+            c.stroke_round_rect(x + 12.6 * u, y + 16.6 * u, 14.8 * u, 12.8 * u, 1.8 * u, 1.6 * u, WHITE);
+            line(c, (12.6, 21.2), (27.4, 21.2), 1.6, WHITE);
+            line(c, (18.2, 16.6), (18.2, 29.4), 1.6, WHITE);
+        }
+        // A pie with a slice drawn out of it.
+        FileType::Presentation => {
+            let (cx, cy) = at(19.2, 23.8);
+            c.fill_circle(cx, cy, 6.4 * u, WHITE);
+            c.fill_convex(&quarter(18.8, 24.2, 7.6), sheet);
+            c.fill_convex(&quarter(20.4, 22.6, 6.4), WHITE);
+        }
+        FileType::Pdf => {
+            let (cx, cy) = at(20.0, 23.4);
+            c.text_center(&f.strong, "PDF", cx, cy, 8.6 * u, WHITE);
+        }
+        FileType::Other => {
+            let (cx, cy) = at(20.0, 23.0);
+            c.text_center(&f.strong, "?", cx, cy, 18.0 * u, WHITE);
+        }
+    }
 }
 
 /// The list's chevron, 10 by 16 dp at the right margin.
@@ -314,6 +504,66 @@ mod tests {
         assert!(lines[1].contains('…') && lines[1].ends_with("文件.pdf"), "the middle goes, the end stays: {lines:?}");
         for line in &lines {
             assert!(c.text_width(&f.heading, line, px) <= w, "{line:?} fits");
+        }
+    }
+
+    #[test]
+    fn a_file_is_typed_by_its_extension_in_any_case() {
+        let typed = [
+            ("boot.img", FileType::DiskImage),
+            ("OTA_ishtar.ZIP", FileType::Archive),
+            ("rootfs.tar.gz", FileType::Archive),
+            ("IMG_0001.HEIC", FileType::Picture),
+            ("clip.mkv", FileType::Video),
+            ("track.flac", FileType::Audio),
+            ("app-release.apk", FileType::Package),
+            ("recovery.log", FileType::Text),
+            ("build.prop", FileType::Code),
+            ("init.rc", FileType::Code),
+            ("report.docx", FileType::Document),
+            ("budget.csv", FileType::Spreadsheet),
+            ("slides.pptx", FileType::Presentation),
+            ("manual.pdf", FileType::Pdf),
+        ];
+        for (name, kind) in typed {
+            assert_eq!(file_type(name), kind, "{name}");
+        }
+        for name in ["boot.img.lz4.000", ".bashrc", "toybox", "notes."] {
+            assert_eq!(file_type(name), FileType::Other, "{name}");
+        }
+    }
+
+    #[test]
+    fn each_type_has_an_icon_of_its_own() {
+        let f = crate::font::bundled();
+        let kinds = [
+            FileType::Archive,
+            FileType::DiskImage,
+            FileType::Picture,
+            FileType::Video,
+            FileType::Audio,
+            FileType::Package,
+            FileType::Text,
+            FileType::Code,
+            FileType::Document,
+            FileType::Spreadsheet,
+            FileType::Presentation,
+            FileType::Pdf,
+            FileType::Other,
+        ];
+        let drawn: Vec<Canvas> = kinds
+            .iter()
+            .map(|&kind| {
+                let mut c = Canvas::new(140, 140);
+                c.clear(WHITE);
+                file_icon(&mut c, &f, 0.0, 0.0, 140.0, WHITE, kind);
+                c
+            })
+            .collect();
+        for (i, a) in drawn.iter().enumerate() {
+            for (j, b) in drawn.iter().enumerate().skip(i + 1) {
+                assert_ne!(a.data, b.data, "{:?} and {:?} look alike", kinds[i], kinds[j]);
+            }
         }
     }
 
