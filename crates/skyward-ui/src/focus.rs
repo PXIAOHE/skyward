@@ -11,6 +11,9 @@ pub enum Stop {
     /// A control of the page, of a strip laid over it, or a row of its long
     /// list.
     Hit(Action),
+    /// A dot of the pattern grid, by its number counted from zero across
+    /// the rows.
+    Dot(usize),
 }
 
 /// Where a stop lies, which is how it moves as the page scrolls.
@@ -49,13 +52,19 @@ pub fn spots(t: &Theme, frame: &Frame) -> Vec<Spot> {
         strip.sort_by(across);
         out.extend(strip);
     }
-    // The pattern grid is drawn on with a finger.
+    // The pattern grid is drawn on with a finger; the keys join its dots
+    // one by one.
     let mut page: Vec<Spot> = frame
         .hits
         .iter()
         .filter(|h| h.action != Action::Pattern)
         .map(|h| Spot { stop: Stop::Hit(h.action), group: Group::Page, rect: h.rect })
         .collect();
+    if let Some((cx, cy, span)) = frame.pattern {
+        let reach = t.m.dp(widgets::PATTERN_REACH_DP);
+        let dots = widgets::pattern_dots(cx, cy, span).into_iter().enumerate();
+        page.extend(dots.map(|(i, (x, y))| Spot { stop: Stop::Dot(i), group: Group::Page, rect: Rect::new(x - reach, y - reach, reach * 2.0, reach * 2.0) }));
+    }
     if let Some(rows) = &frame.rows {
         if let Some(action) = rows.action {
             let w = frame.canvas.w as f32;
@@ -96,22 +105,22 @@ pub fn lit(t: &Theme, stop: Stop, r: Rect, keypad: bool) -> (Rect, f32) {
             let (cx, cy, radius) = widgets::back_disc(t);
             (Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0), radius)
         }
+        Stop::Dot(_) => {
+            let ((cx, cy), radius) = (r.centre(), m.dp(DOT_LIGHT_DP));
+            (Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0), radius)
+        }
         Stop::Hit(Action::Type(_)) if keypad => (r, r.w.min(r.h) / 2.0),
         Stop::Hit(Action::Type(_)) => (r, m.dp(widgets::KEY_RADIUS_DP)),
         Stop::Hit(Action::TermKey(_)) => (r, m.dp(crate::term::KEY_RADIUS_DP)),
-        // Capsules: the swipe and brightness tracks, the path's folders,
-        // the buttons, the text that leaves a page, and the search bar.
-        Stop::Hit(
-            Action::Confirm(_)
-            | Action::Brightness
-            | Action::OpenAncestor(_)
-            | Action::OpenData
-            | Action::ExportLogs
-            | Action::Unpick
-            | Action::Paste
-            | Action::Skip
-            | Action::Open(Screen::Search),
-        ) => (r, r.h / 2.0),
+        // The swipe and brightness tracks and the buttons are tinted
+        // already, and lit as a halo round them.
+        Stop::Hit(Action::Confirm(_) | Action::Brightness | Action::OpenData | Action::ExportLogs | Action::Unpick | Action::Paste) => {
+            let halo = m.dp(HALO_DP);
+            (Rect::new(r.x - halo, r.y - halo, r.w + halo * 2.0, r.h + halo * 2.0), r.h / 2.0 + halo)
+        }
+        // The other capsules: the path's folders, the text that leaves a
+        // page, and the search bar.
+        Stop::Hit(Action::OpenAncestor(_) | Action::Skip | Action::Open(Screen::Search)) => (r, r.h / 2.0),
         Stop::Hit(_) => {
             let (dx, dy) = (m.dp(ROW_INSET_X_DP), m.dp(ROW_INSET_Y_DP));
             (Rect::new(r.x + dx, r.y + dy, r.w - dx * 2.0, r.h - dy * 2.0), m.card_radius - dx)
@@ -122,6 +131,11 @@ pub fn lit(t: &Theme, stop: Stop, r: Rect, keypad: bool) -> (Rect, f32) {
 /// How far the light sits within a row, across and down.
 const ROW_INSET_X_DP: f32 = 6.0;
 const ROW_INSET_Y_DP: f32 = 4.0;
+/// The radius of the light on a pattern dot, round the ring a dot joined
+/// shows.
+const DOT_LIGHT_DP: f32 = 22.0;
+/// How far the light reaches out round a control tinted already.
+const HALO_DP: f32 = 6.0;
 
 #[cfg(test)]
 mod tests {
@@ -188,7 +202,9 @@ mod tests {
         assert!(r.x > row.x && r.y > row.y && r.x + r.w < row.x + row.w && r.y + r.h < row.y + row.h, "a row is lit within it");
         assert_eq!(radius, m.card_radius - m.dp(ROW_INSET_X_DP), "its corners following the card's");
         let track = Rect::new(m.margin, 2000.0, 1300.0, 196.0);
-        assert_eq!(lit(&t, Stop::Hit(Action::Confirm(crate::app::Confirm::Wipe)), track, false), (track, 98.0), "a track is a capsule");
+        let (halo, round) = lit(&t, Stop::Hit(Action::Confirm(crate::app::Confirm::Wipe)), track, false);
+        assert!(halo.x < track.x && halo.y < track.y && halo.w > track.w && halo.h > track.h, "a track is lit as a halo round it");
+        assert_eq!(round, halo.h / 2.0, "in its own capsule shape");
         let key = Rect::new(400.0, 2600.0, 266.0, 266.0);
         assert_eq!(lit(&t, Stop::Hit(Action::Type(Cap::Char('5'))), key, true), (key, 133.0), "a round key of the code's keypad");
         assert_eq!(lit(&t, Stop::Hit(Action::Type(Cap::Char('q'))), key, false), (key, m.dp(widgets::KEY_RADIUS_DP)), "a keyboard's key");

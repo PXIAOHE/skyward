@@ -1146,6 +1146,9 @@ pub fn progress_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, title: &str
     bottom
 }
 
+/// How near a finger comes to a pattern dot to join it, in dp.
+pub const PATTERN_REACH_DP: f32 = 32.0;
+
 /// Centres of the nine pattern dots, row by row.
 pub fn pattern_dots(cx: f32, cy: f32, span: f32) -> [(f32, f32); 9] {
     let step = span / 2.0;

@@ -1314,8 +1314,10 @@ enum Press {
     /// A volume key, moving the light down the page or up it, and again at
     /// `next`.
     Volume { down: bool, next: u64 },
-    /// The power key on the control lit, which it works as it comes up.
-    Power(Spot),
+    /// The power key on the control lit, from `at`, which it works as it
+    /// comes up; held long enough over an entry of the file manager, it
+    /// opens what can be done with the entry, as a long press does.
+    Power { spot: Spot, at: u64 },
     /// The power key on a swipe-to-confirm control, whose knob slides along
     /// its track at `track` from `at` while the key is held; let go once
     /// it has slid far enough, the control confirms.
@@ -1368,6 +1370,9 @@ const DIM_DROP: f32 = 0.04;
 const DIM_CEILING: f32 = 0.05;
 /// The lowest brightness the slider sets.
 const MIN_BRIGHTNESS: f32 = 0.02;
+/// How much of the slider's span a volume key turns the brightness up or
+/// down.
+const BRIGHTNESS_STEP: f32 = 0.1;
 /// While the backlight eases, it steps once a frame of a 120 Hz panel.
 const BACKLIGHT_STEP_MS: u64 = 8;
 /// Just after the panel lights, a touch or key only keeps it awake: the
@@ -1531,6 +1536,9 @@ pub struct App {
     /// A swipe-to-confirm control whose knob the power key moved, to draw
     /// again with the page.
     knob: Option<(Confirm, Rect)>,
+    /// The brightness slider lit takes the volume keys, until the power
+    /// key lets it go.
+    adjusting: bool,
     /// How tall the page was when last drawn: one being drawn again, as
     /// work under way tells how far it has come, scrolls as far meanwhile.
     height: f32,
@@ -1600,6 +1608,7 @@ impl App {
             button: None,
             seek: None,
             knob: None,
+            adjusting: false,
             height: 0.0,
             drawn: Vec::new(),
             spare: Vec::new(),
@@ -1679,6 +1688,7 @@ impl App {
         };
         let repeat = match self.button {
             Some((_, Press::Volume { next, .. })) => Some(next),
+            Some((_, Press::Power { spot: Spot { stop: Stop::Hit(Action::OpenEntry(_)), .. }, at })) => Some(at + LONG_PRESS_MS),
             _ => None,
         };
         [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat].into_iter().flatten().min()
@@ -1694,24 +1704,39 @@ impl App {
         Some(if self.bright.on { active + after - dim_span(after) } else { active + after })
     }
 
+    /// Open what can be done with entry `i` of the folder shown, held long
+    /// enough to, with a tap of the motor.
+    fn held_entry(&mut self, i: usize) -> Vec<Effect> {
+        let entry = self.state.files.entry(i).clone();
+        self.state.file = Some(entry);
+        self.state.asking_delete = false;
+        self.open(Screen::FileInfo);
+        if self.state.vibrate {
+            vec![Effect::Haptic]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Let time pass: the panel dims and goes off once left alone long
     /// enough, a gliding page moves on, a page past its end springs back,
     /// the bar and its title follow the scroll, and a message past its
     /// deadline goes away.
     pub fn tick(&mut self, now: u64) -> Vec<Effect> {
         let mut fx = Vec::new();
-        // An entry of the file manager held long enough opens what can be
-        // done with it, a folder as much as a file, with a tap of the motor.
+        // An entry of the file manager held long enough, under a finger or
+        // the power key, opens what can be done with it, a folder as much as
+        // a file, with a tap of the motor.
         if let Drag::Press { action: Some(Action::OpenEntry(i)), at, .. } = self.drag {
             if now >= at + LONG_PRESS_MS {
                 self.drag = Drag::Held;
-                let entry = self.state.files.entry(i).clone();
-                self.state.file = Some(entry);
-                self.state.asking_delete = false;
-                self.open(Screen::FileInfo);
-                if self.state.vibrate {
-                    fx.push(Effect::Haptic);
-                }
+                fx.extend(self.held_entry(i));
+            }
+        }
+        if let Some((key, Press::Power { spot: Spot { stop: Stop::Hit(Action::OpenEntry(i)), .. }, at })) = self.button {
+            if now >= at + LONG_PRESS_MS {
+                self.button = Some((key, Press::Spent));
+                fx.extend(self.held_entry(i));
             }
         }
         let active = *self.active.get_or_insert(now);
@@ -1897,6 +1922,7 @@ impl App {
             _ => {}
         }
         self.drop_button();
+        self.adjusting = false;
         self.fling = None;
         self.bounce = None;
         self.seek = None;
@@ -2527,6 +2553,7 @@ impl App {
         self.pull = 0.0;
         self.bounce = None;
         self.seek = None;
+        self.adjusting = false;
         self.titles = None;
         self.glow = None;
         let hero = self.screen() == Screen::About;
@@ -3188,6 +3215,7 @@ impl App {
         if matches!(ev, Touch::Down(..)) {
             if self.keys {
                 self.keys = false;
+                self.adjusting = false;
                 self.dirty = true;
             }
             self.drop_button();
@@ -3355,16 +3383,7 @@ impl App {
                         fx.extend(self.confirmed(which, now));
                     }
                 }
-                Drag::Pattern => {
-                    // A pattern reads as the number of each dot it joins,
-                    // counted from one across the rows.
-                    let drawn = std::mem::take(&mut self.state.pattern);
-                    self.repaint_pattern(&t);
-                    match drawn.len() >= 4 {
-                        true => fx.extend(self.unlock(drawn.iter().map(|i| (b'1' + *i as u8) as char).collect())),
-                        false => self.say("请至少连接 4 个点", now),
-                    }
-                }
+                Drag::Pattern => fx.extend(self.drawn(now)),
                 _ => {}
             },
         }
@@ -3426,7 +3445,7 @@ impl App {
                     Some(Spot { stop: Stop::Hit(Action::Confirm(which)), rect, .. }) => {
                         self.button = Some((key, Press::Slide { which, track: rect, at: now }))
                     }
-                    Some(spot) => self.button = Some((key, Press::Power(spot))),
+                    Some(spot) => self.button = Some((key, Press::Power { spot, at: now })),
                     None => {
                         self.button = Some((key, Press::Spent));
                         self.sleep();
@@ -3448,7 +3467,7 @@ impl App {
         self.button = None;
         self.dirty = true;
         match press {
-            Press::Power(spot) => self.work(spot, now),
+            Press::Power { spot, .. } => self.work(spot, now),
             Press::Slide { which, track, .. } => {
                 let done = self.state.confirm > SLID;
                 self.let_knob_go(which, track);
@@ -3565,19 +3584,58 @@ impl App {
         fx
     }
 
-    /// Work the control the keys are on, as touching it does.
+    /// Work the control the keys are on, as touching it does. The
+    /// brightness slider takes the volume keys until the power key lets it
+    /// go, and a pattern's dots are joined one press at a time, a second
+    /// press on the last one joined ending the pattern.
     fn work(&mut self, spot: Spot, now: u64) -> Vec<Effect> {
         match spot.stop {
             Stop::Back => self.act(Action::Back, now),
+            Stop::Hit(Action::Brightness) => {
+                self.adjusting = !self.adjusting;
+                if self.adjusting {
+                    self.say("按音量键调节亮度，按电源键完成", now);
+                }
+                Vec::new()
+            }
             Stop::Hit(action) => self.act(action, now),
+            Stop::Dot(i) if self.state.pattern.last() == Some(&i) => self.drawn(now),
+            Stop::Dot(i) => {
+                if self.state.pattern.is_empty() {
+                    self.say("连接完成后，在最后一个点上再按一次电源键", now);
+                }
+                self.join(&self.theme(), i);
+                Vec::new()
+            }
         }
+    }
+
+    /// A pattern drawn to its end: four dots or more are sent to be
+    /// checked, read as the number of each dot counted from one across the
+    /// rows; fewer are wiped and asked for again.
+    fn drawn(&mut self, now: u64) -> Vec<Effect> {
+        let drawn = std::mem::take(&mut self.state.pattern);
+        self.repaint_pattern(&self.theme());
+        if drawn.len() < 4 {
+            self.say("请至少连接 4 个点", now);
+            return Vec::new();
+        }
+        self.unlock(drawn.iter().map(|i| (b'1' + *i as u8) as char).collect())
     }
 
     /// A volume key: the first lights the control the keys were last on
     /// if it shows, or else the first in view; each after moves the light
-    /// down the page or up it.
+    /// down the page or up it, or turns the brightness up or down while
+    /// its slider takes the keys.
     fn volume(&mut self, down: bool, now: u64) {
         if self.frame.is_none() {
+            return;
+        }
+        if self.adjusting {
+            if let Some(Spot { stop: Stop::Hit(Action::Brightness), rect, .. }) = self.lit() {
+                let level = self.state.brightness + if down { -BRIGHTNESS_STEP } else { BRIGHTNESS_STEP };
+                self.set_level(&self.theme(), rect, level);
+            }
             return;
         }
         if self.keys {
@@ -3806,8 +3864,8 @@ impl App {
         let t = self.theme();
         let keypad = self.screen() == Screen::Decrypt && matches!(self.state.data, Data::Locked { keys: Keys::Digits, .. });
         let (r, radius) = focus::lit(&t, spot.stop, self.place(&spot, offset), keypad);
-        let held = matches!(self.button, Some((_, Press::Power(_) | Press::Slide { .. })));
-        let alpha = if held { LIGHT_HELD_ALPHA } else { LIGHT_ALPHA };
+        let held = matches!(self.button, Some((_, Press::Power { .. } | Press::Slide { .. })));
+        let alpha = if held || self.adjusting { LIGHT_HELD_ALPHA } else { LIGHT_ALPHA };
         Some((spot.group, r, radius, t.pal.accent.with_alpha(alpha)))
     }
 
@@ -3859,7 +3917,13 @@ impl App {
     }
 
     fn set_brightness(&mut self, t: &Theme, track: Rect, x: f32) {
-        self.state.brightness = ((x - track.x) / track.w).clamp(MIN_BRIGHTNESS, 1.0);
+        self.set_level(t, track, (x - track.x) / track.w);
+    }
+
+    /// Set the brightness to `level` of the slider's top, no lower than
+    /// its floor, and draw the slider at `track` on the page again.
+    fn set_level(&mut self, t: &Theme, track: Rect, level: f32) {
+        self.state.brightness = level.clamp(MIN_BRIGHTNESS, 1.0);
         if let Some(fr) = self.frame.as_mut() {
             fr.canvas.fill_rect(track.x, track.y, track.w, track.h, t.pal.card);
             widgets::slider(&mut fr.canvas, t, track.x, track.y, track.w, self.state.brightness);
@@ -3885,15 +3949,34 @@ impl App {
     /// Add the dot under the finger to the pattern being drawn.
     fn trace(&mut self, t: &Theme, x: f32, y: f32) {
         let Some((cx, cy, span)) = self.frame.as_ref().and_then(|fr| fr.pattern) else { return };
-        let reach = t.m.dp(32.0);
+        let reach = t.m.dp(widgets::PATTERN_REACH_DP);
         let dots = widgets::pattern_dots(cx, cy, span);
-        let near = dots.iter().position(|&(dx, dy)| (dx - x).hypot(dy - y) < reach);
-        if let Some(i) = near {
-            if !self.state.pattern.contains(&i) {
-                self.state.pattern.push(i);
-                self.repaint_pattern(t);
+        if let Some(i) = dots.iter().position(|&(dx, dy)| (dx - x).hypot(dy - y) < reach) {
+            self.join(t, i);
+        }
+    }
+
+    /// Join dot `i` to the pattern being drawn, after the dot it passes
+    /// straight over on its way from the last one, as the system's pattern
+    /// lock joins that one too. A dot joined once is not joined again.
+    fn join(&mut self, t: &Theme, i: usize) {
+        let drawn = &mut self.state.pattern;
+        if drawn.contains(&i) {
+            return;
+        }
+        if let Some(&last) = drawn.last() {
+            let (row, col) = ((last / 3) as i32, (last % 3) as i32);
+            let (rows, cols) = ((i / 3) as i32 - row, (i % 3) as i32 - col);
+            // Two rows or columns away, and not a knight's move.
+            let row = if rows.abs() == 2 && cols.abs() != 1 { row + rows.signum() } else { row };
+            let col = if cols.abs() == 2 && rows.abs() != 1 { col + cols.signum() } else { col };
+            let over = (row * 3 + col) as usize;
+            if !drawn.contains(&over) {
+                drawn.push(over);
             }
         }
+        drawn.push(i);
+        self.repaint_pattern(t);
     }
 
     fn repaint_pattern(&mut self, t: &Theme) {
@@ -4867,6 +4950,103 @@ mod tests {
         app.touch(Touch::Down(W as f32 / 2.0, 200.0), &f, 6000 + SLIDE_MS);
         assert_eq!(app.state.confirm, 0.0, "a touch lets the knob go");
         assert!(app.key_up(Key::Power, 6000 + SLIDE_MS).is_empty(), "and the key comes up to nothing");
+    }
+
+    #[test]
+    fn the_brightness_slider_takes_the_volume_keys_until_the_power_key_lets_it_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i);
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Brightness));
+        let level = app.state.brightness;
+        press(&mut app, Key::Power, 0);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("按音量键调节亮度，按电源键完成"));
+        press(&mut app, Key::VolumeUp, 0);
+        assert!((app.state.brightness - (level + BRIGHTNESS_STEP)).abs() < 1e-5, "up turns it up");
+        press(&mut app, Key::VolumeDown, 0);
+        press(&mut app, Key::VolumeDown, 0);
+        assert!((app.state.brightness - (level - BRIGHTNESS_STEP)).abs() < 1e-5, "down turns it down");
+        for _ in 0..20 {
+            press(&mut app, Key::VolumeDown, 0);
+        }
+        assert_eq!(app.state.brightness, MIN_BRIGHTNESS, "no lower than the slider's floor");
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Brightness)), "the light stays on the slider");
+        press(&mut app, Key::Power, 0);
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(app.state.brightness, MIN_BRIGHTNESS, "let go, the slider keeps its level");
+        assert_ne!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Brightness)), "and the keys move the light again");
+    }
+
+    #[test]
+    fn the_keys_join_a_patterns_dots_and_end_it_on_the_last_one_joined() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.data_waiting(Some((0, Keys::Pattern)));
+        app.frame(&f, &i);
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Dot(0)), "the grid's first dot is lit first");
+        assert!(press(&mut app, Key::Power, 0).is_empty());
+        assert_eq!(app.state.pattern, [0]);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("连接完成后，在最后一个点上再按一次电源键"));
+        press(&mut app, Key::Power, 0);
+        assert!(app.state.pattern.is_empty(), "ended at one dot, the pattern is wiped");
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("请至少连接 4 个点"));
+        press(&mut app, Key::Power, 0);
+        press(&mut app, Key::VolumeDown, 0);
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Dot(2)));
+        press(&mut app, Key::Power, 0);
+        assert_eq!(app.state.pattern, [0, 1, 2], "the dot passed straight over is joined on the way");
+        for _ in 0..6 {
+            press(&mut app, Key::VolumeDown, 0);
+        }
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Dot(8)));
+        press(&mut app, Key::Power, 0);
+        assert_eq!(app.state.pattern, [0, 1, 2, 5, 8]);
+        press(&mut app, Key::VolumeUp, 0);
+        press(&mut app, Key::VolumeUp, 0);
+        press(&mut app, Key::Power, 0);
+        assert_eq!(app.state.pattern, [0, 1, 2, 5, 8, 7, 6], "two along the row joins the one between first");
+        press(&mut app, Key::VolumeDown, 0);
+        assert!(press(&mut app, Key::Power, 0).is_empty(), "a dot joined already is not joined again");
+        press(&mut app, Key::VolumeUp, 0);
+        assert_eq!(press(&mut app, Key::Power, 0), vec![Effect::Unlock { user: 0, code: "1236987".into() }], "the last one joined ends it");
+    }
+
+    #[test]
+    fn the_keys_type_a_screen_locks_code_on_its_keypad() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.data_waiting(Some((0, Keys::Digits)));
+        app.frame(&f, &i);
+        for ch in ['2', '5', '8', '0'] {
+            light_on(&mut app, &f, &i, Stop::Hit(Action::Type(Cap::Char(ch))));
+            press(&mut app, Key::Power, 0);
+        }
+        assert_eq!(app.state.code, "2580");
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Type(Cap::Enter)));
+        assert_eq!(press(&mut app, Key::Power, 0), vec![Effect::Unlock { user: 0, code: "2580".into() }]);
+    }
+
+    #[test]
+    fn the_power_key_held_on_an_entry_opens_what_can_be_done_with_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Files));
+        app.set_files("/".into(), Ok(vec![entry("vendor", folder(12)), entry("init.rc", FileKind::File)]), LISTED);
+        app.frame(&f, &i);
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::OpenEntry(0))));
+        assert!(app.key(Key::Power, 1000).is_empty());
+        assert_eq!(app.deadline(1000), Some(1000 + LONG_PRESS_MS), "the press is timed");
+        assert!(app.tick(1000 + LONG_PRESS_MS - 1).is_empty());
+        assert_eq!(app.tick(1000 + LONG_PRESS_MS), vec![Effect::Haptic], "held long enough, the folder's page opens");
+        assert_eq!(app.screen(), Screen::FileInfo);
+        assert_eq!(app.state.file.as_ref().map(|e| e.name.as_str()), Some("vendor"));
+        assert!(app.key_up(Key::Power, 1000 + LONG_PRESS_MS + 100).is_empty(), "and the key comes up to nothing");
+        app.key(Key::Back, 2000);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::OpenEntry(0))));
+        assert_eq!(press(&mut app, Key::Power, 3000), vec![Effect::ReadDir("/vendor".into())], "a short press goes into the folder");
     }
 
     #[test]
