@@ -116,8 +116,8 @@ fn send(r: &mut Responder, parent: u32, name: &str, contents: &[u8], announced: 
     assert_eq!(made.code, response::OK, "{:?}", made.why);
     let handle = made.params[2];
     let send_cmd = cmd(op::SEND_OBJECT, &[]);
-    let Incoming::File { mut file, offset } = r.incoming(&send_cmd) else { panic!("the contents go into a file") };
-    assert_eq!(offset, 0);
+    let Incoming::File { mut file, offset, unbounded } = r.incoming(&send_cmd) else { panic!("the contents go into a file") };
+    assert_eq!((offset, unbounded), (0, announced == u32::MAX));
     file.write_all(contents).unwrap();
     drop(file);
     (handle, r.received(&send_cmd, Received::Done(contents.len() as u64)).expect("an answer"))
@@ -347,6 +347,10 @@ fn a_file_sent_is_made_where_asked_with_its_time() {
     assert_eq!(done.code, response::OK);
     assert_eq!(info(&mut r, top).parent, 0);
     assert!(at.join("top.txt").exists());
+    // 4 GiB or more: however much comes is the file.
+    let (_, big) = send(&mut r, PARENT_ROOT, "big.bin", b"as much as came", u32::MAX);
+    assert_eq!(big.code, response::OK);
+    assert_eq!(fs::read(at.join("big.bin")).unwrap(), b"as much as came");
     fs::remove_dir_all(&at).unwrap();
 }
 
@@ -465,7 +469,7 @@ fn files_are_edited_in_place() {
     assert!(matches!(r.incoming(&partial), Incoming::Refused(_)), "not open to be edited");
     assert_eq!(r.answer(&cmd(op::BEGIN_EDIT_OBJECT, &[h]), None).code, response::OK);
     assert_eq!(r.answer(&cmd(op::BEGIN_EDIT_OBJECT, &[h]), None).code, response::GENERAL_ERROR, "open already");
-    let Incoming::File { file, offset } = r.incoming(&partial) else { panic!("the piece goes into the file") };
+    let Incoming::File { file, offset, unbounded: false } = r.incoming(&partial) else { panic!("the piece goes into the file") };
     file.write_all_at(b"XYZ", offset).unwrap();
     drop(file);
     let done = r.received(&partial, Received::Done(3)).unwrap();

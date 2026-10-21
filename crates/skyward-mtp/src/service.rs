@@ -272,7 +272,7 @@ fn answer(port: &mut Port, r: &mut Responder, mail: &mut Mailbox, cmd: &Command)
         Incoming::None => r.answer(cmd, None),
         Incoming::Dataset => {
             let mut data = Vec::new();
-            let (_, _, failed) = port.receive(&mut stop, &mut |piece| {
+            let (_, _, failed) = port.receive(&mut stop, false, &mut |piece| {
                 if data.len() + piece.len() > DATASET_MAX {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "the dataset is longer than any the phone takes"));
                 }
@@ -284,9 +284,9 @@ fn answer(port: &mut Port, r: &mut Responder, mail: &mut Mailbox, cmd: &Command)
                 None => r.answer(cmd, Some(&data)),
             }
         }
-        Incoming::File { file, offset } => {
+        Incoming::File { file, offset, unbounded } => {
             let mut at = offset;
-            let came = port.receive(&mut stop, &mut |piece| {
+            let came = port.receive(&mut stop, unbounded, &mut |piece| {
                 file.write_all_at(piece, at)?;
                 at += piece.len() as u64;
                 Ok(())
@@ -306,7 +306,7 @@ fn answer(port: &mut Port, r: &mut Responder, mail: &mut Mailbox, cmd: &Command)
             }
         }
         Incoming::Refused(reply) => {
-            port.receive(&mut stop, &mut |_| Ok(()))?;
+            port.receive(&mut stop, false, &mut |_| Ok(()))?;
             reply
         }
     };

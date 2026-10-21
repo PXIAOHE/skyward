@@ -176,8 +176,11 @@ pub enum Incoming {
     /// A dataset, read whole and handed to [`Responder::answer`].
     Dataset,
     /// A file's contents, written into `file` from `offset` as they come;
-    /// [`Responder::received`] answers once they have.
-    File { file: File, offset: u64 },
+    /// [`Responder::received`] answers once they have. With `unbounded`,
+    /// the object holds 4 GiB or more, and its contents run up to a short
+    /// packet whatever length their header gives, as the stock system
+    /// reads them: computers cut that length to 32 bits.
+    File { file: File, offset: u64, unbounded: bool },
     /// The operation is refused: what comes is read and dropped, and this
     /// answers it.
     Refused(Reply),
@@ -383,7 +386,7 @@ impl Responder {
             return Incoming::Refused(Reply::failed(response::NO_VALID_OBJECT_INFO, "SendObject came with no SendObjectInfo before it"));
         };
         match sending.file.take() {
-            Some(file) => Incoming::File { file, offset: 0 },
+            Some(file) => Incoming::File { file, offset: 0, unbounded: sending.size == u32::MAX },
             // A folder sends nothing, which is read as a dataset.
             None => Incoming::Dataset,
         }
@@ -399,7 +402,7 @@ impl Responder {
             return Incoming::Refused(Reply::failed(response::GENERAL_ERROR, format!("writing at {offset}, past the end at {}", edit.size)));
         }
         match edit.file.try_clone() {
-            Ok(file) => Incoming::File { file, offset },
+            Ok(file) => Incoming::File { file, offset, unbounded: false },
             Err(e) => Incoming::Refused(Reply::failed(response::GENERAL_ERROR, e)),
         }
     }

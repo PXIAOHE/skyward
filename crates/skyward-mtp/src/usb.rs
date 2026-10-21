@@ -927,10 +927,16 @@ impl Port {
     /// Read a data phase from the computer: its header, then the payload,
     /// handed to `sink` piece by piece while the next is on the bus. The
     /// computer may send it in several transfers, the header alone in the
-    /// first: it ends once it is as long as the header says, or, past 4 GiB,
-    /// with a short packet after the header. Once `sink` fails, the rest is
-    /// read and dropped: the header, the bytes `sink` took, and its error.
-    pub fn receive(&mut self, stop: &mut dyn FnMut() -> bool, sink: &mut dyn FnMut(&[u8]) -> io::Result<()>) -> Result<(Header, u64, Option<io::Error>), Halt> {
+    /// first: it ends once it is as long as the header says, or, past 4 GiB
+    /// or `unbounded`, with a short packet after the first transfer. Once
+    /// `sink` fails, the rest is read and dropped: the header, the bytes
+    /// `sink` took, and its error.
+    pub fn receive(
+        &mut self,
+        stop: &mut dyn FnMut() -> bool,
+        unbounded: bool,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<(Header, u64, Option<io::Error>), Halt> {
         let mut bufs = [vec![0u8; CHUNK], vec![0u8; CHUNK]];
         // The first piece, past any packet of nothing that ended the data
         // before.
@@ -946,7 +952,7 @@ impl Port {
             return Err(Halt::Aborted(io::Error::new(ErrorKind::InvalidData, format!("{first} bytes came where a data phase starts"))));
         };
         // How much payload is still to come, where the header says.
-        let mut left = (header.length != u32::MAX).then(|| u64::from(header.length).saturating_sub(HEADER as u64));
+        let mut left = (!unbounded && header.length != u32::MAX).then(|| u64::from(header.length).saturating_sub(HEADER as u64));
         // The part of `got` bytes that is payload, and whether more comes.
         let take = |got: usize, full: bool, left: &mut Option<u64>| -> (usize, bool) {
             match left {
@@ -959,7 +965,10 @@ impl Port {
             }
         };
         let (mut cur, mut from) = (0, HEADER);
-        let (mut len, mut more) = take(first - HEADER, first == CHUNK || first == HEADER, &mut left);
+        // Past 4 GiB the first transfer ends short whatever follows: the
+        // computer sends the header with a little data in a packet of its
+        // own, short at the faster speeds.
+        let (mut len, mut more) = take(first - HEADER, true, &mut left);
         let (mut taken, mut failed) = (0u64, None);
         loop {
             // The next piece goes on the bus while this one goes to `sink`.
