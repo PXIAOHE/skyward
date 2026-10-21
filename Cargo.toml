@@ -13,6 +13,7 @@ members = [
     "crates/skyward-files",
     "crates/skyward-info",
     "crates/skyward-install",
+    "crates/skyward-mtp",
     "crates/skyward-preview",
     "crates/skyward-pack",
     "crates/skyward-sys",
