@@ -1313,6 +1313,7 @@ dependencies = [
  "polyfuse-kernel",
  "sha2",
  "skyward-block",
+ "skyward-config",
  "skyward-info",
  "skyward-sys",
  "skyward-vab",

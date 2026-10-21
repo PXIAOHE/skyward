@@ -102,6 +102,14 @@ pub fn detect<R: Read + Seek>(file: &mut R, head: &[u8]) -> Result<Option<ImageK
 
 /// Whether a packed ramdisk is a recovery's, by the names in its archive.
 fn ramdisk(packed: impl Read) -> Result<Ramdisk> {
+    Ok(match holds(packed, |name| RECOVERY_PROGRAMS.contains(&name))? {
+        true => Ramdisk::Recovery,
+        false => Ramdisk::Generic,
+    })
+}
+
+/// Whether a packed ramdisk has an entry whose name `wanted` picks.
+fn holds(packed: impl Read, wanted: impl Fn(&str) -> bool) -> Result<bool> {
     let mut packed = BufReader::new(packed);
     let start = packed.fill_buf().context("read the ramdisk's first bytes")?;
     let mut rest: Box<dyn Read + '_> = if start.starts_with(LZ4_LEGACY) || start.starts_with(LZ4_FRAME) {
@@ -116,14 +124,29 @@ fn ramdisk(packed: impl Read) -> Result<Ramdisk> {
     loop {
         let entry = cpio::NewcReader::new(rest).context("read a ramdisk entry")?;
         if entry.entry().is_trailer() {
-            return Ok(Ramdisk::Generic);
+            return Ok(false);
         }
-        let name = entry.entry().name().trim_start_matches("./");
-        if RECOVERY_PROGRAMS.contains(&name) {
-            return Ok(Ramdisk::Recovery);
+        if wanted(entry.entry().name().trim_start_matches("./")) {
+            return Ok(true);
         }
         rest = entry.finish().context("read past a ramdisk entry")?;
     }
+}
+
+/// Whether `file` is a Skyward recovery: a boot image whose ramdisk carries
+/// the device configuration Skyward is packed with.
+pub fn is_skyward<R: Read + Seek>(file: &mut R) -> Result<bool> {
+    let mut head = Vec::with_capacity(4096);
+    file.take(4096).read_to_end(&mut head).context("read the image's first bytes")?;
+    if !head.starts_with(BOOT_MAGIC) {
+        return Ok(false);
+    }
+    let header = Header::parse(&mut Cursor::new(&head)).context("read the boot image header")?;
+    if header.ramdisk_size() == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::Start(header.ramdisk_position() as u64)).context("seek to the ramdisk")?;
+    holds(file.take(u64::from(header.ramdisk_size())), |name| name == skyward_config::ramdisk::CONFIG).context("read the ramdisk")
 }
 
 /// The partition `name` of `slot` among the links in `dir`.
@@ -305,6 +328,16 @@ mod tests {
         assert!(kind_of(&boot_image(0, &[])).is_err());
         assert!(kind_of(&boot_image(0, b"BZh91AY&SY")).is_err(), "a ramdisk packed some other way");
         assert!(kind_of(b"ANDROID!").is_err());
+    }
+
+    #[test]
+    fn skyward_is_told_from_the_stock_recovery_it_is_packed_on() {
+        let stock = archive(&["init", "system/bin/recovery", "prop.default"]);
+        let skyward = archive(&["init", "system/bin/recovery", "prop.default", "skyward", "skyward/device.toml", "skyward/MiSansVF.ttf"]);
+        assert!(is_skyward(&mut Cursor::new(boot_image(0, &lz4_legacy(&skyward)))).unwrap());
+        assert!(!is_skyward(&mut Cursor::new(boot_image(0, &lz4_legacy(&stock)))).unwrap());
+        assert!(!is_skyward(&mut Cursor::new(boot_image(5000, &[]))).unwrap(), "a boot image with no ramdisk");
+        assert!(!is_skyward(&mut Cursor::new(vec![0u8; 8192])).unwrap(), "an erased partition");
     }
 
     #[test]
