@@ -141,15 +141,15 @@ pub fn file_type(name: &str) -> FileType {
     TYPES.iter().find(|(_, exts)| exts.contains(&ext.as_str())).map_or(FileType::Other, |&(kind, _)| kind)
 }
 
-/// The colour of a type's sheet, as the stock list colours it.
+/// The colour of a type's sheet, as the stock list shows it on screen.
 fn sheet(kind: FileType) -> Rgba {
     match kind {
-        FileType::Archive | FileType::DiskImage | FileType::Code | FileType::Document => Rgba::rgb(52, 130, 255),
-        FileType::Picture | FileType::Video => Rgba::rgb(119, 103, 249),
-        FileType::Audio | FileType::Pdf => Rgba::rgb(250, 56, 46),
-        FileType::Package | FileType::Spreadsheet => Rgba::rgb(29, 205, 58),
-        FileType::Presentation => Rgba::rgb(255, 105, 0),
-        FileType::Text | FileType::Other => Rgba::rgb(140, 157, 176),
+        FileType::Archive | FileType::DiskImage | FileType::Code | FileType::Document => Rgba::rgb(74, 128, 247),
+        FileType::Picture | FileType::Video => Rgba::rgb(116, 104, 240),
+        FileType::Audio | FileType::Pdf => Rgba::rgb(230, 75, 59),
+        FileType::Package | FileType::Spreadsheet => Rgba::rgb(97, 202, 81),
+        FileType::Presentation => Rgba::rgb(237, 114, 46),
+        FileType::Text | FileType::Other => Rgba::rgb(143, 156, 174),
     }
 }
 
