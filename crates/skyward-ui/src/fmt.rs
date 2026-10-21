@@ -321,7 +321,7 @@ pub fn patch(p: &PatchLevel) -> String {
 
 /// The rules of each of [`TIME_ZONES`], read once from the ones the
 /// recovery carries.
-fn rules(zone: usize) -> &'static TimeZone {
+pub fn rules(zone: usize) -> &'static TimeZone {
     static RULES: OnceLock<Vec<TimeZone>> = OnceLock::new();
     let all = RULES.get_or_init(|| {
         TIME_ZONES.iter().map(|&(_, _, name)| TimeZone::get(name).expect("the recovery carries the rules of every zone listed")).collect()

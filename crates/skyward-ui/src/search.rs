@@ -33,6 +33,7 @@ pub const ENTRIES: &[Entry] = &[
     entry("屏幕亮度", "设置", Screen::Settings, &["pingmuliangdu", "pmld", "liangdu", "ld", "brightness"]),
     entry("息屏时间", "设置", Screen::ScreenOff, &["xipingshijian", "xpsj", "timeout"]),
     entry("触摸振动", "设置", Screen::Settings, &["chumozhendong", "cmzd", "zhendong", "vibrate", "haptic"]),
+    entry("文件传输", "设置", Screen::Settings, &["wenjianchuanshu", "wjcs", "chuanshu", "mtp", "usb"]),
     entry("语言", "设置", Screen::Language, &["yuyan", "yy", "language"]),
     entry("时区", "设置", Screen::TimeZone, &["shiqu", "sq", "timezone"]),
     entry("重启", "主页", Screen::Reboot, &["chongqi", "cq", "reboot", "fastboot", "bootloader", "edl", "guanji"]),

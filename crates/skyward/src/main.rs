@@ -450,8 +450,9 @@ fn adopt_installed_version(slot: skyward_vab::Slot) -> Result<()> {
 }
 
 /// The recovery service. Its log is kept from the start, and adb comes up
-/// first so a failure later on can be inspected; then the boot request in
-/// misc is read. A request whose work
+/// first so a failure later on can be inspected, file transfer joining it
+/// once the screen starts; then the boot request in misc is read. A
+/// request whose work
 /// goes on stays in misc until the work is done; any other is cleared at
 /// once, so that any reboot from here boots the system. Failures go to the
 /// kernel log and still end the process, which init then starts again.

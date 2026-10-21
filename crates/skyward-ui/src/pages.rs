@@ -225,7 +225,11 @@ pub fn settings(cx: &Ctx) -> Frame {
         Action::Open(Screen::TimeZone),
         Action::Toggle(Switch::Vibrate),
     ]));
-    y = widgets::section(&mut c, t, f, general.bottom, "调试");
+    y = widgets::section(&mut c, t, f, general.bottom, "USB");
+    let usb = widgets::list(&mut c, t, f, y, &[Row::new("文件传输").icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
+    out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
+    y = widgets::footnote(&mut c, t, f, usb.bottom, "开启后，可在电脑上管理内部存储中的文件，需先完成「解密」。");
+    y = widgets::section(&mut c, t, f, y, "调试");
     let debug = widgets::list(&mut c, t, f, y, &[Row::new("终端").icon(SLATE, Icon::Terminal)]);
     out.extend(hits(&debug.rows, &[Action::Open(Screen::Terminal)]));
     y = widgets::section(&mut c, t, f, debug.bottom, "关于");

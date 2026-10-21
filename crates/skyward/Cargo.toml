@@ -30,3 +30,4 @@ zip = { version = "8.6.0", default-features = false }
 libc = { workspace = true }
 procfs = { version = "0.18.0", default-features = false }
 skyward-ui = { path = "../skyward-ui" }
+skyward-mtp = { path = "../skyward-mtp" }

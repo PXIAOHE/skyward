@@ -186,6 +186,8 @@ pub struct FileJob {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Vibrate,
+    /// Offer internal storage to a computer over USB.
+    FileTransfer,
     /// Compress a backup.
     Compress,
     /// Read a backup back once it is written.
@@ -972,6 +974,8 @@ pub struct State {
     /// place in [`TIME_ZONES`].
     pub time_zone: usize,
     pub vibrate: bool,
+    /// A computer connected over USB is offered internal storage.
+    pub file_transfer: bool,
     pub reboot: usize,
     /// What the wipe page has chosen, by place in [`WIPES`].
     pub wipe: [bool; WIPES.len()],
@@ -1074,6 +1078,7 @@ impl Default for State {
             screen_off: 3,
             time_zone: 0,
             vibrate: true,
+            file_transfer: true,
             reboot: 0,
             wipe: [false; WIPES.len()],
             cache_partition: false,
@@ -1175,6 +1180,8 @@ pub enum Effect {
     Reboot(Target),
     /// A short tap of the vibration motor.
     Haptic,
+    /// Offer internal storage to a computer over USB, or stop.
+    FileTransfer(bool),
     /// Start receiving a package over USB.
     Sideload,
     /// Start installing the file at this path from the top of a place,
@@ -2392,6 +2399,14 @@ impl App {
         self.say(text, now);
     }
 
+    /// File transfer could not be turned on or off as the switch says: it
+    /// shows how it stands, and why.
+    pub fn file_transfer_failed(&mut self, on: bool, why: &str, now: u64) {
+        self.state.file_transfer = on;
+        self.refresh();
+        self.say(why, now);
+    }
+
     fn say(&mut self, text: &str, now: u64) {
         self.toast = Some((text.to_string(), now + TOAST_MS));
         self.dirty = true;
@@ -2627,12 +2642,17 @@ impl App {
             Action::Toggle(switch) => {
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
+                    Switch::FileTransfer => &mut self.state.file_transfer,
                     Switch::Compress => &mut self.state.compress,
                     Switch::Verify => &mut self.state.verify,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                 };
                 *on = !*on;
+                let now_on = *on;
                 self.refresh();
+                if switch == Switch::FileTransfer {
+                    return vec![Effect::FileTransfer(now_on)];
+                }
             }
             Action::MountToggle(i) => {
                 if self.state.mount_failure.take().is_some() {
@@ -3790,6 +3810,22 @@ mod tests {
         app.touch(Touch::Up, &f, 0);
         assert!(app.state.vibrate, "the switch was not flipped");
         assert_eq!(app.top().1, 300.0);
+    }
+
+    #[test]
+    fn the_file_transfer_switch_has_the_runtime_follow_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        assert!(app.state.file_transfer, "on until turned off");
+        let (_, y) = spot(&mut app, &f, &i, Action::Toggle(Switch::FileTransfer));
+        if y > H as f32 * 0.9 {
+            scroll_to(&mut app, &f, y - H as f32 * 0.8, 0);
+        }
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Toggle(Switch::FileTransfer), 2000), [Effect::FileTransfer(false)]);
+        assert!(!app.state.file_transfer);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Toggle(Switch::FileTransfer), 3000), [Effect::FileTransfer(true)]);
+        app.file_transfer_failed(false, "无法开启文件传输", 4000);
+        assert!(!app.state.file_transfer, "the switch shows how it stands");
     }
 
     /// Flick the page up from `start`: the finger travels `step` px every

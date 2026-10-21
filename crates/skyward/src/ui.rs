@@ -32,6 +32,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// program behind the new one has to start and get ready first.
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What the computer calls internal storage, as the stock system names it.
+const STORAGE_NAME: &str = "内部存储设备";
+
 /// How long the page shows that the work the system asked for is done
 /// before the phone starts the system or powers off.
 const LEAVE_AFTER_MS: u64 = 1500;
@@ -137,16 +140,64 @@ fn power(target: Target) -> Result<()> {
     })
 }
 
-/// Hand the USB port to `function`, "adb" or "fastboot", through init:
-/// through "none" first, which stops the program serving the port now,
-/// then init starts the one behind the new function and sets the port up
-/// once that program is ready.
-fn usb(function: &str) -> Result<()> {
-    for state in ["none", function] {
-        skyward_sys::set_prop("sys.usb.config", state)?;
-        skyward_sys::wait_prop("sys.usb.state", state, USB_TIMEOUT)?;
+/// File transfer: the service offering internal storage to a computer over
+/// USB, whether it offers the storage now, and the zone, by its place in
+/// the settings, it tells the times of files in.
+struct Transfer {
+    service: skyward_mtp::Service,
+    offered: bool,
+    zone: usize,
+}
+
+impl Transfer {
+    /// Serve file transfer; the port offers it from when it next rests.
+    fn start(cfg: &DeviceConfig, info: &skyward_info::DeviceInfo, zone: usize) -> Result<Transfer> {
+        let device = skyward_mtp::Device {
+            manufacturer: cfg.device.brand.clone(),
+            model: info.model.clone(),
+            version: format!("Skyward {}", skyward_info::VERSION),
+            serial: skyward_sys::prop("ro.serialno").unwrap_or_default(),
+            name: info.model.clone(),
+            battery: Box::new(|| skyward_info::battery_now().ok().flatten().map(|b| b.level)),
+        };
+        let service = skyward_mtp::Service::start(device, skyward_ui::fmt::rules(zone).clone())?;
+        skyward_sys::usb::set_mtp(true);
+        Ok(Transfer { service, offered: false, zone })
     }
-    Ok(())
+
+    /// Offer internal storage, or take it back. Once this returns, nothing
+    /// the computer had under way in it goes on.
+    fn offer(&mut self, offer: bool) -> Result<()> {
+        if offer != self.offered {
+            let storage = offer.then(|| skyward_mtp::Storage { top: PathBuf::from(skyward_crypto::data::SDCARD), description: STORAGE_NAME.into() });
+            self.service.offer(storage)?;
+            self.offered = offer;
+        }
+        Ok(())
+    }
+
+    /// Stop serving: a port at rest goes back to adb alone first.
+    fn stop(self, rests: bool) -> Result<()> {
+        skyward_sys::usb::set_mtp(false);
+        let switched = if rests { skyward_sys::usb::switch("adb", USB_TIMEOUT) } else { Ok(()) };
+        let stopped = self.service.stop();
+        switched.and(stopped)
+    }
+}
+
+/// Take internal storage back from file transfer, if it is on, before work
+/// that erases or rewrites the data partition, or installs; whether that
+/// work can start, which the page is told otherwise.
+fn withhold(transfer: &mut Option<Transfer>, app: &mut App, now: u64) -> Result<bool> {
+    let Some(t) = transfer else { return Ok(true) };
+    match t.offer(false) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            skyward_sys::kmsg(&format!("file transfer kept internal storage: {e:#}"))?;
+            app.report(&format!("未能停止文件传输：{e:#}"), now);
+            Ok(false)
+        }
+    }
 }
 
 /// Whether the phone's fastbootd runs, as init tells it, and how far a
@@ -747,8 +798,23 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // why it did not come up goes to the kernel log and on screen.
     let mut fastboot = first == Screen::Fastboot;
     let mut port_at = Instant::now();
+    // File transfer runs while its switch is on, and offers internal
+    // storage while that is open; one that does not start says why on
+    // screen, and the recovery carries on.
+    let mut transfer: Option<Transfer> = None;
+    if app.state.file_transfer {
+        match Transfer::start(cfg, &info, app.state.time_zone) {
+            Ok(t) => transfer = Some(t),
+            Err(e) => {
+                skyward_sys::kmsg(&format!("file transfer did not start: {e:#}"))?;
+                app.file_transfer_failed(false, &format!("无法开启文件传输：{e:#}"), monotonic_ms());
+            }
+        }
+    }
+    // A sideload has the port, which goes back to rest once it ends.
+    let mut sideloading = false;
     if fastboot {
-        if let Err(e) = usb("fastboot") {
+        if let Err(e) = skyward_sys::usb::switch("fastboot", USB_TIMEOUT) {
             skyward_sys::kmsg(&format!("fastbootd has not taken the port: {e:#}"))?;
             app.report(&format!("{e:#}"), monotonic_ms());
         }
@@ -792,8 +858,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         Work::Sideload { .. } => {
             app.start_sideload();
             installer = Some(Installer::start(detach(cfg.services.clone()), keep_recovery(&app))?);
+            sideloading = true;
         }
         Work::Menu | Work::Exit | Work::Fastboot | Work::PromptWipeData | Work::Unsupported(_) => {}
+    }
+    // The port came up with adb alone; at rest it offers file transfer
+    // beside it.
+    if transfer.is_some() && !fastboot && !sideloading {
+        if let Err(e) = skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT) {
+            skyward_sys::kmsg(&format!("the port did not take file transfer: {e:#}"))?;
+            app.report(&format!("{e:#}"), monotonic_ms());
+        }
     }
     // Once the work the system asked for is done, the page shows it for a
     // moment; then the phone starts the system, or powers off where the
@@ -921,6 +996,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 app.install(ev, now);
                 if finished {
                     installer = None;
+                    sideloading = false;
                     // A sideload the system asked for is done with however
                     // it went; asked to, the phone then leaves on its own,
                     // once what the package asked to be erased is.
@@ -1115,6 +1191,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::FactoryReset => {
                         ensure!(eraser.is_none(), "erasing is under way already");
+                        if !withhold(&mut transfer, &mut app, now)? {
+                            continue;
+                        }
                         eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true)?);
                         erase_leaves = true;
                     }
@@ -1124,6 +1203,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         ensure!(eraser.is_none(), "erasing is under way already");
                         if decryptor.is_some() {
                             app.report("正在打开 data 分区，请稍后再试", now);
+                            continue;
+                        }
+                        if !withhold(&mut transfer, &mut app, now)? {
                             continue;
                         }
                         erase_leaves = false;
@@ -1167,10 +1249,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::Sideload => {
                         ensure!(installer.is_none(), "an installer is running already");
+                        if !withhold(&mut transfer, &mut app, now)? {
+                            continue;
+                        }
                         installer = Some(Installer::start(detach(cfg.services.clone()), keep_recovery(&app))?);
+                        sideloading = true;
                     }
                     Effect::InstallFile(place, path) => {
                         ensure!(installer.is_none(), "an installer is running already");
+                        if !withhold(&mut transfer, &mut app, now)? {
+                            continue;
+                        }
                         installer = Some(Installer::open(in_place(place, &path), detach(cfg.services.clone()), keep_recovery(&app))?);
                     }
                     Effect::Flash { partition, pick } => {
@@ -1331,15 +1420,70 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // init stops fastbootd as the port goes through "none";
                     // then the slot's partitions come up as at boot.
                     Effect::EnterRecovery => {
-                        usb("adb")?;
+                        skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT)?;
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
                         crate::prepare(cfg, slot)?;
                         info = skyward_info::collect(cfg)?;
                         fastboot = false;
                         app.enter_recovery();
                     }
+                    // A port that something else has takes file transfer
+                    // on, or leaves it, when it comes back to rest.
+                    Effect::FileTransfer(on) => {
+                        let rests = !fastboot && !sideloading;
+                        match (on, transfer.take()) {
+                            (true, None) => match Transfer::start(cfg, &info, app.state.time_zone) {
+                                Ok(t) => {
+                                    transfer = Some(t);
+                                    if rests {
+                                        if let Err(e) = skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT) {
+                                            skyward_sys::kmsg(&format!("the port did not take file transfer: {e:#}"))?;
+                                            app.report(&format!("{e:#}"), now);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    skyward_sys::kmsg(&format!("file transfer did not start: {e:#}"))?;
+                                    app.file_transfer_failed(false, &format!("无法开启文件传输：{e:#}"), now);
+                                }
+                            },
+                            (false, Some(t)) => {
+                                if let Err(e) = t.stop(rests) {
+                                    skyward_sys::kmsg(&format!("file transfer did not stop cleanly: {e:#}"))?;
+                                    app.report(&format!("关闭文件传输失败：{e:#}"), now);
+                                }
+                            }
+                            (on, t) => unreachable!("the switch turned file transfer {on} while it was {}", t.is_some()),
+                        }
+                    }
                 }
             }
+        }
+        // Internal storage goes to the computer while it is open, and no
+        // erasing or installing could take it away. File transfer that does
+        // not follow, or whose service ended, stops, and the page says why.
+        let kept = match &mut transfer {
+            Some(t) if !t.service.running() => Err(anyhow!("the file transfer service ended")),
+            Some(t) => {
+                let offer = app.state.data.storage_open() && eraser.is_none() && installer.is_none();
+                t.offer(offer).and_then(|()| {
+                    if t.zone != app.state.time_zone {
+                        t.service.set_zone(skyward_ui::fmt::rules(app.state.time_zone).clone())?;
+                        t.zone = app.state.time_zone;
+                    }
+                    Ok(())
+                })
+            }
+            None => Ok(()),
+        };
+        if let Err(e) = kept {
+            // An ended service's own error says more than its ending does.
+            let why = match transfer.take().expect("only file transfer that runs fails").stop(!fastboot && !sideloading) {
+                Err(cause) => cause,
+                Ok(()) => e,
+            };
+            skyward_sys::kmsg(&format!("file transfer stops: {why:#}"))?;
+            app.file_transfer_failed(false, &format!("文件传输已停止：{why:#}"), now);
         }
     }
 }

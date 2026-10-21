@@ -1217,6 +1217,7 @@ dependencies = [
  "skyward-install",
  "skyward-lp",
  "skyward-modules",
+ "skyward-mtp",
  "skyward-sys",
  "skyward-ui",
  "skyward-vab",
