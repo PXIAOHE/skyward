@@ -324,9 +324,9 @@ fn sign(c: &mut Canvas, f: &Fonts, kind: FileType, x: f32, y: f32, u: f32, sheet
         }
         // A drive, with its slot and its light.
         FileType::DiskImage => {
-            c.fill_round_rect(x + 12.2 * u, y + 18.0 * u, 15.6 * u, 11.0 * u, 2.2 * u, WHITE);
-            line(c, (14.9, 25.3), (20.3, 25.3), 1.2, sheet);
-            let (lx, ly) = at(24.8, 25.3);
+            c.fill_round_rect(x + 12.2 * u, y + 17.5 * u, 15.6 * u, 11.0 * u, 2.2 * u, WHITE);
+            line(c, (14.9, 24.8), (20.3, 24.8), 1.2, sheet);
+            let (lx, ly) = at(24.8, 24.8);
             c.fill_circle(lx, ly, 1.0 * u, sheet);
         }
         // A framed view of hills under the sun.
@@ -337,9 +337,10 @@ fn sign(c: &mut Canvas, f: &Fonts, kind: FileType, x: f32, y: f32, u: f32, sheet
             c.fill_convex(&[at(13.4, 28.6), at(18.2, 21.8), at(23.0, 28.6)], WHITE);
             c.fill_convex(&[at(19.8, 28.6), at(23.6, 24.2), at(27.0, 28.6)], WHITE);
         }
-        // Play, its corners rounded by the strokes around it.
+        // Play, its corners rounded by the strokes around it, a little
+        // right of the middle as its weight lies left.
         FileType::Video => {
-            let corners = [(16.4, 17.4), (25.4, 23.0), (16.4, 28.6)];
+            let corners = [(15.7, 17.4), (24.7, 23.0), (15.7, 28.6)];
             c.fill_convex(&corners.map(|(v, w)| at(v, w)), WHITE);
             for k in 0..3 {
                 line(c, corners[k], corners[(k + 1) % 3], 2.2, WHITE);
@@ -347,11 +348,11 @@ fn sign(c: &mut Canvas, f: &Fonts, kind: FileType, x: f32, y: f32, u: f32, sheet
         }
         // A quaver.
         FileType::Audio => {
-            let (hx, hy) = at(19.4, 27.3);
+            let (hx, hy) = at(17.25, 27.6);
             c.fill_circle(hx, hy, 2.9 * u, WHITE);
-            line(c, (21.6, 27.3), (21.6, 16.4), 1.8, WHITE);
-            line(c, (21.6, 16.4), (26.6, 18.2), 2.4, WHITE);
-            line(c, (26.6, 18.2), (26.6, 20.6), 1.8, WHITE);
+            line(c, (19.45, 27.6), (19.45, 16.7), 1.8, WHITE);
+            line(c, (19.45, 16.7), (24.45, 18.5), 2.4, WHITE);
+            line(c, (24.45, 18.5), (24.45, 20.9), 1.8, WHITE);
         }
         // A box seen from above, its faces parted.
         FileType::Package => {
@@ -402,7 +403,7 @@ fn sign(c: &mut Canvas, f: &Fonts, kind: FileType, x: f32, y: f32, u: f32, sheet
             c.fill_convex(&quarter(20.4, 22.6, 6.4), WHITE);
         }
         FileType::Pdf => {
-            let (cx, cy) = at(20.0, 23.4);
+            let (cx, cy) = at(19.85, 22.9);
             c.text_center(&f.strong, "PDF", cx, cy, 8.6 * u, WHITE);
         }
         FileType::Other => {
@@ -533,25 +534,26 @@ mod tests {
         }
     }
 
+    const KINDS: [FileType; 13] = [
+        FileType::Archive,
+        FileType::DiskImage,
+        FileType::Picture,
+        FileType::Video,
+        FileType::Audio,
+        FileType::Package,
+        FileType::Text,
+        FileType::Code,
+        FileType::Document,
+        FileType::Spreadsheet,
+        FileType::Presentation,
+        FileType::Pdf,
+        FileType::Other,
+    ];
+
     #[test]
     fn each_type_has_an_icon_of_its_own() {
         let f = crate::font::bundled();
-        let kinds = [
-            FileType::Archive,
-            FileType::DiskImage,
-            FileType::Picture,
-            FileType::Video,
-            FileType::Audio,
-            FileType::Package,
-            FileType::Text,
-            FileType::Code,
-            FileType::Document,
-            FileType::Spreadsheet,
-            FileType::Presentation,
-            FileType::Pdf,
-            FileType::Other,
-        ];
-        let drawn: Vec<Canvas> = kinds
+        let drawn: Vec<Canvas> = KINDS
             .iter()
             .map(|&kind| {
                 let mut c = Canvas::new(140, 140);
@@ -562,9 +564,46 @@ mod tests {
             .collect();
         for (i, a) in drawn.iter().enumerate() {
             for (j, b) in drawn.iter().enumerate().skip(i + 1) {
-                assert_ne!(a.data, b.data, "{:?} and {:?} look alike", kinds[i], kinds[j]);
+                assert_ne!(a.data, b.data, "{:?} and {:?} look alike", KINDS[i], KINDS[j]);
             }
         }
+    }
+
+    /// Where the white of a type's sign lies on its sheet, in the icon's 40
+    /// units: its left, top, right and bottom, drawn ten pixels a unit on a
+    /// black page.
+    fn ink(f: &Fonts, kind: FileType) -> (f32, f32, f32, f32) {
+        let px = 10.0;
+        let side = (40.0 * px) as u32;
+        let mut c = Canvas::new(side, side);
+        let page = Rgba::rgb(0, 0, 0);
+        c.clear(page);
+        file_icon(&mut c, f, 0.0, 0.0, side as f32, page, kind);
+        let (mut l, mut t, mut r, mut b) = (u32::MAX, u32::MAX, 0, 0);
+        for (i, p) in c.data.chunks(4).enumerate() {
+            if p[..3].iter().all(|&v| v > 230) {
+                let (x, y) = (i as u32 % side, i as u32 / side);
+                (l, t, r, b) = (l.min(x), t.min(y), r.max(x + 1), b.max(y + 1));
+            }
+        }
+        (l as f32 / px, t as f32 / px, r as f32 / px, b as f32 / px)
+    }
+
+    #[test]
+    fn each_sign_sits_in_the_middle_of_its_sheet() {
+        let f = crate::font::bundled();
+        let mut off = Vec::new();
+        for kind in KINDS {
+            let (l, t, r, b) = ink(&f, kind);
+            let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
+            // The zip's teeth run down from the top edge: only its sideways
+            // place counts.
+            let level = kind == FileType::Archive || (cy - 23.0).abs() <= 0.3;
+            if (cx - 20.0).abs() > 0.3 || !level {
+                off.push(format!("{kind:?} at ({cx:.2}, {cy:.2}) over {l:.1}..{r:.1}, {t:.1}..{b:.1}"));
+            }
+        }
+        assert!(off.is_empty(), "off the middle (20, 23):\n{}", off.join("\n"));
     }
 
     #[test]
