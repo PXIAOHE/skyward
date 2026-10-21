@@ -252,8 +252,35 @@ fn main() -> Result<()> {
         app.state.source = Source::File(Place::Storage);
         app.state.install = install;
     };
+    // What a ROM's install script shows as it runs, in the ways scripts lay
+    // their lines out; the failing one stops on writing vendor.
+    let said = |failed: bool| -> Vec<String> {
+        let mut lines = vec![
+            " ",
+            "******************************",
+            "  Example ROM 2.1 for ishtar",
+            "******************************",
+            " ",
+            "- 正在检查设备型号",
+            "- Mounting system and vendor",
+            "- Flashing boot to /dev/block/by-name/boot_b",
+            "- Flashing dtbo and vendor_boot to the inactive slot, which takes a few seconds on most devices",
+            "  Partition      Size       State",
+            "  system_b       1.17 GiB   written",
+        ];
+        lines.extend(match failed {
+            false => ["  vendor_b       1.96 GiB   written", "- Cleaning up", "- Done"].as_slice(),
+            true => ["! Could not write vendor_b", "! Installation aborted"].as_slice(),
+        });
+        lines.into_iter().map(String::from).collect()
+    };
+    let script = |app: &mut App, install: Install, failed: bool| {
+        from_storage(app, install);
+        app.state.package_name = Some("ExampleROM-2.1-ishtar.zip".into());
+        app.state.script_output = said(failed);
+    };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 83] = [
+    let pages: [PageShot; 87] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -294,6 +321,20 @@ fn main() -> Result<()> {
         ("20-install-storage-failed", Screen::Installing, false, &|app| {
             let gone = "read /sdcard/Download/OTA_ishtar_OS3.0.305.0.WMACNXM.zip: Input/output error (os error 5)";
             from_storage(app, Install::Finished { outcome: Outcome::Failed(Failure::Unreadable(gone.into())), damage: Some(Damage::System) })
+        }),
+        ("20-install-script-confirming", Screen::Installing, false, &|app| {
+            script(app, Install::ConfirmingScript, false);
+            app.state.script_output.clear();
+        }),
+        ("20-install-script-running-dark", Screen::Installing, true, &|app| {
+            script(app, Install::Scripting { stage: Some(Stage::Script { thousandths: 420 }), running: true }, false);
+            app.state.script_output.truncate(9);
+        }),
+        ("20-install-script-ran", Screen::Installing, false, &|app| {
+            script(app, Install::Finished { outcome: Outcome::Ran { wipe_cache: false }, damage: None }, false)
+        }),
+        ("20-install-script-failed-dark", Screen::Installing, true, &|app| {
+            script(app, Install::Finished { outcome: Outcome::Failed(Failure::Script(1)), damage: Some(Damage::Script) }, true)
         }),
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),

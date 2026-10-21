@@ -9,15 +9,18 @@ use crate::fuse::{self, Fault, LocalFile, Mount};
 use crate::image::{self, ImageKind};
 use crate::ota::{self, Log, Status};
 use crate::package::{self, Build, Package, Phone, Update};
-use crate::{Command, Event, Failure, Outcome, Refusal, Stage, ENGINE_LOG};
+use crate::script::{self, Bar, Request};
+use crate::{Command, Event, Failure, Outcome, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
 use skyward_info::Charge;
 use skyward_sys::{kmsg, prop};
 use skyward_vab::{Slot, SnapshotState};
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::process::CommandExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -25,12 +28,28 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// What runs right before update_engine starts writing. It may write over
-/// the installed system's partitions, so whatever still runs from them has
-/// to move off first.
+/// What runs right before update_engine or an install script starts
+/// writing. Either may write over the installed system's partitions, so
+/// whatever still runs from them has to move off first.
 pub type Detach = Box<dyn FnOnce() -> Result<()> + Send>;
 
 const METADATA: &str = "/metadata";
+
+/// Where a zip's install script is put to run, as Android's recovery puts
+/// it, and the version of the interface the script is told it runs under.
+const BINARY: &str = "/tmp/update-binary";
+const API_VERSION: &str = "3";
+
+/// Scripts written for other recoveries start with the shell they find
+/// here, and look for programs where those recoveries keep them.
+const SBIN_SHELL: &str = "/sbin/sh";
+const SHELL: &str = "/system/bin/sh";
+const SCRIPT_PATH: &str = "/sbin:/system/bin:/system/xbin";
+
+/// How long what an install script leaves running may keep its output open
+/// once the script has ended, before it is ended too; and after that, how
+/// long its output is waited on before it is let go.
+const LINGER: Duration = Duration::from_secs(1);
 
 /// The least charge to install on, without and with a charger, as
 /// Android's recovery asks.
@@ -188,6 +207,9 @@ enum Done {
     Decided(Outcome),
     /// update_engine failed with this code.
     Engine(i32),
+    /// The install script ended with this status; `wipe_cache` when it
+    /// asked for the cache partition to be erased after.
+    Script { code: i32, wipe_cache: bool },
     Error(anyhow::Error),
 }
 
@@ -253,6 +275,14 @@ fn conclude(done: Done, served: Result<Option<Fault>>, origin: Origin) -> Outcom
             }
             outcome
         }
+        // A script that ended well read what it needed, whatever it tried
+        // to read past.
+        (Done::Script { code: 0, wipe_cache }, served) => {
+            if !matches!(served, Ok(None)) {
+                let _ = kmsg(&format!("install: the package stopped being readable while the script ran: {served:?}"));
+            }
+            Outcome::Ran { wipe_cache }
+        }
         (_, Err(e)) => failed(e.context("serve the package")),
         (_, Ok(Some(Fault::Transfer(why)))) => Outcome::Failed(match origin {
             Origin::Computer => Failure::Disconnected,
@@ -260,6 +290,7 @@ fn conclude(done: Done, served: Result<Option<Fault>>, origin: Origin) -> Outcom
         }),
         (_, Ok(Some(Fault::Changed(_)))) => Outcome::Failed(Failure::Changed),
         (Done::Engine(code), Ok(None)) => Outcome::Failed(Failure::Engine(code)),
+        (Done::Script { code, .. }, Ok(None)) => Outcome::Failed(Failure::Script(code)),
         (Done::Error(e), Ok(None)) => failed(e),
     }
 }
@@ -271,7 +302,7 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
     match package {
         Package::Update(update) => update_system(ctx, mount, &update),
         Package::Image(kind) => flash_image(ctx, kind, size),
-        Package::Script => Ok(Done::Decided(Outcome::Refused(Refusal::Script))),
+        Package::Script => run_script(ctx),
         Package::Unknown => Ok(Done::Decided(Outcome::Refused(Refusal::Unknown))),
     }
 }
@@ -457,7 +488,8 @@ fn apply<S>(ctx: &Context, mount: &Mount<S>, update: &Update) -> Result<i32> {
     }
 }
 
-/// Hand each line of `from` to `each`, until the writer closes it.
+/// Hand each line of `from` to `each` without its line ending, until the
+/// writer closes it.
 fn lines(from: impl Read, mut each: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
     let mut reader = BufReader::new(from);
     let mut line = Vec::new();
@@ -466,7 +498,7 @@ fn lines(from: impl Read, mut each: impl FnMut(&str) -> io::Result<()>) -> io::R
         if reader.read_until(b'\n', &mut line)? == 0 {
             return Ok(());
         }
-        each(String::from_utf8_lossy(&line).trim_end())?;
+        each(String::from_utf8_lossy(&line).trim_end_matches(['\n', '\r']))?;
     }
 }
 
@@ -494,6 +526,218 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
         }
     })?;
     Ok(Done::Decided(Outcome::Flashed { partition, slots }))
+}
+
+/// Run the install script of the zip being served once the user agrees,
+/// as Android's recovery runs one, among what the recoveries such scripts
+/// are written for give them: their shell at /sbin, and the slot's
+/// partitions mapped and not mounted.
+fn run_script(ctx: &mut Context) -> Result<Done> {
+    if let Some(refusal) = battery()? {
+        return Ok(Done::Decided(Outcome::Refused(refusal)));
+    }
+    // The screen may have left the page before it heard the package came.
+    if ctx.shared.cancelled() {
+        return Ok(Done::Decided(Outcome::Cancelled));
+    }
+    ctx.send(Event::Script);
+    match ctx.commands.recv() {
+        Ok(Command::Install) => {}
+        Ok(Command::Cancel) | Err(_) => return Ok(Done::Decided(Outcome::Cancelled)),
+        Ok(other) => bail!("a script waiting to be agreed to was told {other:?}"),
+    }
+    let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    extract_script()?;
+    shell_at_sbin()?;
+    let detach = ctx.detach.take().expect("an installer takes one package");
+    detach().context("move off the installed system")?;
+    // While an update is in flight, the slot's partitions in super are its
+    // and stay unmapped.
+    let mapped = match skyward_vab::snapshot_state()? {
+        SnapshotState::None => skyward_vab::map_slot(slot)?,
+        state => {
+            let _ = kmsg(&format!("install: the slot's partitions stay unmapped while an update is in flight ({state:?})"));
+            Vec::new()
+        }
+    };
+    let mounted = skyward_block::mount::mount_ids()?;
+    let ran = run_binary(ctx);
+    if let Err(e) = clean_up(&mounted, &mapped) {
+        let _ = kmsg(&format!("install: not all the script left behind was taken away: {e:#}"));
+    }
+    let (code, wipe_cache) = ran?;
+    Ok(Done::Script { code, wipe_cache })
+}
+
+/// Put the zip's install script where it runs from, for anyone to run.
+fn extract_script() -> Result<()> {
+    let zip = File::open(fuse::PACKAGE).context("open the package")?;
+    let mut zip = zip::ZipArchive::new(BufReader::new(zip)).context("read the zip directory")?;
+    let mut script = zip.by_name(package::UPDATE_BINARY).context("open the install script")?;
+    match fs::remove_file(BINARY) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("take away the {BINARY} an earlier install left")),
+    }
+    let mut out = OpenOptions::new().write(true).create_new(true).open(BINARY).with_context(|| format!("make {BINARY}"))?;
+    io::copy(&mut script, &mut out).with_context(|| format!("write {BINARY}"))?;
+    out.set_permissions(fs::Permissions::from_mode(0o755)).with_context(|| format!("make {BINARY} runnable"))
+}
+
+/// Give scripts written for other recoveries the shell they start with.
+fn shell_at_sbin() -> Result<()> {
+    let link = Path::new(SBIN_SHELL);
+    match fs::symlink_metadata(link) {
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("look at {SBIN_SHELL}")),
+    }
+    let dir = link.parent().expect("the link is in a folder");
+    fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+    symlink(SHELL, link).with_context(|| format!("link {SBIN_SHELL} to {SHELL}"))
+}
+
+/// A line one of the install script's outputs gave.
+enum Said {
+    Request(Request),
+    /// A line on the request pipe asking for nothing this recovery knows.
+    Unknown(String),
+    /// A line the script, or a program it ran, wrote to its output.
+    Output(String),
+}
+
+/// A process group, all that is still in it ended once this is let go.
+struct Group(libc::pid_t);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        // A group that has ended already is no one's to end.
+        unsafe { libc::kill(-self.0, libc::SIGKILL) };
+    }
+}
+
+/// Run the install script: show what it prints and how far it says it is,
+/// keep all it asks for and writes in the log, and give how it ended and
+/// whether it asked for the cache partition to be erased after. What it
+/// leaves running is ended with it.
+fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
+    let mut log = File::create(SCRIPT_LOG).with_context(|| format!("create {SCRIPT_LOG}"))?;
+    let (requests_read, requests_write) = pipe(0)?;
+    let (output_read, output_write) = pipe(0)?;
+    let fd = requests_write.as_raw_fd();
+    let mut command = std::process::Command::new(BINARY);
+    command
+        .args([API_VERSION, &fd.to_string(), fuse::PACKAGE])
+        .current_dir("/")
+        .env("PATH", SCRIPT_PATH)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output_write.try_clone().context("share the script's output")?))
+        .stderr(Stdio::from(output_write));
+    // The script keeps its end of the request pipe across exec, makes files
+    // as Android's recovery has it make them, and leads a process group of
+    // its own, for what it leaves running to be ended with it.
+    unsafe {
+        command.pre_exec(move || {
+            libc::umask(0o022);
+            if libc::setpgid(0, 0) == -1 || libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().with_context(|| format!("start {BINARY}"))?;
+    let group = Group(child.id() as libc::pid_t);
+    ctx.send(Event::Running);
+    // The outputs close once only the script and what it runs hold them.
+    drop(command);
+    drop(requests_write);
+
+    let (tx, rx) = mpsc::channel();
+    let output_tx = tx.clone();
+    // Neither reader is waited for: what the script leaves running may
+    // hold its outputs open past its end.
+    thread::spawn(move || {
+        lines(File::from(requests_read), |line| {
+            let said = script::parse(line).map_or_else(|| Said::Unknown(line.to_string()), Said::Request);
+            let _ = tx.send(said);
+            Ok(())
+        })
+    });
+    thread::spawn(move || {
+        lines(File::from(output_read), |line| {
+            let _ = output_tx.send(Said::Output(line.to_string()));
+            Ok(())
+        })
+    });
+
+    let started = Instant::now();
+    let mut bar = Bar::default();
+    let (mut shown, mut told) = (None, Instant::now());
+    let mut wipe_cache = false;
+    let mut ended = None;
+    let mut others_ended = false;
+    loop {
+        match rx.recv_timeout(PROGRESS_EVERY) {
+            // An empty line only ends the one before it, in the recoveries
+            // these scripts are written for.
+            Ok(Said::Request(Request::Print(text))) if text.is_empty() => {}
+            Ok(Said::Request(Request::Print(text))) => {
+                writeln!(log, "{text}").context("write the log")?;
+                ctx.send(Event::Print(text));
+            }
+            Ok(Said::Request(Request::WipeCache)) => {
+                writeln!(log, "[asked for the cache partition to be erased after]").context("write the log")?;
+                wipe_cache = true;
+            }
+            Ok(Said::Request(Request::Log(text))) => writeln!(log, "{text}").context("write the log")?,
+            Ok(Said::Request(Request::Other(what))) => writeln!(log, "[asked for {what}]").context("write the log")?,
+            Ok(Said::Request(moving)) => bar.hear(&moving, started.elapsed()),
+            Ok(Said::Unknown(line)) => writeln!(log, "[unknown request] {line}").context("write the log")?,
+            Ok(Said::Output(line)) => writeln!(log, "{line}").context("write the log")?,
+            Err(RecvTimeoutError::Timeout) => {}
+            // Every output has closed: the script, and all it ran, are done.
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if let Some(share) = bar.share(started.elapsed()) {
+            let thousandths = (share * 1000.0).round() as u16;
+            if shown != Some(thousandths) && told.elapsed() >= PROGRESS_EVERY {
+                shown = Some(thousandths);
+                told = Instant::now();
+                ctx.send(Event::Progress(Stage::Script { thousandths }));
+            }
+        }
+        if ended.is_none() {
+            ended = child.try_wait().context("see whether the install script has ended")?.map(|status| (status, Instant::now()));
+        }
+        if let Some((_, at)) = ended {
+            if at.elapsed() >= LINGER && !others_ended {
+                unsafe { libc::kill(-group.0, libc::SIGKILL) };
+                others_ended = true;
+            }
+            if at.elapsed() >= LINGER * 2 {
+                writeln!(log, "[a program the script ran still holds its output, and is left]").context("write the log")?;
+                break;
+            }
+        }
+    }
+    let status = match ended {
+        Some((status, _)) => status,
+        None => child.wait().context("wait for the install script")?,
+    };
+    writeln!(log, "[ended: {status}]").context("write the log")?;
+    Ok((status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)), wipe_cache))
+}
+
+/// Take away what the script mounted and left mounted, the latest first,
+/// and the slot's partitions mapped for it; and mount /metadata again as
+/// the recovery keeps it, for a script that took it away.
+fn clean_up(before: &[(i32, PathBuf)], mapped: &[String]) -> Result<()> {
+    let kept: HashSet<i32> = before.iter().map(|(id, _)| *id).collect();
+    for (_, point) in skyward_block::mount::mount_ids()?.into_iter().rev().filter(|(id, _)| !kept.contains(id)) {
+        skyward_block::mount::umount_detach(&point)?;
+    }
+    skyward_vab::unmap_slot(mapped)?;
+    remount_metadata()
 }
 
 /// What the phone tells the computer it is.

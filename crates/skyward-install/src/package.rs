@@ -1,7 +1,7 @@
-//! What arrives over sideload: an A/B update package, a partition image,
-//! or something this recovery cannot install; and whether an update
-//! package may go on this phone, checked the way Android's recovery checks
-//! it.
+//! What arrives over sideload: an A/B update package, a zip with an
+//! install script, a partition image, or something this recovery cannot
+//! install; and whether an update package may go on this phone, checked
+//! the way Android's recovery checks it.
 
 use crate::image::{self, ImageKind};
 use crate::Refusal;
@@ -13,7 +13,8 @@ use zip::{CompressionMethod, ZipArchive};
 const PAYLOAD: &str = "payload.bin";
 const PROPERTIES: &str = "payload_properties.txt";
 const METADATA: &str = "META-INF/com/android/metadata";
-const UPDATE_BINARY: &str = "META-INF/com/google/android/update-binary";
+/// The install script of a zip that installs itself.
+pub const UPDATE_BINARY: &str = "META-INF/com/google/android/update-binary";
 
 /// The most read to tell an image's kind: every header this recovery
 /// writes fits in one page.
@@ -23,8 +24,7 @@ const HEAD: usize = 4096;
 pub enum Package {
     Update(Update),
     Image(ImageKind),
-    /// A zip that installs itself by running the script inside it, which
-    /// needs a scripting environment this recovery does not have.
+    /// A zip that installs itself by running the script inside it.
     Script,
     Unknown,
 }

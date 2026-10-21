@@ -217,7 +217,7 @@ pub fn rows(t: &Theme, f: &Fonts, entries: &[FileRow], action: fn(usize) -> Acti
         y += (m.dp(ROW_DP) + m.dp(NAME_LINE_DP) * (lines - 1) as f32).round();
         edges.push(y);
     }
-    Rows { edges, action }
+    Rows { edges, action: Some(action) }
 }
 
 /// Entry `e`'s row over the whole of `c`, sized for it: its icon, its name

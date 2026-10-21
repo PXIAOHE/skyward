@@ -478,6 +478,8 @@ pub enum Confirm {
     Install,
     /// Install an update that erases all user data after it.
     InstallWipe,
+    /// Run the install script of the zip that waits to be agreed to.
+    RunScript,
 }
 
 /// What the wipe page erases: everything a factory reset erases, or any of
@@ -615,6 +617,11 @@ pub enum Install {
     /// system.
     Updating { version: Option<String>, stage: Option<Stage>, overwriting: bool },
     Flashing { partition: &'static str, stage: Option<Stage> },
+    /// A zip with an install script waits for the user to agree to run it.
+    ConfirmingScript,
+    /// Its install script is made ready and then, once `running`, runs; how
+    /// far it says it is, once it says.
+    Scripting { stage: Option<Stage>, running: bool },
     /// `damage` is what a failure may have left broken.
     Finished { outcome: Outcome, damage: Option<Damage> },
     /// The page was left and the installer is stopping, handing USB back
@@ -629,6 +636,9 @@ pub enum Damage {
     System,
     /// The image had begun going into this partition.
     Partition(&'static str),
+    /// The install script had begun to run, and may have written to any
+    /// partition.
+    Script,
 }
 
 /// An image, and where it goes so far.
@@ -848,12 +858,13 @@ pub struct Dock {
 }
 
 /// The rows of a list drawn as they come into view, the way a list view
-/// binds its rows: where each lies on the page and what touching one does.
+/// binds its rows: where each lies on the page and what touching one does,
+/// for rows that answer touch.
 pub struct Rows {
     /// Page y of each row's top, then of the last row's bottom; whole
     /// pixels, so the rows meet without seams.
     pub edges: Vec<f32>,
-    pub action: fn(usize) -> Action,
+    pub action: Option<fn(usize) -> Action>,
 }
 
 impl Rows {
@@ -931,8 +942,9 @@ impl Frame {
             return Some(*h);
         }
         let rows = self.rows.as_ref()?;
+        let action = rows.action?;
         let i = rows.at(y)?;
-        Some(Hit { rect: rows.rect(i, self.canvas.w as f32), action: (rows.action)(i) })
+        Some(Hit { rect: rows.rect(i, self.canvas.w as f32), action: action(i) })
     }
 
     /// How tall the page is: its canvas, or its rows and the margin after
@@ -971,6 +983,10 @@ pub struct State {
     pub install: Install,
     /// Where the package being installed comes from.
     pub source: Source,
+    /// The name of the file being installed, when it is one on the phone.
+    pub package_name: Option<String>,
+    /// What the install script last run showed, its latest lines.
+    pub script_output: Vec<String>,
     /// The mount page's partitions, as the runtime last read them, or why
     /// it could not.
     pub mounts: Result<Vec<MountRow>, String>,
@@ -1054,6 +1070,8 @@ impl Default for State {
             confirm: 0.0,
             install: Install::Idle,
             source: Source::Computer,
+            package_name: None,
+            script_output: Vec::new(),
             mounts: Ok(Vec::new()),
             mount_failure: None,
             backup: [true, true, false, true],
@@ -1258,6 +1276,9 @@ enum Drag {
 }
 
 const TOAST_MS: u64 = 2000;
+/// The most lines of what an install script shows that its page keeps,
+/// the latest; the log keeps them all.
+const SCRIPT_LINES: usize = 500;
 /// How long a finger rests on an entry before it counts as held, as the
 /// system's long press does.
 const LONG_PRESS_MS: u64 = 400;
@@ -1942,6 +1963,7 @@ impl App {
     pub fn start_sideload(&mut self) {
         self.state.install = Install::Starting;
         self.state.source = Source::Computer;
+        self.state.package_name = None;
         self.open(Screen::Installing);
     }
 
@@ -2428,7 +2450,11 @@ impl App {
                     self.say("正在刷入，请等待刷入完成", now);
                     return fx;
                 }
-                Install::Starting | Install::Waiting | Install::Choosing(_) | Install::Confirming { .. } => {
+                Install::Scripting { .. } => {
+                    self.say("正在安装，请等待安装完成", now);
+                    return fx;
+                }
+                Install::Starting | Install::Waiting | Install::Choosing(_) | Install::Confirming { .. } | Install::ConfirmingScript => {
                     self.state.install = Install::Ending;
                     fx.push(Effect::Cancel);
                 }
@@ -2449,8 +2475,9 @@ impl App {
     }
 
     /// Hear from the installer. Once the installing page is left, only its
-    /// end matters. An image waiting for its partition, an update waiting
-    /// to be agreed to, and the end light a dark panel: all want the user.
+    /// end matters. An image waiting for its partition, an update or a
+    /// script waiting to be agreed to, and the end light a dark panel: all
+    /// want the user.
     pub fn install(&mut self, ev: Event, now: u64) {
         if self.state.install == Install::Ending {
             if matches!(ev, Event::Finished(_)) {
@@ -2458,7 +2485,7 @@ impl App {
             }
             return;
         }
-        if matches!(ev, Event::Image { .. } | Event::Ready { .. } | Event::Finished(_)) {
+        if matches!(ev, Event::Image { .. } | Event::Ready { .. } | Event::Script | Event::Finished(_)) {
             self.wake(now);
         }
         let install = &mut self.state.install;
@@ -2475,8 +2502,22 @@ impl App {
             Event::Image { kind, size, partitions } => {
                 *install = Install::Choosing(Choice { kind, size, partitions, partition: 0, pick: Pick::Current })
             }
+            Event::Script => *install = Install::ConfirmingScript,
+            Event::Running => {
+                *install = Install::Scripting { stage: None, running: true };
+                self.state.script_output.clear();
+            }
+            Event::Print(line) => {
+                let shown = &mut self.state.script_output;
+                if shown.len() == SCRIPT_LINES {
+                    shown.remove(0);
+                }
+                shown.push(line);
+            }
             Event::Progress(stage) => match install {
-                Install::Updating { stage: shown, .. } | Install::Flashing { stage: shown, .. } => *shown = Some(stage),
+                Install::Updating { stage: shown, .. } | Install::Flashing { stage: shown, .. } | Install::Scripting { stage: shown, .. } => {
+                    *shown = Some(stage)
+                }
                 _ => {}
             },
             Event::Finished(outcome) => {
@@ -2485,6 +2526,7 @@ impl App {
                     (Outcome::Failed(_), Install::Flashing { partition, stage: Some(Stage::Flashing { done, .. }) }) if *done > 0 => {
                         Some(Damage::Partition(partition))
                     }
+                    (Outcome::Failed(_), Install::Scripting { running: true, .. }) => Some(Damage::Script),
                     _ => None,
                 };
                 *install = Install::Finished { outcome, damage };
@@ -2604,6 +2646,8 @@ impl App {
                 Install::Idle | Install::Finished { .. } => {
                     self.state.install = Install::Starting;
                     self.state.source = Source::Computer;
+                    self.state.package_name = None;
+                    self.state.script_output.clear();
                     if self.screen() == Screen::Installing {
                         self.refresh();
                     } else {
@@ -2828,6 +2872,8 @@ impl App {
             Install::Idle | Install::Finished { .. } => {
                 self.state.install = Install::Checking { size };
                 self.state.source = Source::File(place);
+                self.state.package_name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
+                self.state.script_output.clear();
                 self.open(Screen::Installing);
                 vec![Effect::InstallFile(place, path)]
             }
@@ -3132,6 +3178,13 @@ impl App {
                                     self.refresh();
                                 }
                             }
+                            Confirm::RunScript => {
+                                if self.state.install == Install::ConfirmingScript {
+                                    self.state.install = Install::Scripting { stage: None, running: false };
+                                    fx.push(Effect::Install);
+                                    self.refresh();
+                                }
+                            }
                             Confirm::Backup => {
                                 let s = &self.state;
                                 let refused = if !s.backup.contains(&true) {
@@ -3425,7 +3478,8 @@ mod tests {
             }
         }
         let rows = fr.rows.as_ref().expect("control on the page");
-        let k = (0..rows.count()).find(|&k| (rows.action)(k) == action).expect("control on the page");
+        let answer = rows.action.expect("control on the page");
+        let k = (0..rows.count()).find(|&k| answer(k) == action).expect("control on the page");
         let (x, y) = rows.rect(k, fr.canvas.w as f32).centre();
         (x, y - scroll)
     }
@@ -4327,6 +4381,86 @@ mod tests {
     }
 
     #[test]
+    fn a_zip_runs_its_install_script_once_agreed_to_and_shows_what_it_says() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        app.data_waiting(None);
+        tap(&mut app, &f, &i, Action::Open(Screen::Choose(Place::Storage)));
+        app.set_place(Place::Storage, String::new(), Ok(vec![entry("rom.zip", FileKind::File)]), LISTED);
+        assert_eq!(tap(&mut app, &f, &i, Action::ChooseEntry(0)), vec![Effect::InstallFile(Place::Storage, "rom.zip".into())]);
+        assert_eq!(app.state.package_name.as_deref(), Some("rom.zip"), "the question names the file");
+        app.install(Event::Script, 0);
+        assert_eq!(app.state.install, Install::ConfirmingScript);
+        // The question lit the panel, so the user swipes past the wake guard.
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::RunScript)).unwrap().rect;
+        let y = track.centre().1 - app.top().1;
+        app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 1000);
+        app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
+        assert_eq!(app.touch(Touch::Up, &f, 1000), vec![Effect::Install]);
+        assert_eq!(app.state.install, Install::Scripting { stage: None, running: false });
+        app.install(Event::Running, 1000);
+        for line in ["- Flashing boot", " ", "- Done"] {
+            app.install(Event::Print(line.into()), 1000);
+        }
+        app.install(Event::Progress(Stage::Script { thousandths: 500 }), 1000);
+        assert_eq!(app.state.install, Install::Scripting { stage: Some(Stage::Script { thousandths: 500 }), running: true });
+        let fr = app.frame(&f, &i);
+        assert!(fr.hits.is_empty(), "nothing on the page to tap while the script runs");
+        assert_eq!(fr.rows.as_ref().map(Rows::count), Some(3), "a row to each line it showed");
+        app.key(Key::Back, 1000);
+        assert_eq!(app.screen(), Screen::Installing, "a script running keeps the page");
+        assert_eq!(app.deadline(1000), Some(1000 + TOAST_MS), "it says why");
+        app.install(Event::Finished(Outcome::Ran { wipe_cache: false }), 1000);
+        assert_eq!(app.state.install, Install::Finished { outcome: Outcome::Ran { wipe_cache: false }, damage: None });
+        let fr = app.frame(&f, &i);
+        let rows = fr.rows.as_ref().expect("what it showed stays on the page");
+        assert_eq!(rows.count(), 3);
+        assert!(fr.hit(W as f32 / 2.0, rows.rect(1, W as f32).centre().1).is_none(), "its lines answer no touch");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::RebootTo(Target::System), 2000), vec![Effect::Reboot(Target::System)]);
+    }
+
+    #[test]
+    fn a_script_turned_down_never_runs_and_one_that_failed_may_have_written_anywhere() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Script, 0);
+        assert_eq!(app.key(Key::Back, 1000), vec![Effect::Cancel], "turning it down cancels before it runs");
+        assert_eq!((app.screen(), &app.state.install), (Screen::Install, &Install::Ending));
+
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Script, 0);
+        app.state.install = Install::Scripting { stage: None, running: false };
+        let full = "extract META-INF/com/google/android/update-binary: No space left on device (os error 28)";
+        app.install(Event::Finished(Outcome::Failed(Failure::Error(full.into()))), 0);
+        assert!(matches!(app.state.install, Install::Finished { damage: None, .. }), "a script that never ran wrote nothing");
+        tap_at(&mut app, &f, &i, Action::Sideload, 1000);
+        app.install(Event::Waiting, 1000);
+        app.install(Event::Script, 1000);
+        app.state.install = Install::Scripting { stage: None, running: false };
+        app.install(Event::Running, 1000);
+        app.install(Event::Print("! Could not write vendor_b".into()), 1000);
+        app.install(Event::Finished(Outcome::Failed(Failure::Script(1))), 1000);
+        assert_eq!(app.state.install, Install::Finished { outcome: Outcome::Failed(Failure::Script(1)), damage: Some(Damage::Script) });
+        assert_eq!(app.state.script_output, ["! Could not write vendor_b"], "what it showed before it failed stays");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Sideload, 2000), vec![Effect::Sideload]);
+        assert!(app.state.script_output.is_empty(), "sending again starts afresh");
+    }
+
+    #[test]
+    fn a_script_page_keeps_the_latest_lines_its_script_showed() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Script, 0);
+        app.install(Event::Running, 0);
+        for k in 0..SCRIPT_LINES + 2 {
+            app.install(Event::Print(format!("line {k}")), 0);
+        }
+        assert_eq!(app.state.script_output.len(), SCRIPT_LINES);
+        assert_eq!(app.state.script_output[0], "line 2");
+        assert_eq!(app.frame(&f, &i).rows.as_ref().map(Rows::count), Some(SCRIPT_LINES));
+    }
+
+    #[test]
     fn work_the_recovery_does_not_do_is_shown_with_where_to_go() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Unhandled, W, H, PPD);
@@ -5187,7 +5321,7 @@ mod tests {
 
     #[test]
     fn rows_are_found_by_where_they_lie() {
-        let rows = Rows { edges: vec![100.0, 352.0, 682.0, 934.0], action: Action::OpenEntry };
+        let rows = Rows { edges: vec![100.0, 352.0, 682.0, 934.0], action: Some(Action::OpenEntry) };
         assert_eq!(rows.count(), 3);
         assert_eq!(rows.at(99.0), None);
         assert_eq!(rows.at(100.0), Some(0));

@@ -1500,6 +1500,72 @@ pub fn info_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, items: &[(&str,
     bottom
 }
 
+/// The height of each line on a card of what a program showed.
+const OUTPUT_PITCH_DP: f32 = 19.0;
+/// From the card's top to the ink of its first line.
+const OUTPUT_TOP_DP: f32 = 18.0;
+/// From the baseline of the card's last line to its foot.
+const OUTPUT_FOOT_DP: f32 = 20.0;
+
+/// One line a program showed, as its card lays it out: in the monospaced
+/// face where it has every character of the line, so that what is laid out
+/// in columns stays so, and in the body face otherwise; wrapped to the
+/// card, on one line at least.
+fn output_line<'f>(c: &Canvas, t: &Theme, f: &'f Fonts, line: &str) -> (&'f Face, Vec<String>) {
+    let m = &t.m;
+    let face = if line.chars().all(|ch| f.mono.has(ch)) { &f.mono } else { &f.body };
+    let parts = wrap(c, face, line, m.sub_px, m.w as f32 - 2.0 * (m.margin + m.inner));
+    (face, if parts.is_empty() { vec![String::new()] } else { parts })
+}
+
+/// Where a line's baseline sits in a band as tall as the line, the ink of
+/// 「中」 centred in it; then the padding the card's first row has above its
+/// bands, and its last row below them.
+fn output_layout(t: &Theme, f: &Fonts) -> (f32, f32, f32) {
+    let m = &t.m;
+    let pitch = m.dp(OUTPUT_PITCH_DP);
+    let (ink_top, ink_bottom) = f.body.ink(m.sub_px);
+    let base = (pitch - ink_top - ink_bottom) / 2.0;
+    (base, m.dp(OUTPUT_TOP_DP) - (base + ink_top), m.dp(OUTPUT_FOOT_DP) - (pitch - base))
+}
+
+/// The rows of a card of the lines a program showed, one to each line and
+/// as tall as it wraps to, the first starting at `top` and the first and
+/// the last holding the card's padding; whole pixels, so the rows meet
+/// without seams. Each is drawn as it comes into view, by [`output_row`].
+pub fn output_edges(c: &Canvas, t: &Theme, f: &Fonts, top: f32, lines: &[String]) -> Vec<f32> {
+    let pitch = t.m.dp(OUTPUT_PITCH_DP);
+    let (_, above, below) = output_layout(t, f);
+    let mut y = top.round();
+    let mut edges = Vec::with_capacity(lines.len() + 1);
+    edges.push(y);
+    for (k, line) in lines.iter().enumerate() {
+        let (_, parts) = output_line(c, t, f, line);
+        let pad = if k == 0 { above } else { 0.0 } + if k + 1 == lines.len() { below } else { 0.0 };
+        y += (pitch * parts.len() as f32 + pad).round();
+        edges.push(y);
+    }
+    edges
+}
+
+/// Line `i` of `lines` over the whole of `c`, as its row of the card
+/// [`output_edges`] lays out. The card runs on past each end of the row
+/// that it goes on from, so only its first and last rows round it.
+pub fn output_row(c: &mut Canvas, t: &Theme, f: &Fonts, lines: &[String], i: usize) {
+    let m = &t.m;
+    let pitch = m.dp(OUTPUT_PITCH_DP);
+    let (base, above, _) = output_layout(t, f);
+    let y0 = if i == 0 { 0.0 } else { -m.card_radius };
+    let y1 = c.h as f32 + if i + 1 == lines.len() { 0.0 } else { m.card_radius };
+    c.clear(t.pal.bg);
+    c.fill_round_rect(m.margin, y0, m.w as f32 - 2.0 * m.margin, y1 - y0, m.card_radius, t.pal.card);
+    let (face, parts) = output_line(c, t, f, &lines[i]);
+    let first = base + if i == 0 { above } else { 0.0 };
+    for (k, part) in parts.iter().enumerate() {
+        c.text(face, part, m.margin + m.inner, first + pitch * k as f32, m.sub_px, t.pal.info, None);
+    }
+}
+
 /// Light and dark previews side by side; the active one carries an accent
 /// ring and an accent caption. The rows are the light and the dark choice.
 pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32) -> Block {

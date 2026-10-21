@@ -13,7 +13,8 @@ pub enum Request {
     Progress { share: f32, seconds: f32 },
     /// How far through its step the script is, 0 to 1.
     SetProgress(f32),
-    /// A line to show the user; empty for a blank one.
+    /// A line to show the user. An empty one only ends the line before
+    /// it, in the recoveries these scripts are written for.
     Print(String),
     /// Erase the cache partition once the script has succeeded.
     WipeCache,
@@ -109,7 +110,7 @@ mod tests {
         assert_eq!(parse("set_progress 0.25"), Some(Request::SetProgress(0.25)));
         assert_eq!(parse("ui_print - Installing"), Some(Request::Print("- Installing".into())));
         assert_eq!(parse("ui_print   *  Magisk  *\r\n"), Some(Request::Print("  *  Magisk  *".into())), "leading spaces stay");
-        assert_eq!(parse("ui_print"), Some(Request::Print(String::new())), "a blank line");
+        assert_eq!(parse("ui_print"), Some(Request::Print(String::new())), "an empty one");
         assert_eq!(parse("ui_print "), Some(Request::Print(String::new())));
         assert_eq!(parse("wipe_cache"), Some(Request::WipeCache));
         assert_eq!(parse("log E1001: Failed to update system image."), Some(Request::Log("E1001: Failed to update system image.".into())));

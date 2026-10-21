@@ -1,6 +1,6 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Folder,
-    Frame, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe,
+    Frame, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe,
     BACKUP_PARTS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
 };
 use crate::canvas::Canvas;
@@ -91,6 +91,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::DeleteEntry | Confirm::DeleteBackup => ("滑动以删除", true),
         Confirm::Install => ("滑动以安装", false),
         Confirm::InstallWipe => ("滑动以安装并清除", true),
+        Confirm::RunScript => ("滑动以安装", true),
     }
 }
 
@@ -633,7 +634,7 @@ pub fn install(cx: &Ctx) -> Frame {
         t,
         f,
         methods.bottom,
-        "支持安装 A/B 完整更新包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动。选择文件时仅列出文件夹以及 .zip、.img 文件。",
+        "支持安装 A/B 完整更新包和带安装脚本的刷机包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动。选择文件时仅列出文件夹以及 .zip、.img 文件。",
     );
     Frame::new(t, c, out, "安装", top)
 }
@@ -684,8 +685,28 @@ fn update_stage(stage: Option<&Stage>) -> (String, Option<f32>) {
             (format!("第 2 步，共 3 步：校验 {partition}（{}/{count}）", index + 1), Some(*index as f32 / *count as f32))
         }
         Some(Stage::Finishing) => ("第 3 步，共 3 步：完成安装".into(), None),
-        Some(Stage::Flashing { .. }) | None => ("正在准备".into(), None),
+        Some(Stage::Flashing { .. } | Stage::Script { .. }) | None => ("正在准备".into(), None),
     }
+}
+
+/// How far an install script says it is, once it says.
+fn script_share(stage: Option<&Stage>) -> Option<f32> {
+    match stage {
+        Some(Stage::Script { thousandths }) => Some(f32::from(*thousandths) / 1000.0),
+        _ => None,
+    }
+}
+
+/// What the install script showed, where there is any: its heading, and
+/// under it the lines as the page's long list, the last thing on the page.
+fn script_output(c: &mut Canvas, cx: &Ctx, y: f32, rows: &mut Option<Rows>) -> f32 {
+    let lines = &cx.state.script_output;
+    if lines.is_empty() {
+        return y;
+    }
+    let y = widgets::section(c, cx.t, cx.f, y, "安装脚本输出");
+    *rows = Some(Rows { edges: widgets::output_edges(c, cx.t, cx.f, y, lines), action: None });
+    y
 }
 
 fn pick_title(pick: Pick, current: Option<Slot>) -> String {
@@ -702,7 +723,7 @@ fn pick_title(pick: Pick, current: Option<Slot>) -> String {
 pub fn installing(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
     let mut c = long_page(t);
-    let mut out = Vec::new();
+    let (mut out, mut rows) = (Vec::new(), None);
     let top = t.m.content_top;
     let computer = s.source == Source::Computer;
     let bottom = match &s.install {
@@ -719,7 +740,7 @@ pub fn installing(cx: &Ctx) -> Frame {
             let y = widgets::section(&mut c, t, f, y, "在电脑上运行");
             let y = widgets::info_card(&mut c, t, f, y, &[(
                 "adb sideload 文件名",
-                "将文件名替换为系统更新包或分区镜像，例如 boot.img".into(),
+                "将文件名替换为系统更新包、刷机包或分区镜像，例如 boot.img".into(),
             )]);
             widgets::footnote(&mut c, t, f, y, "需在电脑上安装 Android SDK Platform-Tools。返回后将停止等待，并将 USB 切换回 adb 调试。")
         }
@@ -794,12 +815,7 @@ pub fn installing(cx: &Ctx) -> Frame {
             let (detail, done) = update_stage(stage.as_ref());
             let y = widgets::progress_card(&mut c, t, f, top, &title, &detail, done);
             let target = i.slot.map(|s| format!("新系统将安装到槽位 {}。", s.other().letter())).unwrap_or_default();
-            let keep = match s.source {
-                Source::Computer => "安装完成前，请不要断开数据线或关机。",
-                Source::File(Place::Storage) => "安装完成前，请不要关机。",
-                Source::File(Place::UsbDrive) => "安装完成前，请不要拔出 U 盘或关机。",
-            };
-            let y = widgets::footnote(&mut c, t, f, y, &format!("{keep}{target}"));
+            let y = widgets::footnote(&mut c, t, f, y, &format!("{}{target}", until_installed(s.source)));
             if *overwriting {
                 widgets::footnote(&mut c, t, f, y, "正在覆盖当前系统，安装完成前重启将无法进入系统。")
             } else {
@@ -823,14 +839,49 @@ pub fn installing(cx: &Ctx) -> Frame {
             };
             widgets::footnote(&mut c, t, f, y, keep)
         }
-        Install::Finished { outcome, damage } => finished(&mut c, cx, top, outcome, *damage, &mut out),
+        Install::ConfirmingScript => {
+            let name = s.package_name.as_deref().unwrap_or("刷机包");
+            let detail = "该刷机包将运行其中的安装脚本，安装脚本可以改写本机的任何分区。";
+            let mut y = widgets::list(&mut c, t, f, top, &[standing(name, ORANGE, Icon::Install, detail)]).bottom;
+            if let Some(note) = fmt::snapshot_script_note(&i.snapshot) {
+                y = widgets::footnote(&mut c, t, f, y, note);
+            }
+            let (label, danger) = confirm_label(Confirm::RunScript);
+            let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
+            out.push(Hit { rect: track, action: Action::Confirm(Confirm::RunScript) });
+            widgets::footnote(&mut c, t, f, track.y + track.h, "返回将取消安装，不会运行安装脚本。")
+        }
+        Install::Scripting { stage, .. } => {
+            let said = s.script_output.iter().rev().map(|line| line.trim()).find(|line| !line.is_empty());
+            let y = widgets::progress_card(&mut c, t, f, top, "正在安装", said.unwrap_or("正在运行安装脚本"), script_share(stage.as_ref()));
+            let y = widgets::footnote(&mut c, t, f, y, until_installed(s.source));
+            script_output(&mut c, cx, y, &mut rows)
+        }
+        Install::Finished { outcome, damage } => finished(&mut c, cx, top, outcome, *damage, &mut out, &mut rows),
     };
-    Frame::new(t, fit(c, t, bottom), out, install_title(s.source), top)
+    Frame { rows, ..Frame::new(t, fit(c, t, bottom), out, install_title(s.source), top) }
+}
+
+/// What not to do while a package from `source` is installed.
+fn until_installed(source: Source) -> &'static str {
+    match source {
+        Source::Computer => "安装完成前，请不要断开数据线或关机。",
+        Source::File(Place::Storage) => "安装完成前，请不要关机。",
+        Source::File(Place::UsbDrive) => "安装完成前，请不要拔出 U 盘或关机。",
+    }
 }
 
 /// How an install ended, and where to go from there: another package from
 /// the computer, or back to choose another file.
-fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Option<Damage>, out: &mut Vec<Hit>) -> f32 {
+fn finished(
+    c: &mut Canvas,
+    cx: &Ctx,
+    top: f32,
+    outcome: &Outcome,
+    damage: Option<Damage>,
+    out: &mut Vec<Hit>,
+    rows: &mut Option<Rows>,
+) -> f32 {
     let (t, f, source) = (cx.t, cx.f, cx.state.source);
     let gap = t.m.card_gap;
     let (again, another) = match source {
@@ -861,6 +912,12 @@ fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Optio
             out.extend(hits(&next.rows, &acts));
             next.bottom
         }
+        Outcome::Ran { .. } => {
+            let y = widgets::list(c, t, f, top, &[standing("安装成功", GREEN, Icon::Install, "安装脚本已运行完成。")]).bottom;
+            let next = widgets::list(c, t, f, y + gap, &[restart, again]);
+            out.extend(hits(&next.rows, &[Action::RebootTo(Target::System), another]));
+            script_output(c, cx, next.bottom, rows)
+        }
         Outcome::Cancelled => {
             let y = widgets::list(c, t, f, top, &[standing("已取消", SLATE, Icon::Install, "未写入任何内容。")]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[again]);
@@ -886,13 +943,14 @@ fn finished(c: &mut Canvas, cx: &Ctx, top: f32, outcome: &Outcome, damage: Optio
             let warning = match damage {
                 Some(Damage::System) => format!("当前系统已被部分覆盖，重启后将无法进入系统。请{}完整更新包，安装完成后再重启。", redo.0),
                 Some(Damage::Partition(p)) => format!("{p} 仅写入了部分内容，重启后可能无法正常启动。请{}该镜像，刷入完成后再重启。", redo.1),
+                Some(Damage::Script) => format!("本机的分区可能已被部分改写，重启后可能无法正常启动。请{}该刷机包，安装完成后再重启。", redo.0),
                 None => "当前系统未受影响。".into(),
             };
             let mut y = widgets::footnote(c, t, f, next.bottom, &warning);
             if let Some(d) = detail {
                 y = widgets::footnote(c, t, f, y, &d);
             }
-            y
+            script_output(c, cx, y, rows)
         }
     }
 }
@@ -1412,6 +1470,7 @@ pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
             let entries = folder.entries.as_ref().expect("a folder listed draws its rows");
             files::row(c, cx.t, cx.f, &entries[i], folder.listed, cx.state.time_zone);
         }
+        Screen::Installing => widgets::output_row(c, cx.t, cx.f, &cx.state.script_output, i),
         other => unreachable!("{other:?} draws no list row by row"),
     }
 }

@@ -1,6 +1,7 @@
 //! Installing a package that a computer sends with `adb sideload`, or that
 //! is a file on the phone: A/B update packages, which the phone's own
-//! update_engine applies, and partition images, which are written here.
+//! update_engine applies, zips that install themselves by running the
+//! script inside them, and partition images, which are written here.
 
 pub mod adb;
 pub mod fuse;
@@ -23,6 +24,10 @@ use skyward_vab::{Slot, SnapshotState};
 /// Where the installer keeps what update_engine wrote while it last
 /// installed an update.
 pub const ENGINE_LOG: &str = "/tmp/update_engine.log";
+
+/// Where the installer keeps what the install script it last ran showed
+/// and asked for, with what it and the programs it ran wrote.
+pub const SCRIPT_LOG: &str = "/tmp/install-script.log";
 
 /// What the installer tells the screen, in the order it happens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +53,14 @@ pub enum Event {
     /// A partition image, held until [`Command::Flash`] says where it goes:
     /// the partitions of this phone it fits, the likeliest first.
     Image { kind: ImageKind, size: u64, partitions: Vec<&'static str> },
+    /// A zip that installs itself by running the script inside it, held
+    /// until [`Command::Install`]: a script may write over any partition,
+    /// so it always waits.
+    Script,
+    /// The install script has started.
+    Running,
+    /// A line the install script shows.
+    Print(String),
     Progress(Stage),
     Finished(Outcome),
 }
@@ -64,6 +77,8 @@ pub enum Stage {
     Finishing,
     /// An image is written and read back: bytes so far, of all.
     Flashing { done: u64, total: u64 },
+    /// The install script runs, as far as it says it is, in thousandths.
+    Script { thousandths: u16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +88,9 @@ pub enum Outcome {
     Installed { slot: Slot, wipe: bool },
     /// The image is in the partition of these slots.
     Flashed { partition: &'static str, slots: Vec<Slot> },
+    /// The install script ran to its end; `wipe_cache` when it asked for
+    /// the cache partition to be erased after.
+    Ran { wipe_cache: bool },
     /// Stopped before anything was written.
     Cancelled,
     /// Not installed, for this reason; nothing was written.
@@ -85,8 +103,6 @@ pub enum Outcome {
 pub enum Refusal {
     /// A file this recovery cannot install.
     Unknown,
-    /// A zip that installs itself by running the script inside it.
-    Script,
     /// An update package that is not for A/B phones; the type it names.
     NotAb(String),
     /// Made for other devices: the ones it names.
@@ -117,6 +133,9 @@ pub enum Refusal {
 pub enum Failure {
     /// update_engine stopped with this error code.
     Engine(i32),
+    /// The install script ended with this status, or 128 and the signal
+    /// that ended it, as a shell tells it.
+    Script(i32),
     /// The computer stopped sending: the cable came out or `adb sideload`
     /// was stopped.
     Disconnected,
@@ -136,7 +155,8 @@ pub enum Command {
     /// Write the image held in [`Event::Image`] to `partition` in these
     /// slots.
     Flash { partition: &'static str, slots: Vec<Slot> },
-    /// Install the update held in [`Event::Ready`].
+    /// Install the update held in [`Event::Ready`], or run the script held
+    /// in [`Event::Script`].
     Install,
     /// Stop without installing anything.
     Cancel,

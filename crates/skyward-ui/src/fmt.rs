@@ -192,6 +192,16 @@ pub fn snapshot_slot_note(s: &SnapshotState) -> Option<&'static str> {
     }
 }
 
+/// What an install script that writes to super does to an update in
+/// flight; `None` when none is known to be.
+pub fn snapshot_script_note(s: &SnapshotState) -> Option<&'static str> {
+    match s {
+        SnapshotState::None | SnapshotState::Unknown => None,
+        SnapshotState::Snapshotted | SnapshotState::Merging => Some("系统更新尚未完成合并。刷机包改写 super 中的分区，会导致这次更新无法完成。"),
+        SnapshotState::MergeFailed => Some("系统更新合并失败，需在系统中处理。刷机包改写 super 中的分区，会导致这次更新无法完成。"),
+    }
+}
+
 /// Why the slot's partitions in super are not backed up while an update is
 /// in flight; `None` when none is.
 pub fn snapshot_backup_note(s: &SnapshotState) -> Option<&'static str> {
@@ -508,8 +518,7 @@ fn give(source: Source) -> &'static str {
 pub fn refusal(r: &Refusal, codename: &str, source: Source, zone: usize) -> String {
     let give = give(source);
     match r {
-        Refusal::Unknown => format!("无法识别该文件，请{give} A/B 完整更新包或分区镜像。"),
-        Refusal::Script => format!("无法安装刷机包，请{give} A/B 完整更新包或分区镜像。"),
+        Refusal::Unknown => format!("无法识别该文件，请{give} A/B 完整更新包、刷机包或分区镜像。"),
         Refusal::NotAb(kind) if kind.is_empty() => format!("该更新包未注明类型，请{give} A/B 完整更新包。"),
         Refusal::NotAb(kind) => format!("该更新包的类型为 {kind}，请{give} A/B 完整更新包。"),
         Refusal::OtherDevice(devices) => format!("该更新包适用于 {devices}，本机为 {codename}。"),
@@ -550,6 +559,7 @@ pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
             };
             (what, Some(format!("错误代码：{code}")))
         }
+        Failure::Script(code) => (format!("安装脚本运行失败，退出码为 {code}。"), None),
         Failure::Disconnected => ("电脑已停止发送，请检查数据线连接后重新发送。".into(), None),
         Failure::Unreadable(why) => match source {
             Source::File(Place::UsbDrive) => ("读取文件失败，请检查 U 盘连接后重试。".into(), Some(why.clone())),
@@ -779,12 +789,13 @@ mod tests {
         );
         assert_eq!(failure(&Failure::Engine(26), pc), ("更新包签名验证失败，请发送官方更新包。".into(), Some("错误代码：26".into())));
         assert_eq!(failure(&Failure::Error("open ep0: busy".into()), pc).1.as_deref(), Some("open ep0: busy"));
+        assert_eq!(failure(&Failure::Script(1), pc), ("安装脚本运行失败，退出码为 1。".into(), None));
     }
 
     #[test]
     fn a_file_chosen_is_answered_with_choosing_another() {
         let file = Source::File(Place::Storage);
-        assert_eq!(refusal(&Refusal::Unknown, "ishtar", file, 0), "无法识别该文件，请选择 A/B 完整更新包或分区镜像。");
+        assert_eq!(refusal(&Refusal::Unknown, "ishtar", file, 0), "无法识别该文件，请选择 A/B 完整更新包、刷机包或分区镜像。");
         assert_eq!(refusal(&Refusal::Incremental, "ishtar", file, 0), "无法安装增量更新包，请选择完整更新包。");
         assert_eq!(failure(&Failure::Engine(26), file).0, "更新包签名验证失败，请选择官方更新包。");
         assert_eq!(failure(&Failure::Changed, file).0, "文件在读取过程中被修改，请重新选择。");

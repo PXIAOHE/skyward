@@ -207,9 +207,9 @@ fn in_place(place: Place, path: &str) -> PathBuf {
 
 /// Save the logs chosen into a folder of their own in `into`, named by when
 /// they were saved in the zone the settings chose: the recovery's own, with
-/// what update_engine wrote while it last installed an update, and the
-/// kernel's. Each file is owned as a copy into the folder would be. Gives
-/// the folder.
+/// what update_engine wrote while it last installed an update and what the
+/// last install script wrote, and the kernel's. Each file is owned as a
+/// copy into the folder would be. Gives the folder.
 fn export_logs(recovery: bool, kernel: bool, into: &Path, zone: usize) -> Result<PathBuf> {
     let there = into.ancestors().find(|p| p.exists()).context("the root is always there")?;
     let ownership = ownership(there)?;
@@ -223,10 +223,12 @@ fn export_logs(recovery: bool, kernel: bool, into: &Path, zone: usize) -> Result
     };
     if recovery {
         save("recovery.log", &fs::read(skyward_sys::LOG).with_context(|| format!("read {}", skyward_sys::LOG))?)?;
-        match fs::read(skyward_install::ENGINE_LOG) {
-            Ok(engine) => save("update_engine.log", &engine)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("read {}", skyward_install::ENGINE_LOG)),
+        for (name, path) in [("update_engine.log", skyward_install::ENGINE_LOG), ("install-script.log", skyward_install::SCRIPT_LOG)] {
+            match fs::read(path) {
+                Ok(log) => save(name, &log)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("read {path}")),
+            }
         }
     }
     if kernel {
@@ -903,21 +905,29 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 use skyward_install::{Event as Told, Outcome};
                 let finished = matches!(ev, Told::Finished(_));
                 let wipe_after = matches!(ev, Told::Finished(Outcome::Installed { wipe: true, .. }));
+                let cache_after = matches!(ev, Told::Finished(Outcome::Ran { wipe_cache: true, .. }));
                 eprintln!("install {ev:?}");
                 app.install(ev, now);
                 if finished {
                     installer = None;
                     // A sideload the system asked for is done with however
                     // it went; asked to, the phone then leaves on its own,
-                    // once what the update asked to be erased is.
+                    // once what the package asked to be erased is.
                     let auto_reboot = matches!(request.work, Work::Sideload { auto_reboot: true });
                     if matches!(request.work, Work::Sideload { .. }) && kept {
                         bcb::clear(&misc)?;
                         kept = false;
                     }
+                    if cache_after && !app.state.cache_partition {
+                        skyward_sys::kmsg("the install script asked for the cache partition to be erased, and the phone has none")?;
+                    }
                     if wipe_after {
                         ensure!(eraser.is_none(), "erasing is under way already");
                         eraser = Some(factory_reset(&mut app, false, false)?);
+                        erase_leaves = auto_reboot;
+                    } else if cache_after && app.state.cache_partition {
+                        ensure!(eraser.is_none(), "erasing is under way already");
+                        eraser = Some(parts_wipe(&mut app, vec![Step::Cache], &cfg.wipe.logs, false)?);
                         erase_leaves = auto_reboot;
                     } else if auto_reboot {
                         leave_at = Some(now + LEAVE_AFTER_MS);
