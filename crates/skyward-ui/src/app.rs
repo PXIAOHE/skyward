@@ -1316,6 +1316,10 @@ enum Press {
     Volume { down: bool, next: u64 },
     /// The power key on the control lit, which it works as it comes up.
     Power(Spot),
+    /// The power key on a swipe-to-confirm control, whose knob slides along
+    /// its track at `track` from `at` while the key is held; let go once
+    /// it has slid far enough, the control confirms.
+    Slide { which: Confirm, track: Rect, at: u64 },
     /// Done with: nothing more comes of it until it is let go.
     Spent,
 }
@@ -1374,6 +1378,11 @@ const WAKE_GUARD_MS: u64 = 400;
 /// [`REPEAT_MS`], as the system repeats a key held.
 const REPEAT_DELAY_MS: u64 = 400;
 const REPEAT_MS: u64 = 50;
+/// How far along its track the knob of a swipe-to-confirm control has to
+/// be let go to confirm.
+const SLID: f32 = 0.9;
+/// How long the power key held takes the knob the whole way along.
+const SLIDE_MS: u64 = 700;
 /// The response, in seconds, of the spring the page scrolls on to show
 /// the control the keys moved to.
 const SEEK_PERIOD: f32 = 0.35;
@@ -1519,6 +1528,9 @@ pub struct App {
     /// The page scrolling of its own accord to show the control the keys
     /// moved to: where it comes to rest, and the spring taking it there.
     seek: Option<(f32, Spring)>,
+    /// A swipe-to-confirm control whose knob the power key moved, to draw
+    /// again with the page.
+    knob: Option<(Confirm, Rect)>,
     /// How tall the page was when last drawn: one being drawn again, as
     /// work under way tells how far it has come, scrolls as far meanwhile.
     height: f32,
@@ -1587,6 +1599,7 @@ impl App {
             keys: start == Screen::Fastboot,
             button: None,
             seek: None,
+            knob: None,
             height: 0.0,
             drawn: Vec::new(),
             spare: Vec::new(),
@@ -1646,10 +1659,12 @@ impl App {
     /// backlight eases, else when a shown message should disappear or the
     /// panel should dim or go off.
     pub fn deadline(&self, now: u64) -> Option<u64> {
+        let sliding = matches!(self.button, Some((_, Press::Slide { .. }))) && self.state.confirm < 1.0;
         let moving = self.display_on
             && (self.fling.is_some()
                 || self.bounce.is_some()
                 || self.seek.is_some()
+                || sliding
                 || self.cue.is_some()
                 || self.title.moving(now)
                 || self.bar.moving(now)
@@ -1747,6 +1762,15 @@ impl App {
             }
             if done {
                 self.seek = None;
+            }
+        }
+        // The power key held on a swipe-to-confirm control slides its knob.
+        if let Some((_, Press::Slide { which, track, at })) = self.button {
+            let along = (now.saturating_sub(at) as f32 / SLIDE_MS as f32).min(1.0);
+            if along != self.state.confirm {
+                self.state.confirm = along;
+                self.knob = Some((which, track));
+                self.dirty = true;
             }
         }
         // A volume key held moves the light on and on, once the page it
@@ -1872,9 +1896,7 @@ impl App {
             }
             _ => {}
         }
-        if let Some((key, _)) = self.button {
-            self.button = Some((key, Press::Spent));
-        }
+        self.drop_button();
         self.fling = None;
         self.bounce = None;
         self.seek = None;
@@ -1891,6 +1913,7 @@ impl App {
     pub fn refresh(&mut self) {
         self.frame = None;
         self.spots = None;
+        self.knob = None;
         self.spare.extend(self.drawn.drain(..).map(|(_, c)| c));
         self.dirty = true;
     }
@@ -2352,6 +2375,9 @@ impl App {
         self.frame(f, info);
         let t = self.theme();
         let m = t.m;
+        if let Some((which, track)) = self.knob.take() {
+            self.paint_knob(&t, f, which, track);
+        }
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
         }
@@ -3164,9 +3190,7 @@ impl App {
                 self.keys = false;
                 self.dirty = true;
             }
-            if let Some((key, _)) = self.button {
-                self.button = Some((key, Press::Spent));
-            }
+            self.drop_button();
         }
         self.stir(now);
         let t = self.theme();
@@ -3324,89 +3348,11 @@ impl App {
                     self.dirty = true;
                 }
                 Drag::Confirm { which, track, .. } => {
-                    let done = self.state.confirm > 0.9;
+                    let done = self.state.confirm > SLID;
                     self.state.confirm = 0.0;
                     self.repaint_confirm(&t, f, which, track);
                     if done {
-                        match which {
-                            Confirm::Reboot => fx.push(Effect::Reboot(TARGETS[self.state.reboot])),
-                            Confirm::Wipe => {
-                                let chosen: Vec<Wipe> = WIPES.iter().zip(self.state.wipe).filter(|(_, on)| *on).map(|(&w, _)| w).collect();
-                                match chosen.is_empty() {
-                                    true => self.say("请选择要清除的内容", now),
-                                    false => fx.push(Effect::Wipe(chosen)),
-                                }
-                            }
-                            Confirm::Install | Confirm::InstallWipe => {
-                                if let Install::Confirming { version, .. } = &self.state.install {
-                                    self.state.install = Install::Updating { version: version.clone(), stage: None, overwriting: false };
-                                    fx.push(Effect::Install);
-                                    self.refresh();
-                                }
-                            }
-                            Confirm::RunScript => {
-                                if self.state.install == Install::ConfirmingScript {
-                                    self.state.install = Install::Scripting { stage: None, running: false };
-                                    fx.push(Effect::Install);
-                                    self.refresh();
-                                }
-                            }
-                            Confirm::Backup => {
-                                let s = &self.state;
-                                let refused = if !s.backup.contains(&true) {
-                                    Some("请选择要备份的内容")
-                                } else if s.backup[2] && s.data != Data::Open {
-                                    Some("备份 data 分区需先完成「解密」")
-                                } else if s.place_open(s.backup_to) {
-                                    None
-                                } else {
-                                    Some(match (s.backup_to, &s.usb_drive) {
-                                        (Place::Storage, _) if s.data == Data::Erased => "data 分区已清除",
-                                        (Place::Storage, _) => "请先完成「解密」",
-                                        (Place::UsbDrive, Some(UsbDrive::Unreadable(_))) => "无法读取该 U 盘",
-                                        (Place::UsbDrive, _) => "请通过 OTG 连接 U 盘",
-                                    })
-                                };
-                                let backup = Effect::Backup { parts: s.backup, place: s.backup_to, compress: s.compress, verify: s.verify };
-                                match refused {
-                                    Some(why) => self.say(why, now),
-                                    None => fx.push(backup),
-                                }
-                            }
-                            Confirm::Restore => {
-                                let (entry, parts) = self.state.restore.as_ref().expect("the restore page shows a backup");
-                                let restore = Effect::Restore { place: entry.place, name: entry.name.clone(), parts: *parts };
-                                if !parts.contains(&true) {
-                                    self.say("请选择要恢复的内容", now);
-                                } else if parts[2] && self.state.data != Data::Open {
-                                    self.say("恢复 data 分区需先完成「解密」", now);
-                                } else {
-                                    fx.push(restore);
-                                }
-                            }
-                            Confirm::DeleteBackup => {
-                                let (entry, _) = self.state.restore.as_ref().expect("the restore page shows a backup");
-                                fx.push(Effect::DeleteBackup { place: entry.place, name: entry.name.clone() });
-                            }
-                            Confirm::Slot => match (&self.state.boot_slots, self.state.next_slot) {
-                                (Some(Ok(slots)), Some(pick)) if pick != slots.active => fx.push(Effect::SetSlot(pick)),
-                                (Some(Ok(slots)), _) => {
-                                    let said = format!("下次已从槽位 {} 启动", slots.active.letter());
-                                    self.say(&said, now);
-                                }
-                                _ => self.say("无法读取启动槽位", now),
-                            },
-                            Confirm::FactoryReset => fx.push(Effect::FactoryReset),
-                            Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
-                            Confirm::Flash => {
-                                if let Install::Choosing(choice) = &self.state.install {
-                                    let partition = choice.partitions[choice.partition];
-                                    fx.push(Effect::Flash { partition, pick: choice.pick });
-                                    self.state.install = Install::Flashing { partition, stage: None };
-                                    self.refresh();
-                                }
-                            }
-                        }
+                        fx.extend(self.confirmed(which, now));
                     }
                 }
                 Drag::Pattern => {
@@ -3475,6 +3421,11 @@ impl App {
             }
             Key::Power => {
                 match self.keys.then(|| self.lit()).flatten() {
+                    // Held on a swipe-to-confirm control, the key slides
+                    // its knob along as a finger would.
+                    Some(Spot { stop: Stop::Hit(Action::Confirm(which)), rect, .. }) => {
+                        self.button = Some((key, Press::Slide { which, track: rect, at: now }))
+                    }
                     Some(spot) => self.button = Some((key, Press::Power(spot))),
                     None => {
                         self.button = Some((key, Press::Spent));
@@ -3488,20 +3439,130 @@ impl App {
     }
 
     /// A button came back up: the power key works the control it went down
-    /// on.
+    /// on, or confirms with the knob it slid far enough.
     pub fn key_up(&mut self, key: Key, now: u64) -> Vec<Effect> {
         let Some((down, press)) = self.button else { return Vec::new() };
         if down != key {
             return Vec::new();
         }
         self.button = None;
+        self.dirty = true;
         match press {
-            Press::Power(spot) => {
-                self.dirty = true;
-                self.work(spot, now)
+            Press::Power(spot) => self.work(spot, now),
+            Press::Slide { which, track, .. } => {
+                let done = self.state.confirm > SLID;
+                self.let_knob_go(which, track);
+                if done {
+                    return self.confirmed(which, now);
+                }
+                self.say("请按住电源键", now);
+                Vec::new()
             }
             Press::Volume { .. } | Press::Spent => Vec::new(),
         }
+    }
+
+    /// Whatever the button held down was doing comes to nothing until it is
+    /// let go: a knob it slid goes back.
+    fn drop_button(&mut self) {
+        let Some((key, press)) = self.button else { return };
+        if let Press::Slide { which, track, .. } = press {
+            self.let_knob_go(which, track);
+        }
+        self.button = Some((key, Press::Spent));
+    }
+
+    /// Let go of a swipe-to-confirm control's knob, which goes back to the
+    /// start of its track.
+    fn let_knob_go(&mut self, which: Confirm, track: Rect) {
+        self.state.confirm = 0.0;
+        self.knob = Some((which, track));
+        self.dirty = true;
+    }
+
+    /// What a swipe-to-confirm control slid to its end does.
+    fn confirmed(&mut self, which: Confirm, now: u64) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        match which {
+            Confirm::Reboot => fx.push(Effect::Reboot(TARGETS[self.state.reboot])),
+            Confirm::Wipe => {
+                let chosen: Vec<Wipe> = WIPES.iter().zip(self.state.wipe).filter(|(_, on)| *on).map(|(&w, _)| w).collect();
+                match chosen.is_empty() {
+                    true => self.say("请选择要清除的内容", now),
+                    false => fx.push(Effect::Wipe(chosen)),
+                }
+            }
+            Confirm::Install | Confirm::InstallWipe => {
+                if let Install::Confirming { version, .. } = &self.state.install {
+                    self.state.install = Install::Updating { version: version.clone(), stage: None, overwriting: false };
+                    fx.push(Effect::Install);
+                    self.refresh();
+                }
+            }
+            Confirm::RunScript => {
+                if self.state.install == Install::ConfirmingScript {
+                    self.state.install = Install::Scripting { stage: None, running: false };
+                    fx.push(Effect::Install);
+                    self.refresh();
+                }
+            }
+            Confirm::Backup => {
+                let s = &self.state;
+                let refused = if !s.backup.contains(&true) {
+                    Some("请选择要备份的内容")
+                } else if s.backup[2] && s.data != Data::Open {
+                    Some("备份 data 分区需先完成「解密」")
+                } else if s.place_open(s.backup_to) {
+                    None
+                } else {
+                    Some(match (s.backup_to, &s.usb_drive) {
+                        (Place::Storage, _) if s.data == Data::Erased => "data 分区已清除",
+                        (Place::Storage, _) => "请先完成「解密」",
+                        (Place::UsbDrive, Some(UsbDrive::Unreadable(_))) => "无法读取该 U 盘",
+                        (Place::UsbDrive, _) => "请通过 OTG 连接 U 盘",
+                    })
+                };
+                let backup = Effect::Backup { parts: s.backup, place: s.backup_to, compress: s.compress, verify: s.verify };
+                match refused {
+                    Some(why) => self.say(why, now),
+                    None => fx.push(backup),
+                }
+            }
+            Confirm::Restore => {
+                let (entry, parts) = self.state.restore.as_ref().expect("the restore page shows a backup");
+                let restore = Effect::Restore { place: entry.place, name: entry.name.clone(), parts: *parts };
+                if !parts.contains(&true) {
+                    self.say("请选择要恢复的内容", now);
+                } else if parts[2] && self.state.data != Data::Open {
+                    self.say("恢复 data 分区需先完成「解密」", now);
+                } else {
+                    fx.push(restore);
+                }
+            }
+            Confirm::DeleteBackup => {
+                let (entry, _) = self.state.restore.as_ref().expect("the restore page shows a backup");
+                fx.push(Effect::DeleteBackup { place: entry.place, name: entry.name.clone() });
+            }
+            Confirm::Slot => match (&self.state.boot_slots, self.state.next_slot) {
+                (Some(Ok(slots)), Some(pick)) if pick != slots.active => fx.push(Effect::SetSlot(pick)),
+                (Some(Ok(slots)), _) => {
+                    let said = format!("下次已从槽位 {} 启动", slots.active.letter());
+                    self.say(&said, now);
+                }
+                _ => self.say("无法读取启动槽位", now),
+            },
+            Confirm::FactoryReset => fx.push(Effect::FactoryReset),
+            Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
+            Confirm::Flash => {
+                if let Install::Choosing(choice) = &self.state.install {
+                    let partition = choice.partitions[choice.partition];
+                    fx.push(Effect::Flash { partition, pick: choice.pick });
+                    self.state.install = Install::Flashing { partition, stage: None };
+                    self.refresh();
+                }
+            }
+        }
+        fx
     }
 
     /// Work the control the keys are on, as touching it does.
@@ -3745,7 +3806,8 @@ impl App {
         let t = self.theme();
         let keypad = self.screen() == Screen::Decrypt && matches!(self.state.data, Data::Locked { keys: Keys::Digits, .. });
         let (r, radius) = focus::lit(&t, spot.stop, self.place(&spot, offset), keypad);
-        let alpha = if matches!(self.button, Some((_, Press::Power(_)))) { LIGHT_HELD_ALPHA } else { LIGHT_ALPHA };
+        let held = matches!(self.button, Some((_, Press::Power(_) | Press::Slide { .. })));
+        let alpha = if held { LIGHT_HELD_ALPHA } else { LIGHT_ALPHA };
         Some((spot.group, r, radius, t.pal.accent.with_alpha(alpha)))
     }
 
@@ -3806,12 +3868,18 @@ impl App {
     }
 
     fn repaint_confirm(&mut self, t: &Theme, f: &Fonts, which: Confirm, track: Rect) {
+        self.paint_knob(t, f, which, track);
+        self.dirty = true;
+    }
+
+    /// Draw the swipe-to-confirm control at `track` on the page again, its
+    /// knob where it has come to.
+    fn paint_knob(&mut self, t: &Theme, f: &Fonts, which: Confirm, track: Rect) {
         let (label, danger) = pages::confirm_label(which);
         if let Some(fr) = self.frame.as_mut() {
             fr.canvas.fill_rect(track.x, track.y, track.w, track.h, t.pal.bg);
             widgets::confirm(&mut fr.canvas, t, f, track.y, label, danger, self.state.confirm);
         }
-        self.dirty = true;
     }
 
     /// Add the dot under the finger to the pattern being drawn.
@@ -4773,6 +4841,32 @@ mod tests {
         let resting = app.resting();
         app.tick(5000);
         assert_eq!(app.top().1, resting, "where the page eased to");
+    }
+
+    #[test]
+    fn the_power_key_held_slides_a_swipe_control_and_confirms_it_let_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Reboot, W, H, PPD);
+        app.frame(&f, &i);
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Confirm(Confirm::Reboot)));
+        assert!(press(&mut app, Key::Power, 0).is_empty());
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("请按住电源键"), "a short press says how");
+        app.key(Key::Power, 1000);
+        assert_eq!(app.deadline(1000), Some(0), "the knob moves while the key is held");
+        app.tick(1000 + SLIDE_MS / 2);
+        assert!((app.state.confirm - 0.5).abs() < 0.01, "half way after half the time: {}", app.state.confirm);
+        assert!(app.key_up(Key::Power, 1000 + SLIDE_MS / 2).is_empty(), "let go short of the end, nothing happens");
+        assert_eq!(app.state.confirm, 0.0, "and the knob goes back");
+        app.key(Key::Power, 3000);
+        app.tick(3000 + SLIDE_MS * 2);
+        assert_eq!(app.state.confirm, 1.0, "the knob stops at the end");
+        assert_eq!(app.key_up(Key::Power, 3000 + SLIDE_MS * 2), vec![Effect::Reboot(TARGETS[0])], "let go there, it confirms");
+        assert_eq!(app.state.confirm, 0.0);
+        app.key(Key::Power, 6000);
+        app.tick(6000 + SLIDE_MS);
+        app.touch(Touch::Down(W as f32 / 2.0, 200.0), &f, 6000 + SLIDE_MS);
+        assert_eq!(app.state.confirm, 0.0, "a touch lets the knob go");
+        assert!(app.key_up(Key::Power, 6000 + SLIDE_MS).is_empty(), "and the key comes up to nothing");
     }
 
     #[test]
