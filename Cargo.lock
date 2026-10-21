@@ -1344,6 +1344,8 @@ name = "skyward-mtp"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "libc",
+ "zerocopy",
 ]
 
 [[package]]

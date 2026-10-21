@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 # The recovery carries no time zone files, so the rules come built in.
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
+libc = { workspace = true }
+zerocopy = { version = "0.8.63", features = ["derive"] }
