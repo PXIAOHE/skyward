@@ -4,8 +4,8 @@ use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Reflash, Refusal, Stage};
 use skyward_ui::app::{
     Action, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, EraseStop, FileKind,
-    FileOp, FileRow, FileTask, Held, Install, JobEnd, Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch, UsbDrive,
-    UsbLink, SCREEN_OFF,
+    FileOp, FileRow, FileTask, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch,
+    UsbDrive, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{fmt, pages, Canvas, Ctx, Fonts, Theme};
@@ -280,7 +280,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 92] = [
+    let pages: [PageShot; 90] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -449,11 +449,6 @@ fn main() -> Result<()> {
         ("60-slot-light-unread", Screen::Slot, false, &|app| {
             app.set_boot_slots(Err("android.hardware.boot@1.2::IBootControl is not running; the phone's boot control has to be started first".into()))
         }),
-        ("68-fastboot-light", Screen::Fastboot, false, &|app| app.set_fastboot(true, UsbLink::Connected)),
-        ("69-fastboot-dark-unplugged", Screen::Fastboot, true, &|app| {
-            app.set_fastboot(true, UsbLink::Unplugged);
-            app.state.fastboot.focus = 1;
-        }),
         ("70-erase-light", Screen::Erase, false, &|app| {
             app.set_asked(reset_asked());
             app.erase_started(true, true, vec![Part::Data, Part::Metadata]);
@@ -564,7 +559,7 @@ fn main() -> Result<()> {
     }
 
     // The panel mid-gesture, to set beside recordings of the same moves.
-    let moments: [Moment; 14] = [
+    let moments: [Moment; 18] = [
         ("08-about-light", Screen::About, false, &|_, _| 2000),
         ("08-about-dark", Screen::About, true, &|_, _| 2000),
         ("08-about-light-later", Screen::About, false, &|_, _| 9000),
@@ -587,6 +582,17 @@ fn main() -> Result<()> {
             app.frame(f, &info);
             drag(app, f, 2000.0, 700.0)
         }),
+        // The fastboot page starts worked with the keys, its first choice lit.
+        ("68-fastboot-light", Screen::Fastboot, false, &|app, _| {
+            app.set_fastboot(true, UsbLink::Connected);
+            0
+        }),
+        ("69-fastboot-dark-unplugged", Screen::Fastboot, true, &|app, f| {
+            app.set_fastboot(true, UsbLink::Unplugged);
+            keys_down(app, f, &info, 1)
+        }),
+        ("111-home-keys-light", Screen::Home, false, &|app, f| keys_down(app, f, &info, 3)),
+        ("112-home-keys-dark", Screen::Home, true, &|app, f| keys_down(app, f, &info, 9)),
     ];
     for (name, screen, dark, act) in moments {
         let mut app = opened(screen, w, h, ppd);
@@ -647,6 +653,21 @@ fn drag(app: &mut App, f: &Fonts, y0: f32, y1: f32) -> u64 {
         app.tick(ms);
     }
     2000
+}
+
+/// Press the volume key that moves the light down the page `times` times,
+/// a second apart, on the page drawn; returns a time after the page has
+/// come to rest.
+fn keys_down(app: &mut App, f: &Fonts, info: &DeviceInfo, times: u64) -> u64 {
+    for k in 0..times {
+        app.frame(f, info);
+        app.key(Key::VolumeDown, k * 1000);
+        app.key_up(Key::VolumeDown, k * 1000 + 100);
+        for ms in (k * 1000..(k + 1) * 1000).step_by(16) {
+            app.tick(ms);
+        }
+    }
+    times * 1000
 }
 
 /// Pull from `y0` to `y1` at x = 600 and keep the finger down.

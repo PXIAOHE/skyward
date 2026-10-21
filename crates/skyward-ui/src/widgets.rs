@@ -598,12 +598,18 @@ fn ramp(stops: &[(f32, f32)], f: f32) -> f32 {
     a0 + (a1 - a0) * (f - p0) / (p1 - p0)
 }
 
+/// The centre and radius of the round chip behind `<`.
+pub fn back_disc(t: &Theme) -> (f32, f32, f32) {
+    let m = &t.m;
+    (m.back_x + m.back_w / 2.0 + m.dp(1.55), m.back_cy, m.dp(21.7))
+}
+
 /// The round chip behind `<` while the bar shows: a pale disc with a
 /// bright rim and a faint shadow. Drawn once per theme on its own canvas,
 /// returned with where that canvas's top-left corner goes.
 pub fn back_chip(t: &Theme) -> (Canvas, i32, i32) {
     let m = &t.m;
-    let (cx, cy, r) = (m.back_x + m.back_w / 2.0 + m.dp(1.55), m.back_cy, m.dp(21.7));
+    let (cx, cy, r) = back_disc(t);
     let (fill, rim) = if t.dark { (Rgba::rgb(38, 38, 38), Rgba::rgb(62, 62, 62)) } else { (Rgba::rgb(248, 248, 248), Rgba::rgb(255, 255, 255)) };
     let spread = m.dp(7.0);
     let reach = r + spread;
@@ -948,16 +954,6 @@ pub fn list(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row]) -> Blo
 
 /// [`list`] in the given colours.
 pub fn list_toned(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row], tone: &Tone) -> Block {
-    card_rows(c, t, f, top, rows, tone, None)
-}
-
-/// [`list`] with the row at `focus` lit, for a page worked with the keys
-/// when the screen may not answer touch.
-pub fn list_focused(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row], focus: usize) -> Block {
-    card_rows(c, t, f, top, rows, &Tone::page(t), Some(focus))
-}
-
-fn card_rows(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row], tone: &Tone, focus: Option<usize>) -> Block {
     let m = &t.m;
     let lays: Vec<Layout> = rows.iter().map(|r| layout(c, t, f, r)).collect();
     let h: f32 = lays.iter().map(|l| l.h).sum();
@@ -965,13 +961,7 @@ fn card_rows(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row], tone:
     c.fill_round_rect(m.margin, top, w, h, m.card_radius, tone.card);
     let mut y = top;
     let mut rects = Vec::new();
-    for (k, (r, l)) in rows.iter().zip(&lays).enumerate() {
-        if focus == Some(k) {
-            // The light sits inside the row, its corners following the
-            // card's, in the accent's pale tint.
-            let (dx, dy) = (m.dp(6.0), m.dp(4.0));
-            c.fill_round_rect(m.margin + dx, y + dy, w - dx * 2.0, l.h - dy * 2.0, m.card_radius - dx, t.pal.badge);
-        }
+    for (r, l) in rows.iter().zip(&lays) {
         draw_row(c, t, f, r, l, y, tone);
         rects.push(Rect::new(m.margin, y, w, l.h));
         y += l.h;
@@ -1630,6 +1620,8 @@ fn rows(layer: Layer) -> [&'static str; 3] {
 }
 
 const KEY_H_DP: f32 = 44.0;
+/// How round a key's corners are.
+pub const KEY_RADIUS_DP: f32 = 6.0;
 const KEY_GAP_X_DP: f32 = 5.5;
 const KEY_GAP_Y_DP: f32 = 11.0;
 const KEYBOARD_PAD_X_DP: f32 = 3.5;
@@ -1700,7 +1692,7 @@ pub fn keyboard(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, layer: Layer, pr
     keys.push((Rect::new(space_x + space_w + gx, row_top(3), kw, kh), Cap::Char('.')));
     keys.push((Rect::new(w - pad - enter_w, row_top(3), enter_w, kh), Cap::Enter));
 
-    let radius = m.dp(6.0);
+    let radius = m.dp(KEY_RADIUS_DP);
     let glyph_px = m.dp(21.0);
     for &(r, cap) in &keys {
         let plain = matches!(cap, Cap::Char(_) | Cap::Space);
@@ -1789,25 +1781,6 @@ fn theme_tile(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, h: f32, dark: b
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_focused_list_lights_only_the_row_the_keys_are_on() {
-        let f = crate::font::bundled();
-        let t = Theme::light(1200, 2608, 3.0);
-        let mut c = Canvas::new(1200, 2608);
-        c.clear(t.pal.bg);
-        let rows = [Row::new("一").trail(Trail::None), Row::new("二").trail(Trail::None), Row::new("三").trail(Trail::None)];
-        let block = list_focused(&mut c, &t, &f, 300.0, &rows, 1);
-        // Near each row's right end, clear of its title.
-        let colour = |r: &Rect| {
-            let (x, y) = ((r.x + r.w - t.m.dp(20.0)) as usize, (r.y + r.h / 2.0) as usize);
-            let i = (y * c.w as usize + x) * 4;
-            Rgba::rgb(c.data[i], c.data[i + 1], c.data[i + 2])
-        };
-        assert_eq!(colour(&block.rows[1]), t.pal.badge, "the focused row is lit");
-        assert_eq!(colour(&block.rows[0]), t.pal.card);
-        assert_eq!(colour(&block.rows[2]), t.pal.card);
-    }
 
     /// The battery's pixel at (`x`, `y`) on screen.
     fn pixel(art: &(Canvas, i32, i32), x: f32, y: f32) -> [u8; 4] {

@@ -1850,7 +1850,7 @@ pub fn fastboot(cx: &Ctx) -> Frame {
     let y = widgets::footnote(&mut c, t, f, state.bottom, "你可以在电脑上使用 fastboot 命令刷写分区，包括 super 中的逻辑分区。");
     let y = widgets::section(&mut c, t, f, y, "退出 fastboot");
     let rows: Vec<Row> = FASTBOOT_CHOICES.iter().map(|&(title, _)| Row::new(title).trail(Trail::None)).collect();
-    let choices = widgets::list_focused(&mut c, t, f, y, &rows, s.fastboot.focus);
+    let choices = widgets::list(&mut c, t, f, y, &rows);
     let actions: Vec<Action> = FASTBOOT_CHOICES.iter().map(|&(_, action)| action).collect();
     let out = hits(&choices.rows, &actions);
     widgets::footnote(&mut c, t, f, choices.bottom, "按音量键选择，按电源键确认。");

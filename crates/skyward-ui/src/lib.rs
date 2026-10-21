@@ -4,6 +4,7 @@ pub mod color;
 pub mod files;
 pub mod fling;
 pub mod fmt;
+pub mod focus;
 pub mod font;
 pub mod geom;
 pub mod glow;

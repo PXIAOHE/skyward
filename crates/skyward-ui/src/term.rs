@@ -21,6 +21,8 @@ const PAD_DP: f32 = 14.0;
 /// keyboard: its height, and the gap above and below it.
 const KEYS_H_DP: f32 = 38.0;
 const KEYS_GAP_DP: f32 = 10.0;
+/// How round the row's keys' corners are.
+pub const KEY_RADIUS_DP: f32 = 8.0;
 
 /// A key of the terminal's own row, above the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,7 +297,7 @@ pub fn keys(c: &mut Canvas, t: &Theme, f: &Fonts, l: &Layout, ctrl: bool) -> Vec
         let r = Rect::new(m.margin + k as f32 * (w + gap), l.keys_top, w, h);
         let held = key == TermKey::Ctrl && ctrl;
         let (fill, ink) = if held { (t.pal.accent, t.pal.card) } else { (t.pal.card, t.pal.text) };
-        c.fill_round_rect(r.x, r.y, r.w, r.h, m.dp(8.0), fill);
+        c.fill_round_rect(r.x, r.y, r.w, r.h, m.dp(KEY_RADIUS_DP), fill);
         let label = match key {
             TermKey::Esc => "Esc",
             TermKey::Tab => "Tab",

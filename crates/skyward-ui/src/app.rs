@@ -1,6 +1,7 @@
 use crate::canvas::{Canvas, Run};
 use crate::color::Rgba;
 use crate::fling::{Fling, Tracker};
+use crate::focus::{self, Group, Spot, Stop};
 use crate::font::Fonts;
 use crate::geom::Rect;
 use crate::glow::{self, GlowClock};
@@ -692,13 +693,11 @@ pub enum UsbLink {
 }
 
 /// Fastboot as its page shows it: whether the phone's fastbootd runs and
-/// how far a computer has the port, as the runtime last read them, and
-/// which of [`FASTBOOT_CHOICES`] the keys are on.
+/// how far a computer has the port, as the runtime last read them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fastboot {
     pub running: bool,
     pub link: UsbLink,
-    pub focus: usize,
 }
 
 /// How long the screen stays on with nothing touched, in milliseconds, in
@@ -1115,7 +1114,7 @@ impl Default for State {
             usb_drive: None,
             drive: Folder::new(""),
             file: None,
-            fastboot: Fastboot { running: false, link: UsbLink::Unplugged, focus: 0 },
+            fastboot: Fastboot { running: false, link: UsbLink::Unplugged },
             erase: Erase::default(),
             asked: Asked::default(),
             clip: None,
@@ -1297,6 +1296,30 @@ enum Drag {
     Waking,
 }
 
+/// Where the keys are on a page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Focus {
+    /// Nowhere yet: the first control in view lights once the keys work
+    /// the page.
+    Unset,
+    /// On no control, none showing where the keys scrolled the page.
+    Off,
+    /// On this control, as it was when the page was last drawn.
+    On(Spot),
+}
+
+/// A button held down, and what holding it does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Press {
+    /// A volume key, moving the light down the page or up it, and again at
+    /// `next`.
+    Volume { down: bool, next: u64 },
+    /// The power key on the control lit, which it works as it comes up.
+    Power(Spot),
+    /// Done with: nothing more comes of it until it is let go.
+    Spent,
+}
+
 const TOAST_MS: u64 = 2000;
 /// The most lines of what an install script shows that its page keeps,
 /// the latest; the log keeps them all.
@@ -1347,6 +1370,17 @@ const BACKLIGHT_STEP_MS: u64 = 8;
 /// second tap of a wake habit, or the hand reaching for a phone whose
 /// screen an install just lit, should not act. Android's double-tap window.
 const WAKE_GUARD_MS: u64 = 400;
+/// A volume key held this long moves the light again, then once every
+/// [`REPEAT_MS`], as the system repeats a key held.
+const REPEAT_DELAY_MS: u64 = 400;
+const REPEAT_MS: u64 = 50;
+/// The response, in seconds, of the spring the page scrolls on to show
+/// the control the keys moved to.
+const SEEK_PERIOD: f32 = 0.35;
+/// How strongly the light tints the control the keys are on, and the one
+/// the power key is held down on.
+const LIGHT_ALPHA: u8 = 36;
+const LIGHT_HELD_ALPHA: u8 = 72;
 /// How far past the screen, in screens, a long list keeps its rows drawn.
 const NEAR_SCREENS: f32 = 0.5;
 
@@ -1455,6 +1489,11 @@ fn pinned_top(t: &Theme, p: &Pinned, offset: f32) -> f32 {
     (p.top - offset).max(widgets::bar_bottom(t))
 }
 
+/// Whether `r` reaches into the band of the screen from `top` to `bottom`.
+fn within(r: Rect, (top, bottom): (f32, f32)) -> bool {
+    r.y < bottom && r.y + r.h > top
+}
+
 /// Lay the sprite `blurs` keeps, moved by (`dx`, `dy`), in `color` at
 /// `level` of its strength, blurred by `blur` pixels.
 fn draw_faded(out: &mut Canvas, blurs: &mut Blurs, dx: f32, dy: f32, color: Rgba, level: f32, blur: f32) {
@@ -1465,8 +1504,21 @@ fn draw_faded(out: &mut Canvas, blurs: &mut Blurs, dx: f32, dy: f32, color: Rgba
 
 pub struct App {
     pub state: State,
-    stack: Vec<(Screen, f32)>,
+    /// The pages open, the one shown last: each with how far it is
+    /// scrolled and where the keys are on it.
+    stack: Vec<(Screen, f32, Focus)>,
     frame: Option<Frame>,
+    /// The controls of the page drawn, in the order the keys go through
+    /// them.
+    spots: Option<Vec<Spot>>,
+    /// The keys are working the pages: the control they are on is lit. A
+    /// touch puts the light out, and a volume key brings it back.
+    keys: bool,
+    /// The button held down, and what holding it does.
+    button: Option<(Key, Press)>,
+    /// The page scrolling of its own accord to show the control the keys
+    /// moved to: where it comes to rest, and the spring taking it there.
+    seek: Option<(f32, Spring)>,
     /// How tall the page was when last drawn: one being drawn again, as
     /// work under way tells how far it has come, scrolls as far meanwhile.
     height: f32,
@@ -1527,8 +1579,14 @@ impl App {
     pub fn new(start: Screen, w: u32, h: u32, px_per_dp: f32) -> Self {
         App {
             state: State::default(),
-            stack: vec![(start, 0.0)],
+            stack: vec![(start, 0.0, Focus::Unset)],
             frame: None,
+            spots: None,
+            // The touchscreen may run from the partitions fastboot leaves
+            // out, so its page starts worked with the keys.
+            keys: start == Screen::Fastboot,
+            button: None,
+            seek: None,
             height: 0.0,
             drawn: Vec::new(),
             spare: Vec::new(),
@@ -1570,11 +1628,11 @@ impl App {
         self.top().0
     }
 
-    fn top(&self) -> &(Screen, f32) {
+    fn top(&self) -> &(Screen, f32, Focus) {
         self.stack.last().expect("the page stack always holds a page")
     }
 
-    fn top_mut(&mut self) -> &mut (Screen, f32) {
+    fn top_mut(&mut self) -> &mut (Screen, f32, Focus) {
         self.stack.last_mut().expect("the page stack always holds a page")
     }
 
@@ -1591,6 +1649,7 @@ impl App {
         let moving = self.display_on
             && (self.fling.is_some()
                 || self.bounce.is_some()
+                || self.seek.is_some()
                 || self.cue.is_some()
                 || self.title.moving(now)
                 || self.bar.moving(now)
@@ -1603,7 +1662,11 @@ impl App {
             Drag::Press { action: Some(Action::OpenEntry(_)), at, .. } => Some(at + LONG_PRESS_MS),
             _ => None,
         };
-        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held].into_iter().flatten().min()
+        let repeat = match self.button {
+            Some((_, Press::Volume { next, .. })) => Some(next),
+            _ => None,
+        };
+        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat].into_iter().flatten().min()
     }
 
     /// When sitting idle next changes the lit panel: when it dims, or once
@@ -1672,6 +1735,26 @@ impl App {
             self.dirty = true;
             if b.at(now).1 {
                 self.bounce = None;
+            }
+        }
+        if let Some((target, spring)) = self.seek {
+            let (off, done) = spring.at(now);
+            let at = if done { target } else { (target + off).clamp(0.0, self.max_scroll()) };
+            let top = self.top_mut();
+            if top.1 != at {
+                top.1 = at;
+                self.dirty = true;
+            }
+            if done {
+                self.seek = None;
+            }
+        }
+        // A volume key held moves the light on and on, once the page it
+        // last moved on has been drawn.
+        if let Some((key, Press::Volume { down, next })) = self.button {
+            if now >= next && self.frame.is_some() {
+                self.button = Some((key, Press::Volume { down, next: now + REPEAT_MS }));
+                self.volume(down, now);
             }
         }
         if let Some((_, _, s)) = self.cue {
@@ -1789,8 +1872,12 @@ impl App {
             }
             _ => {}
         }
+        if let Some((key, _)) = self.button {
+            self.button = Some((key, Press::Spent));
+        }
         self.fling = None;
         self.bounce = None;
+        self.seek = None;
         self.pull = 0.0;
         self.cue = None;
     }
@@ -1803,6 +1890,7 @@ impl App {
     /// The page's readings changed (battery, storage): render it again.
     pub fn refresh(&mut self) {
         self.frame = None;
+        self.spots = None;
         self.spare.extend(self.drawn.drain(..).map(|(_, c)| c));
         self.dirty = true;
     }
@@ -1847,7 +1935,7 @@ impl App {
     /// The runtime read whether fastbootd runs and how far a computer has
     /// the port: keep it and show it if it changed.
     pub fn set_fastboot(&mut self, running: bool, link: UsbLink) {
-        let now = Fastboot { running, link, ..self.state.fastboot };
+        let now = Fastboot { running, link };
         if self.state.fastboot != now {
             self.state.fastboot = now;
             self.refresh();
@@ -1857,7 +1945,7 @@ impl App {
     /// Fastboot has stopped and the recovery is up: its pages start again
     /// from the home page, which nothing can go back from to fastboot.
     pub fn enter_recovery(&mut self) {
-        self.stack = vec![(Screen::Home, 0.0)];
+        self.stack = vec![(Screen::Home, 0.0, Focus::Unset)];
         self.settle_page();
         self.refresh();
     }
@@ -2007,7 +2095,7 @@ impl App {
     /// asked for it before the recovery started.
     pub fn erase_started(&mut self, reset: bool, asked: bool, parts: Vec<Part>) {
         self.state.erase = Erase { reset, asked, parts, done: 0, progress: None, outcome: None };
-        self.stack = vec![(Screen::Erase, 0.0)];
+        self.stack = vec![(Screen::Erase, 0.0, Focus::Unset)];
         self.settle_page();
         self.refresh();
     }
@@ -2188,9 +2276,10 @@ impl App {
         if self.screen() != page {
             return Vec::new();
         }
-        self.top_mut().1 = 0.0;
+        *self.top_mut() = (page, 0.0, Focus::Unset);
         self.fling = None;
         self.bounce = None;
+        self.seek = None;
         self.pull = 0.0;
         self.snap = true;
         self.arrive_at(page)
@@ -2200,10 +2289,22 @@ impl App {
     /// gone back up to shows where it was left, as the stock file manager
     /// does; any other starts from its top.
     fn show_folder(&mut self, screen: Screen, folder: String, files: Result<Vec<FileRow>, String>, listed: i64) {
-        if folder != self.state.folder(screen).path && self.screen() == screen {
+        let left = &self.state.folder(screen).path;
+        if folder != *left && self.screen() == screen {
+            // Climbing out of a folder, the keys come back to it; any other
+            // folder starts them at its top.
+            let came_from = std::path::Path::new(left).strip_prefix(&folder).ok().and_then(|rest| rest.components().next());
+            let name = came_from.map(|c| c.as_os_str().to_string_lossy().into_owned());
+            let k = name.and_then(|name| files.as_ref().ok()?.iter().position(|e| e.name == name));
+            let row = if screen == Screen::Files { Action::OpenEntry } else { Action::ChooseEntry };
+            self.top_mut().2 = match k {
+                Some(k) => Focus::On(Spot { stop: Stop::Hit(row(k)), group: Group::Page, rect: Rect::new(0.0, 0.0, 0.0, 0.0) }),
+                None => Focus::Unset,
+            };
             self.top_mut().1 = self.state.folder_mut(screen).scroll_for(&folder);
             self.fling = None;
             self.bounce = None;
+            self.seek = None;
             self.pull = 0.0;
             self.snap = true;
         }
@@ -2266,6 +2367,16 @@ impl App {
         let screen = self.screen();
         let scroll = self.top().1;
         let offset = (scroll + self.overscroll(now)).round();
+        let light = self.light(offset);
+        // The light goes over its control, in the part of the screen the
+        // control is drawn in, under whatever is laid over that part.
+        let shine = |out: &mut Canvas, part: Group| {
+            if let Some((g, r, radius, tint)) = light {
+                if g == part {
+                    out.fill_round_rect(r.x, r.y, r.w, r.h, radius, tint);
+                }
+            }
+        };
         let frame = self.frame.as_ref().expect("rendered above");
         let (_, big, small) = self.titles.as_mut().expect("drawn above");
 
@@ -2334,6 +2445,7 @@ impl App {
         }
         let bar = self.bar.level(now);
         let strip = frame.pinned.as_ref().map(|p| (p, pinned_top(&t, p, offset)));
+        shine(out, Group::Page);
         if bar > 0.0 {
             match strip {
                 // The strip under the bar is veiled with it, and the list
@@ -2347,14 +2459,17 @@ impl App {
         }
         if let Some((p, top)) = strip {
             out.put(&p.canvas, top.round() as i32);
+            shine(out, Group::Strip);
         }
         if let Some(d) = &frame.dock {
             out.put(&d.canvas, (out.h - d.canvas.h) as i32);
+            shine(out, Group::Dock);
         }
         if frame.back {
             let (_, chip, x, y) = self.chip.as_ref().expect("drawn above");
             out.lay(chip, *x, *y, bar);
             widgets::back_arrow(out, &t, t.pal.text);
+            shine(out, Group::Fixed);
         }
         let level = self.title.level(now);
         let blur = if frame.hero.is_some() { 0.0 } else { (1.0 - level) * m.dp(TITLE_BLUR_DP) };
@@ -2385,6 +2500,7 @@ impl App {
         self.fling = None;
         self.pull = 0.0;
         self.bounce = None;
+        self.seek = None;
         self.titles = None;
         self.glow = None;
         let hero = self.screen() == Screen::About;
@@ -2413,7 +2529,7 @@ impl App {
     }
 
     fn open(&mut self, screen: Screen) {
-        self.stack.push((screen, 0.0));
+        self.stack.push((screen, 0.0, Focus::Unset));
         self.settle_page();
         self.refresh();
     }
@@ -2627,7 +2743,7 @@ impl App {
                 if self.stack.len() > 1 {
                     self.stack.pop();
                 } else {
-                    *self.top_mut() = (Screen::Home, 0.0);
+                    *self.top_mut() = (Screen::Home, 0.0, Focus::Unset);
                 }
                 self.settle_page();
                 self.refresh();
@@ -2713,7 +2829,7 @@ impl App {
             Action::RebootTo(target) => return vec![Effect::Reboot(target)],
             Action::EnterRecovery => return vec![Effect::EnterRecovery],
             Action::Dismiss => {
-                self.stack = vec![(Screen::Home, 0.0)];
+                self.stack = vec![(Screen::Home, 0.0, Focus::Unset)];
                 self.settle_page();
                 self.refresh();
                 return vec![Effect::Dismiss];
@@ -3041,6 +3157,17 @@ impl App {
             self.drag = Drag::Waking;
             return Vec::new();
         }
+        // A finger on the glass puts the keys' light out, and whatever a
+        // key held down was doing comes to nothing.
+        if matches!(ev, Touch::Down(..)) {
+            if self.keys {
+                self.keys = false;
+                self.dirty = true;
+            }
+            if let Some((key, _)) = self.button {
+                self.button = Some((key, Press::Spent));
+            }
+        }
         self.stir(now);
         let t = self.theme();
         let m = t.m;
@@ -3308,82 +3435,337 @@ impl App {
         fx
     }
 
+    /// A button went down. With the keys working the page, the volume keys
+    /// move the light from control to control and the power key works the
+    /// one lit as it comes back up; otherwise the first volume press lights
+    /// a control, and the power key turns the panel off.
     pub fn key(&mut self, key: Key, now: u64) -> Vec<Effect> {
         // Any button stops a gliding page.
         self.fling = None;
         if !self.display_on {
             // Any button lights the dark panel, and does only that.
             self.wake(now);
+            self.button = Some((key, Press::Spent));
             return Vec::new();
         }
         // A button pressed just after the panel lit only keeps it awake, so
         // a power press meant to wake it does not turn it back off.
         if self.just_woke(now) {
             self.stir(now);
-            return Vec::new();
-        }
-        // The touchscreen may run from the partitions fastboot leaves out,
-        // so its page is worked with the keys: volume moves between the
-        // choices, power takes the one it is on.
-        if self.screen() == Screen::Fastboot {
-            self.stir(now);
-            let (n, focus) = (FASTBOOT_CHOICES.len(), self.state.fastboot.focus);
-            self.state.fastboot.focus = match key {
-                Key::VolumeUp => (focus + n - 1) % n,
-                Key::VolumeDown => (focus + 1) % n,
-                Key::Power => return self.act(FASTBOOT_CHOICES[focus].1, now),
-                Key::Back => focus,
-            };
-            if self.state.fastboot.focus != focus {
-                self.refresh();
-            }
-            return Vec::new();
-        }
-        if key == Key::Power {
-            self.sleep();
+            self.button = Some((key, Press::Spent));
             return Vec::new();
         }
         self.stir(now);
-        let step = self.h as f32 / 3.0;
         match key {
-            Key::Back => self.act(Action::Back, now),
-            Key::VolumeUp => {
-                self.scroll_by(-step);
+            Key::Back => {
+                self.button = Some((key, Press::Spent));
+                self.act(Action::Back, now)
+            }
+            Key::VolumeUp | Key::VolumeDown => {
+                let down = key == Key::VolumeDown;
+                self.button = Some((key, Press::Volume { down, next: now + REPEAT_DELAY_MS }));
+                self.volume(down, now);
                 Vec::new()
             }
-            Key::VolumeDown => {
-                self.scroll_by(step);
+            // A press before the page it lands on is drawn is lost, rather
+            // than taken for one on nothing.
+            Key::Power if self.keys && self.frame.is_none() => {
+                self.button = Some((key, Press::Spent));
                 Vec::new()
             }
-            Key::Power => unreachable!("handled above"),
+            Key::Power => {
+                match self.keys.then(|| self.lit()).flatten() {
+                    Some(spot) => self.button = Some((key, Press::Power(spot))),
+                    None => {
+                        self.button = Some((key, Press::Spent));
+                        self.sleep();
+                    }
+                }
+                self.dirty = true;
+                Vec::new()
+            }
         }
     }
 
-    fn scroll_by(&mut self, d: f32) {
-        let max = self.max_scroll();
-        let top = self.top_mut();
-        let next = (top.1 + d).clamp(0.0, max);
-        if next != top.1 {
-            top.1 = next;
-            self.dirty = true;
+    /// A button came back up: the power key works the control it went down
+    /// on.
+    pub fn key_up(&mut self, key: Key, now: u64) -> Vec<Effect> {
+        let Some((down, press)) = self.button else { return Vec::new() };
+        if down != key {
+            return Vec::new();
+        }
+        self.button = None;
+        match press {
+            Press::Power(spot) => {
+                self.dirty = true;
+                self.work(spot, now)
+            }
+            Press::Volume { .. } | Press::Spent => Vec::new(),
         }
     }
 
-    /// Whether the page is gliding or springing back at `now`.
+    /// Work the control the keys are on, as touching it does.
+    fn work(&mut self, spot: Spot, now: u64) -> Vec<Effect> {
+        match spot.stop {
+            Stop::Back => self.act(Action::Back, now),
+            Stop::Hit(action) => self.act(action, now),
+        }
+    }
+
+    /// A volume key: the first lights the control the keys were last on
+    /// if it shows, or else the first in view; each after moves the light
+    /// down the page or up it.
+    fn volume(&mut self, down: bool, now: u64) {
+        if self.frame.is_none() {
+            return;
+        }
+        if self.keys {
+            return self.step(down, now);
+        }
+        self.keys = true;
+        self.dirty = true;
+        let scroll = self.resting();
+        let shows = self.lit().is_some_and(|spot| self.shows(&spot, scroll));
+        if !shows {
+            self.top_mut().2 = Focus::Unset;
+            self.lit();
+        }
+    }
+
+    /// Move the light to the next control down the page, or up it. A
+    /// control far off is scrolled to half a screen at a time, the light
+    /// staying on its control while that shows; past the last control the
+    /// light goes round to the first, and past the first to the last.
+    fn step(&mut self, down: bool, now: u64) {
+        let scroll = self.resting();
+        let current = self.lit();
+        if self.spots().is_none() {
+            return;
+        }
+        let spots = self.spots.clone().expect("made above");
+        let cur = current.and_then(|c| focus::find(&spots, &c));
+        let (top, bottom) = self.band(scroll);
+        let (max, n) = (self.max_scroll(), spots.len());
+        let page = |k: usize| spots[k].group == Group::Page;
+        let held = |k: usize| matches!(spots[k].group, Group::Fixed | Group::Strip);
+        let docked = |k: usize| spots[k].group == Group::Dock;
+        // The page's own controls not wholly above the band, or below it.
+        let from_top = |k: usize| page(k) && self.place(&spots[k], scroll).y + spots[k].rect.h > top;
+        let from_bottom = |k: usize| page(k) && self.place(&spots[k], scroll).y < bottom;
+        enum To {
+            Spot(usize),
+            Scroll,
+            Round,
+        }
+        let to = if down {
+            // Past the page's own: the rest of the page, then the bottom
+            // strip, then round.
+            let past = || {
+                if scroll < max {
+                    To::Scroll
+                } else {
+                    (0..n).find(|&k| docked(k)).map_or(To::Round, To::Spot)
+                }
+            };
+            match cur {
+                Some(i) if page(i) => (i + 1..n).find(|&k| page(k)).map_or_else(past, To::Spot),
+                Some(i) if docked(i) => (i + 1..n).find(|&k| docked(k)).map_or(if scroll < max { To::Scroll } else { To::Round }, To::Spot),
+                Some(i) => (i + 1..n).find(|&k| held(k)).or_else(|| (0..n).find(|&k| from_top(k))).map_or_else(past, To::Spot),
+                None => (0..n).find(|&k| from_top(k)).map_or_else(past, To::Spot),
+            }
+        } else {
+            // Before the page's own: the rest of the page, then the `<` and
+            // the strip at the top, then round.
+            let before = || {
+                if scroll > 0.0 {
+                    To::Scroll
+                } else {
+                    (0..n).rev().find(|&k| held(k)).map_or(To::Round, To::Spot)
+                }
+            };
+            match cur {
+                Some(i) if page(i) => (0..i).rev().find(|&k| page(k)).map_or_else(before, To::Spot),
+                Some(i) if docked(i) => (0..i).rev().find(|&k| docked(k)).or_else(|| (0..n).rev().find(|&k| from_bottom(k))).map_or_else(before, To::Spot),
+                Some(i) => (0..i).rev().find(|&k| held(k)).map_or(if scroll > 0.0 { To::Scroll } else { To::Round }, To::Spot),
+                None => (0..n).rev().find(|&k| from_bottom(k)).map_or_else(before, To::Spot),
+            }
+        };
+        match to {
+            To::Spot(k) => {
+                let s = spots[k];
+                if s.group == Group::Page {
+                    let target = self.reveal(&s, scroll);
+                    if (target - scroll).abs() > (bottom - top) / 2.0 {
+                        return self.scroll_on(down, &spots, cur, now);
+                    }
+                    self.seek_to(target, now);
+                }
+                self.top_mut().2 = Focus::On(s);
+            }
+            To::Scroll => return self.scroll_on(down, &spots, cur, now),
+            To::Round if n == 0 => return,
+            // Going round, the page goes to its top or its end, as far as
+            // its control there shows.
+            To::Round => {
+                let s = spots[if down { 0 } else { n - 1 }];
+                let end = if down { 0.0 } else { max };
+                let target = if self.shows(&s, end) { end } else { self.reveal(&s, end) };
+                self.seek_to(target, now);
+                self.top_mut().2 = Focus::On(s);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Scroll the page half a screen down or up for the keys. The light
+    /// stays on its control while that shows, and goes to the first in view
+    /// the way the page went when it does not.
+    fn scroll_on(&mut self, down: bool, spots: &[Spot], cur: Option<usize>, now: u64) {
+        let scroll = self.resting();
+        let (top, bottom) = self.band(scroll);
+        let half = (bottom - top) / 2.0;
+        let target = if down { (scroll + half).min(self.max_scroll()) } else { (scroll - half).max(0.0) };
+        self.seek_to(target, now);
+        if cur.is_some_and(|i| self.shows(&spots[i], target)) {
+            return;
+        }
+        let band = self.band(target);
+        let in_view = |k: &usize| spots[*k].group == Group::Page && within(self.place(&spots[*k], target), band);
+        let next = if down { (0..spots.len()).find(in_view) } else { (0..spots.len()).rev().find(in_view) };
+        self.top_mut().2 = next.map_or(Focus::Off, |k| Focus::On(spots[k]));
+    }
+
+    /// The page's controls in the order the keys go through them, once the
+    /// page is drawn.
+    fn spots(&mut self) -> Option<&[Spot]> {
+        if self.spots.is_none() {
+            let t = self.theme();
+            self.spots = Some(focus::spots(&t, self.frame.as_ref()?));
+        }
+        self.spots.as_deref()
+    }
+
+    /// The control the keys are on, once the page is drawn: the one they
+    /// were on, found again, or the first in view when they have not been
+    /// anywhere on the page yet or theirs has gone from it.
+    fn lit(&mut self) -> Option<Spot> {
+        let scroll = self.resting();
+        self.spots()?;
+        let spots = self.spots.as_deref().expect("made above");
+        let found = match self.top().2 {
+            Focus::Off => return None,
+            Focus::On(at) => focus::find(spots, &at),
+            Focus::Unset => None,
+        };
+        let spot = spots[found.or_else(|| self.first_in_view(spots, scroll))?];
+        self.stack.last_mut().expect("the page stack always holds a page").2 = Focus::On(spot);
+        Some(spot)
+    }
+
+    /// The first of the page's own controls in view at `scroll`, or else
+    /// the bottom strip's first, or else the `<` or the top strip's first.
+    fn first_in_view(&self, spots: &[Spot], scroll: f32) -> Option<usize> {
+        let band = self.band(scroll);
+        let k = spots.iter().position(|s| s.group == Group::Page && within(self.place(s, scroll), band));
+        k.or_else(|| spots.iter().position(|s| s.group == Group::Dock))
+            .or_else(|| spots.iter().position(|s| matches!(s.group, Group::Fixed | Group::Strip)))
+    }
+
+    /// Where on screen `s` is with the page `offset` pixels down.
+    fn place(&self, s: &Spot, offset: f32) -> Rect {
+        let fr = self.frame.as_ref().expect("a control is placed on the page drawn");
+        let dy = match s.group {
+            Group::Fixed => 0.0,
+            Group::Strip => pinned_top(&self.theme(), fr.pinned.as_ref().expect("the strip holds its controls"), offset),
+            Group::Page => -offset,
+            Group::Dock => self.h as f32 - fr.dock.as_ref().expect("the dock holds its controls").canvas.h as f32,
+        };
+        Rect { y: s.rect.y + dy, ..s.rect }
+    }
+
+    /// The band of the screen the page's own controls show in with the page
+    /// at `scroll`: under the bar, or under the strip held there, down to
+    /// the strip held at the bottom.
+    fn band(&self, scroll: f32) -> (f32, f32) {
+        let t = self.theme();
+        let fr = self.frame.as_ref().expect("the band is the page drawn's");
+        let top = match &fr.pinned {
+            Some(p) => pinned_top(&t, p, scroll) + p.canvas.h as f32,
+            None => widgets::bar_bottom(&t),
+        };
+        (top, self.h as f32 - fr.dock.as_ref().map_or(0.0, |d| d.canvas.h as f32))
+    }
+
+    /// Whether `s` shows, in part at least, with the page at `scroll`.
+    fn shows(&self, s: &Spot, scroll: f32) -> bool {
+        s.group != Group::Page || within(self.place(s, scroll), self.band(scroll))
+    }
+
+    /// How far down to scroll the page from `scroll` to show `s` whole, a
+    /// margin clear of the band's edges, or as much of it from its top as
+    /// fits.
+    fn reveal(&self, s: &Spot, scroll: f32) -> f32 {
+        let margin = self.theme().m.margin;
+        let (top, bottom) = self.band(scroll);
+        let (top, bottom) = (top + margin, bottom - margin);
+        let r = self.place(s, scroll);
+        let d = if r.y < top {
+            r.y - top
+        } else if r.y + r.h > bottom {
+            (r.y + r.h - bottom).min(r.y - top)
+        } else {
+            0.0
+        };
+        (scroll + d).clamp(0.0, self.max_scroll())
+    }
+
+    /// Where the page comes to rest: where the keys are scrolling it to, or
+    /// where it is.
+    fn resting(&self) -> f32 {
+        self.seek.map_or(self.top().1, |(target, _)| target)
+    }
+
+    /// Scroll the page to `target` for the keys, easing there.
+    fn seek_to(&mut self, target: f32, now: u64) {
+        let at = self.top().1;
+        self.fling = None;
+        self.seek = (target != at).then(|| (target, Spring::new(now, at - target, 0.0, SEEK_PERIOD)));
+        self.dirty = true;
+    }
+
+    /// The light on the control the keys are on while they work the page:
+    /// the part of the screen its control is drawn in, where the light
+    /// falls with the page `offset` pixels down, how round it is, and its
+    /// tint, stronger while the power key is held down on it.
+    fn light(&mut self, offset: f32) -> Option<(Group, Rect, f32, Rgba)> {
+        if !self.keys {
+            return None;
+        }
+        let spot = self.lit()?;
+        let t = self.theme();
+        let keypad = self.screen() == Screen::Decrypt && matches!(self.state.data, Data::Locked { keys: Keys::Digits, .. });
+        let (r, radius) = focus::lit(&t, spot.stop, self.place(&spot, offset), keypad);
+        let alpha = if matches!(self.button, Some((_, Press::Power(_)))) { LIGHT_HELD_ALPHA } else { LIGHT_ALPHA };
+        Some((spot.group, r, radius, t.pal.accent.with_alpha(alpha)))
+    }
+
+    /// Whether the page is gliding, springing back, or easing to where the
+    /// keys moved at `now`.
     fn in_motion(&self, now: u64) -> bool {
-        self.fling.is_some_and(|fl| !fl.at(now).1) || self.bounce.is_some_and(|b| !b.at(now).1)
+        self.fling.is_some_and(|fl| !fl.at(now).1) || self.bounce.is_some_and(|b| !b.at(now).1) || self.seek.is_some_and(|(_, s)| !s.at(now).1)
     }
 
-    /// Stop a page gliding or springing back where it has got to, for a
-    /// finger to hold: one past its end stays out there as the finger's
-    /// pull. Whether there was one.
+    /// Stop a page gliding, springing back or easing to where the keys
+    /// moved, where it has got to, for a finger to hold: one past its end
+    /// stays out there as the finger's pull. Whether there was one.
     fn catch(&mut self, now: u64) -> bool {
         let glide = self.fling.take().is_some_and(|fl| !fl.at(now).1);
+        let seeking = self.seek.take().is_some_and(|(_, s)| !s.at(now).1);
         let spring = self.bounce.take().map(|b| b.at(now)).filter(|&(_, done)| !done);
         if let Some((offset, _)) = spring {
             self.pull = motion::unrubber(offset, self.h as f32);
         }
-        glide || spring.is_some()
+        glide || seeking || spring.is_some()
     }
 
     /// Move the page `d` pixels under a dragging finger (positive moves it
@@ -4248,22 +4630,47 @@ mod tests {
         assert_eq!(swipe(&mut app, &f, &i, Confirm::Reboot), vec![Effect::Reboot(Target::Fastboot)]);
     }
 
+    /// Press `key` and let it go.
+    fn press(app: &mut App, key: Key, now: u64) -> Vec<Effect> {
+        let mut fx = app.key(key, now);
+        fx.extend(app.key_up(key, now));
+        fx
+    }
+
+    /// The control the keys are on, on the page drawn.
+    fn lit(app: &mut App, f: &Fonts, i: &DeviceInfo) -> Option<Stop> {
+        app.frame(f, i);
+        app.lit().map(|s| s.stop)
+    }
+
+    /// Move the light down the page until it is on `stop`.
+    fn light_on(app: &mut App, f: &Fonts, i: &DeviceInfo, stop: Stop) {
+        for _ in 0..100 {
+            press(app, Key::VolumeDown, 0);
+            if app.keys && lit(app, f, i) == Some(stop) {
+                return;
+            }
+        }
+        panic!("the keys never came to {stop:?}");
+    }
+
     #[test]
     fn the_fastboot_page_is_worked_with_the_keys() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Fastboot, W, H, PPD);
-        app.frame(&f, &i);
-        assert_eq!(app.state.fastboot.focus, 0);
-        assert!(app.key(Key::VolumeDown, 0).is_empty());
-        assert_eq!(app.state.fastboot.focus, 1, "down moves to the next choice");
-        assert_eq!(app.key(Key::Power, 0), vec![Effect::EnterRecovery], "power takes it");
+        let choice = |k: usize| Some(Stop::Hit(FASTBOOT_CHOICES[k].1));
+        assert_eq!(lit(&mut app, &f, &i), choice(0), "the first choice is lit as the page opens");
+        assert!(press(&mut app, Key::VolumeDown, 0).is_empty());
+        assert_eq!(lit(&mut app, &f, &i), choice(1), "down moves to the next choice");
+        assert!(app.key(Key::Power, 0).is_empty(), "power takes it as it comes up");
+        assert_eq!(app.key_up(Key::Power, 0), vec![Effect::EnterRecovery]);
         assert!(app.display_on(), "power leaves the panel on here");
-        app.key(Key::VolumeUp, 0);
-        app.key(Key::VolumeUp, 0);
-        assert_eq!(app.state.fastboot.focus, FASTBOOT_CHOICES.len() - 1, "up from the first goes round to the last");
-        assert_eq!(app.key(Key::Power, 0), vec![Effect::Reboot(Target::PowerOff)]);
+        press(&mut app, Key::VolumeUp, 0);
+        press(&mut app, Key::VolumeUp, 0);
+        assert_eq!(lit(&mut app, &f, &i), choice(FASTBOOT_CHOICES.len() - 1), "up from the first goes round to the last");
+        assert_eq!(press(&mut app, Key::Power, 0), vec![Effect::Reboot(Target::PowerOff)]);
         assert_eq!(tap(&mut app, &f, &i, Action::RebootTo(Target::Bootloader)), vec![Effect::Reboot(Target::Bootloader)], "a touch takes a choice too");
-        assert!(app.key(Key::Back, 0).is_empty());
+        assert!(press(&mut app, Key::Back, 0).is_empty());
         assert_eq!(app.screen(), Screen::Fastboot, "there is nothing to go back to");
     }
 
@@ -4276,8 +4683,163 @@ mod tests {
         assert_eq!(app.screen(), Screen::Home);
         app.key(Key::Back, 0);
         assert_eq!(app.screen(), Screen::Home, "fastboot is not behind it");
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))), "the keys go on working the pages");
+        app.touch(Touch::Down(W as f32 / 2.0, 200.0), &f, 0);
+        app.touch(Touch::Up, &f, 0);
         assert!(app.key(Key::Power, 0).is_empty());
-        assert!(!app.display_on(), "power turns the panel off again");
+        assert!(!app.display_on(), "with the light put out, power turns the panel off");
+    }
+
+    #[test]
+    fn the_volume_keys_light_the_controls_down_the_page_and_up_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.frame(&f, &i);
+        assert!(!app.keys, "a page opens to the touch");
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))), "the first press lights the first control in view");
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::About))));
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Install))));
+        press(&mut app, Key::VolumeUp, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::About))));
+        press(&mut app, Key::VolumeUp, 0);
+        press(&mut app, Key::VolumeUp, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Reboot))), "up from the first goes round to the last");
+        app.tick(5000);
+        let reboot = app.lit().expect("lit");
+        assert!(app.shows(&reboot, app.top().1), "scrolled into view");
+        press(&mut app, Key::VolumeDown, 6000);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))), "down from the last goes round to the first");
+        app.tick(10_000);
+        assert_eq!(app.top().1, 0.0, "at the top of the page again");
+    }
+
+    #[test]
+    fn the_power_key_works_the_control_lit_as_it_comes_up() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.frame(&f, &i);
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Open(Screen::Settings)));
+        assert!(app.key(Key::Power, 0).is_empty());
+        assert_eq!(app.screen(), Screen::Home, "nothing happens as the key goes down");
+        app.key_up(Key::Power, 0);
+        assert_eq!(app.screen(), Screen::Settings, "the row opens its page as the key comes up");
+        let first = lit(&mut app, &f, &i);
+        assert!(first.is_some() && first != Some(Stop::Back), "the page's first control is lit, not the `<`: {first:?}");
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Home);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Settings))), "back on the page, the keys are where they left it");
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Open(Screen::Settings)));
+        press(&mut app, Key::Power, 0);
+        assert_eq!(lit(&mut app, &f, &i), first);
+        press(&mut app, Key::VolumeUp, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Back), "up from the page's first control comes to the `<`");
+        press(&mut app, Key::Power, 0);
+        assert_eq!(app.screen(), Screen::Home, "the `<` goes back");
+    }
+
+    #[test]
+    fn past_the_last_control_the_keys_scroll_on_half_a_screen_a_press() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Installing, W, H, PPD);
+        app.state.install = Install::Finished { outcome: Outcome::Ran { wipe_cache: false }, damage: None };
+        app.state.script_output = (0..300).map(|k| format!("- line {k}")).collect();
+        app.frame(&f, &i);
+        let (max, (top, bottom)) = (app.max_scroll(), app.band(0.0));
+        let half = (bottom - top) / 2.0;
+        assert!(max > half * 4.0, "the script's output runs on below the controls: {max}");
+        let last = *app.spots().expect("drawn").last().expect("controls on the page");
+        light_on(&mut app, &f, &i, last.stop);
+        let mut at = app.resting();
+        let mut presses = 0;
+        while at < max {
+            press(&mut app, Key::VolumeDown, 0);
+            assert_eq!(app.resting(), (at + half).min(max), "half a screen a press");
+            at = app.resting();
+            presses += 1;
+            assert!(presses < 40);
+            if !app.shows(&last, at) {
+                assert_eq!(lit(&mut app, &f, &i), None, "with no control in view, nothing is lit");
+            }
+        }
+        press(&mut app, Key::VolumeDown, 0);
+        let first = app.spots().expect("drawn")[0].stop;
+        assert_eq!((lit(&mut app, &f, &i), app.resting()), (Some(first), 0.0), "past the end the light goes round to the top");
+        press(&mut app, Key::VolumeUp, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(last.stop), "and up from it round to the last control");
+        assert!(app.shows(&last, app.resting()), "which shows");
+        let resting = app.resting();
+        app.tick(5000);
+        assert_eq!(app.top().1, resting, "where the page eased to");
+    }
+
+    #[test]
+    fn a_touch_puts_the_light_out_and_a_volume_key_brings_it_back() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.frame(&f, &i);
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Open(Screen::About)));
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        assert!(app.light(0.0).is_some(), "lit while the keys work the page");
+        app.touch(Touch::Down(W as f32 / 2.0, 200.0), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        assert!(app.light(0.0).is_none(), "a touch puts the light out");
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::About))), "the keys come back where they were");
+        app.touch(Touch::Down(W as f32 / 2.0, 200.0), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        press(&mut app, Key::Power, 0);
+        assert!(!app.display_on(), "with the light out, power turns the panel off");
+        press(&mut app, Key::VolumeDown, 1000);
+        assert!(app.display_on(), "a button lights the panel");
+        assert!(!app.keys, "and does only that");
+    }
+
+    #[test]
+    fn a_volume_key_held_moves_the_light_on_and_on() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.frame(&f, &i);
+        app.key(Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))));
+        assert_eq!(app.deadline(0), Some(REPEAT_DELAY_MS));
+        app.tick(REPEAT_DELAY_MS - 1);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))), "not held long enough yet");
+        app.tick(REPEAT_DELAY_MS);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::About))));
+        app.tick(REPEAT_DELAY_MS + REPEAT_MS);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Install))));
+        app.key_up(Key::VolumeDown, REPEAT_DELAY_MS + REPEAT_MS + 10);
+        app.tick(REPEAT_DELAY_MS + REPEAT_MS * 5);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Install))), "let go, it stops");
+    }
+
+    #[test]
+    fn climbing_out_of_a_folder_the_keys_come_back_to_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Files));
+        let folders: Vec<FileRow> = (0..300).map(|k| entry(&format!("dir{k:03}"), folder(k))).collect();
+        app.set_files("/".into(), Ok(folders.clone()), LISTED);
+        app.frame(&f, &i);
+        press(&mut app, Key::VolumeDown, 0);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::OpenEntry(0))), "the first entry, below the path");
+        for _ in 0..40 {
+            press(&mut app, Key::VolumeDown, 0);
+        }
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::OpenEntry(40))));
+        app.tick(5000);
+        let row = app.lit().expect("lit");
+        assert!(app.shows(&row, app.top().1), "scrolled into view");
+        assert_eq!(press(&mut app, Key::Power, 5000), vec![Effect::ReadDir("/dir040".into())]);
+        app.set_files("/dir040".into(), Ok(vec![entry("a", FileKind::File)]), LISTED);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::OpenEntry(0))), "a folder opened lights its first entry");
+        assert_eq!(app.key(Key::Back, 6000), vec![Effect::ReadDir("/".into())]);
+        app.set_files("/".into(), Ok(folders), LISTED);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::OpenEntry(40))), "back up, the folder left is lit");
     }
 
     #[test]

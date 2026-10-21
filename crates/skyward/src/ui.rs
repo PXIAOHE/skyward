@@ -1166,7 +1166,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     answer(asked, fastboot)
                 }
                 Incoming::Input(Event::Touch(t, at)) => app.touch(t, &fonts, at),
-                Incoming::Input(Event::Key(k)) => app.key(k, now),
+                Incoming::Input(Event::Key(k, true)) => app.key(k, now),
+                Incoming::Input(Event::Key(k, false)) => app.key_up(k, now),
             };
             // What the pages ask for in answer to the work done goes on
             // after it.

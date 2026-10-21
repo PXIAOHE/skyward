@@ -11,7 +11,8 @@ use std::path::PathBuf;
 pub enum Event {
     /// A touch and when the panel reported it, on [`monotonic_ms`]'s clock.
     Touch(Touch, u64),
-    Key(Key),
+    /// A button going down, or coming back up.
+    Key(Key, bool),
 }
 
 /// Milliseconds on the monotonic clock, which the touch panel stamps its
@@ -276,10 +277,12 @@ impl Inputs {
         for (i, (path, b)) in self.buttons.iter_mut().enumerate() {
             match b.fetch_events() {
                 Ok(events) => {
+                    // The kernel's own repeats of a key held are left out;
+                    // the UI times its own.
                     for e in events {
-                        if let EventSummary::Key(_, code, 1) = e.destructure() {
+                        if let EventSummary::Key(_, code, value @ (0 | 1)) = e.destructure() {
                             if let Some(k) = key_of(code) {
-                                out.push(Event::Key(k));
+                                out.push(Event::Key(k, value == 1));
                             }
                         }
                     }
