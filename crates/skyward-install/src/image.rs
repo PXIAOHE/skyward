@@ -134,7 +134,8 @@ fn holds(packed: impl Read, wanted: impl Fn(&str) -> bool) -> Result<bool> {
 }
 
 /// Whether `file` is a Skyward recovery: a boot image whose ramdisk carries
-/// the device configuration Skyward is packed with.
+/// the device configuration Skyward is packed with, packed in one of the
+/// ways read here, as Skyward packs it.
 pub fn is_skyward<R: Read + Seek>(file: &mut R) -> Result<bool> {
     let mut head = Vec::with_capacity(4096);
     file.take(4096).read_to_end(&mut head).context("read the image's first bytes")?;
@@ -146,7 +147,12 @@ pub fn is_skyward<R: Read + Seek>(file: &mut R) -> Result<bool> {
         return Ok(false);
     }
     file.seek(SeekFrom::Start(header.ramdisk_position() as u64)).context("seek to the ramdisk")?;
-    holds(file.take(u64::from(header.ramdisk_size())), |name| name == skyward_config::ramdisk::CONFIG).context("read the ramdisk")
+    let mut ramdisk = BufReader::new(file.take(u64::from(header.ramdisk_size())));
+    let start = ramdisk.fill_buf().context("read the ramdisk's first bytes")?;
+    if ![LZ4_LEGACY, LZ4_FRAME, GZIP, NEWC].iter().any(|magic| start.starts_with(magic)) {
+        return Ok(false);
+    }
+    holds(ramdisk, |name| name == skyward_config::ramdisk::CONFIG).context("read the ramdisk")
 }
 
 /// The partition `name` of `slot` among the links in `dir`.
@@ -240,7 +246,7 @@ pub fn flash<R: Read + Seek>(image: &mut R, len: u64, devices: &[PathBuf], progr
 
 /// Drop the device's cached pages, so reading it back reads the flash.
 #[cfg(target_os = "android")]
-fn drop_cache(f: &File) -> Result<()> {
+pub(crate) fn drop_cache(f: &File) -> Result<()> {
     use std::os::fd::AsRawFd;
     let rc = unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
     if rc != 0 {
@@ -252,19 +258,20 @@ fn drop_cache(f: &File) -> Result<()> {
 /// Hosts run the tests on plain files, whose reads come from the same
 /// cache either way.
 #[cfg(not(target_os = "android"))]
-fn drop_cache(_: &File) -> Result<()> {
+pub(crate) fn drop_cache(_: &File) -> Result<()> {
     Ok(())
 }
 
+/// Images made up for the tests here and in the modules that look into
+/// partitions.
 #[cfg(test)]
-mod tests {
+pub(crate) mod samples {
     use super::*;
-    use abootimg_oxide::binrw::BinWrite;
-    use abootimg_oxide::{HeaderV3, OsVersionPatch, VendorHeaderV4};
+    use abootimg_oxide::{HeaderV3, OsVersionPatch};
 
     /// A version 4 boot image with a kernel of `kernel` bytes and `ramdisk`
     /// as its ramdisk, each padded to the page.
-    fn boot_image(kernel: u32, ramdisk: &[u8]) -> Vec<u8> {
+    pub fn boot_image(kernel: u32, ramdisk: &[u8]) -> Vec<u8> {
         let header = Header::V3(HeaderV3 {
             kernel_size: kernel,
             ramdisk_size: ramdisk.len() as u32,
@@ -282,7 +289,7 @@ mod tests {
     }
 
     /// A newc archive of empty files named `names`.
-    fn archive(names: &[&str]) -> Vec<u8> {
+    pub fn archive(names: &[&str]) -> Vec<u8> {
         let mut out = Vec::new();
         for name in names {
             out = cpio::NewcBuilder::new(name).mode(0o100644).write(out, 0).finish().unwrap();
@@ -290,12 +297,29 @@ mod tests {
         cpio::newc::trailer(out).unwrap()
     }
 
-    fn lz4_legacy(data: &[u8]) -> Vec<u8> {
+    pub fn lz4_legacy(data: &[u8]) -> Vec<u8> {
         let info = lz4_flex::frame::FrameInfo::new().legacy_frame(true);
         let mut w = lz4_flex::frame::FrameEncoder::with_frame_info(info, Vec::new());
         w.write_all(data).unwrap();
         w.finish().unwrap()
     }
+
+    /// A recovery image, Skyward's or the stock one it is packed on.
+    pub fn recovery(skyward: bool) -> Vec<u8> {
+        let mut names = vec!["init", "system/bin/recovery", "prop.default"];
+        if skyward {
+            names.extend(["skyward", "skyward/device.toml", "skyward/MiSansVF.ttf"]);
+        }
+        boot_image(0, &lz4_legacy(&archive(&names)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::samples::{archive, boot_image, lz4_legacy, recovery};
+    use super::*;
+    use abootimg_oxide::binrw::BinWrite;
+    use abootimg_oxide::VendorHeaderV4;
 
     fn gzip(data: &[u8]) -> Vec<u8> {
         let mut w = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -332,11 +356,10 @@ mod tests {
 
     #[test]
     fn skyward_is_told_from_the_stock_recovery_it_is_packed_on() {
-        let stock = archive(&["init", "system/bin/recovery", "prop.default"]);
-        let skyward = archive(&["init", "system/bin/recovery", "prop.default", "skyward", "skyward/device.toml", "skyward/MiSansVF.ttf"]);
-        assert!(is_skyward(&mut Cursor::new(boot_image(0, &lz4_legacy(&skyward)))).unwrap());
-        assert!(!is_skyward(&mut Cursor::new(boot_image(0, &lz4_legacy(&stock)))).unwrap());
+        assert!(is_skyward(&mut Cursor::new(recovery(true))).unwrap());
+        assert!(!is_skyward(&mut Cursor::new(recovery(false))).unwrap());
         assert!(!is_skyward(&mut Cursor::new(boot_image(5000, &[]))).unwrap(), "a boot image with no ramdisk");
+        assert!(!is_skyward(&mut Cursor::new(boot_image(0, b"\xfd7zXZ\0"))).unwrap(), "a ramdisk packed as Skyward never packs it");
         assert!(!is_skyward(&mut Cursor::new(vec![0u8; 8192])).unwrap(), "an erased partition");
     }
 

@@ -7,10 +7,11 @@ use crate::adb::{self, Connection, Offer};
 use crate::ffs::{Endpoints, Shared, Usb};
 use crate::fuse::{self, Fault, LocalFile, Mount};
 use crate::image::{self, ImageKind};
+use crate::keep::Kept;
 use crate::ota::{self, Log, Status};
 use crate::package::{self, Build, Package, Phone, Update};
 use crate::script::{self, Bar, Request};
-use crate::{Command, Event, Failure, Outcome, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
+use crate::{Command, Event, Failure, Outcome, Reflash, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
 use skyward_info::Charge;
 use skyward_sys::{kmsg, prop};
@@ -70,23 +71,31 @@ pub struct Installer {
 
 impl Installer {
     /// Take USB over and wait for `adb sideload`, from a thread of its own.
-    /// `detach` runs before an update package is written.
-    pub fn start(detach: Detach) -> Result<Installer> {
-        Installer::spawn(Origin::Computer, detach, run)
+    /// `detach` runs before an update package or an install script writes;
+    /// with `keep`, this recovery goes back into the recovery partitions
+    /// they write over.
+    pub fn start(detach: Detach, keep: bool) -> Result<Installer> {
+        Installer::spawn(Origin::Computer, detach, keep, run)
     }
 
-    /// Install the file at `path`, from a thread of its own. `detach` runs
-    /// before an update package is written.
-    pub fn open(path: PathBuf, detach: Detach) -> Result<Installer> {
-        Installer::spawn(Origin::File, detach, move |ctx| run_file(ctx, &path))
+    /// Install the file at `path`, from a thread of its own; `detach` and
+    /// `keep` as for [`Installer::start`].
+    pub fn open(path: PathBuf, detach: Detach, keep: bool) -> Result<Installer> {
+        Installer::spawn(Origin::File, detach, keep, move |ctx| run_file(ctx, &path))
     }
 
-    fn spawn(origin: Origin, detach: Detach, work: impl FnOnce(&mut Context) -> Outcome + Send + 'static) -> Result<Installer> {
+    fn spawn(
+        origin: Origin,
+        detach: Detach,
+        keep: bool,
+        work: impl FnOnce(&mut Context) -> Outcome + Send + 'static,
+    ) -> Result<Installer> {
         let (wake, signal) = pipe(libc::O_NONBLOCK)?;
         let (event_tx, events) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let shared = Arc::new(Shared::default());
-        let mut ctx = Context { events: event_tx, signal, commands: command_rx, shared: shared.clone(), detach: Some(detach), origin };
+        let mut ctx =
+            Context { events: event_tx, signal, commands: command_rx, shared: shared.clone(), detach: Some(detach), keep, origin };
         let thread = thread::Builder::new()
             .name("installer".into())
             .spawn(move || {
@@ -159,6 +168,9 @@ struct Context {
     commands: Receiver<Command>,
     shared: Arc<Shared>,
     detach: Option<Detach>,
+    /// This recovery goes back into the recovery partitions an install
+    /// writes over.
+    keep: bool,
     origin: Origin,
 }
 
@@ -346,6 +358,7 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
         }
     }
     ctx.send(Event::Installing { version });
+    let kept = hold(ctx, slot)?;
     let detach = ctx.detach.take().expect("an installer takes one package");
     detach().context("move off the installed system")?;
     // update_engine mounts /metadata itself, as in the stock recovery, keeps
@@ -360,9 +373,51 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
         let _ = kmsg(&format!("install: /metadata not mounted again: {e:#}"));
     }
     Ok(match code? {
-        0 => Done::Decided(Outcome::Installed { slot: slot.other(), wipe }),
+        0 => {
+            if let Some(kept) = &kept {
+                reflash(ctx, kept, Some(slot.other()));
+            }
+            Done::Decided(Outcome::Installed { slot: slot.other(), wipe })
+        }
         code => Done::Engine(code),
     })
+}
+
+/// This recovery, held before an install writes, when the screen asked to
+/// keep it in the recovery partitions; none when it was started without
+/// being flashed.
+fn hold(ctx: &Context, current: Slot) -> Result<Option<Kept>> {
+    if !ctx.keep {
+        return Ok(None);
+    }
+    let kept = Kept::hold(Path::new(skyward_block::BY_NAME), current).context("hold this recovery from its partition")?;
+    if kept.is_none() {
+        let _ = kmsg("install: the recovery partition does not hold Skyward, so there is none to keep");
+    }
+    Ok(kept)
+}
+
+/// Write this recovery back into the recovery partitions the install wrote
+/// over, telling the screen how far it is and then how it went; `updated`
+/// is the slot an update went to.
+fn reflash(ctx: &Context, kept: &Kept, updated: Option<Slot>) {
+    let slots = match kept.wanted(updated) {
+        Ok(slots) if slots.is_empty() => return,
+        Ok(slots) => slots,
+        Err(e) => return ctx.send(Event::Reflashed(Reflash::Failed(format!("{e:#}")))),
+    };
+    let mut told: Option<Instant> = None;
+    let written = kept.write(&slots, &mut |done, total| {
+        if done == total || told.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
+            ctx.send(Event::Progress(Stage::Reflashing { done, total }));
+            told = Some(Instant::now());
+        }
+    });
+    let _ = kmsg(&format!("install: this recovery written back to {slots:?}: {written:?}"));
+    ctx.send(Event::Reflashed(match written {
+        Ok(()) => Reflash::Written(slots),
+        Err(e) => Reflash::Failed(format!("{e:#}")),
+    }));
 }
 
 fn remount_metadata() -> Result<()> {
@@ -549,6 +604,7 @@ fn run_script(ctx: &mut Context) -> Result<Done> {
     let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
     extract_script()?;
     shell_at_sbin()?;
+    let kept = hold(ctx, slot)?;
     let detach = ctx.detach.take().expect("an installer takes one package");
     detach().context("move off the installed system")?;
     // While an update is in flight, the slot's partitions in super are its
@@ -564,6 +620,10 @@ fn run_script(ctx: &mut Context) -> Result<Done> {
     let ran = run_binary(ctx);
     if let Err(e) = clean_up(&mounted, &mapped) {
         let _ = kmsg(&format!("install: not all the script left behind was taken away: {e:#}"));
+    }
+    // What the script wrote over goes back however it ended.
+    if let Some(kept) = &kept {
+        reflash(ctx, kept, None);
     }
     let (code, wipe_cache) = ran?;
     Ok(Done::Script { code, wipe_cache })

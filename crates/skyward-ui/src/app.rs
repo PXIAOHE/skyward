@@ -12,7 +12,7 @@ use crate::term::{self, Term, TermKey};
 use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer};
 use skyward_info::DeviceInfo;
-use skyward_install::{Event, ImageKind, Outcome, Stage};
+use skyward_install::{Event, ImageKind, Outcome, Reflash, Stage};
 use skyward_vab::{BootSlots, Hold, Slot, SnapshotState};
 
 /// The pages of the recovery.
@@ -190,6 +190,9 @@ pub enum Switch {
     Compress,
     /// Read a backup back once it is written.
     Verify,
+    /// Write Skyward back into the recovery partitions an install writes
+    /// over.
+    KeepRecovery,
 }
 
 /// What a backup can take, in the order the backup page lists it.
@@ -987,6 +990,15 @@ pub struct State {
     pub package_name: Option<String>,
     /// What the install script last run showed, its latest lines.
     pub script_output: Vec<String>,
+    /// The phone keeps its recovery in a partition of each slot, which the
+    /// install page then offers to keep Skyward in.
+    pub recovery_partitions: bool,
+    /// Skyward goes back into the recovery partitions an install writes
+    /// over.
+    pub keep_recovery: bool,
+    /// How Skyward went back into the recovery partitions the install
+    /// wrote over, where it did.
+    pub reflash: Option<Reflash>,
     /// The mount page's partitions, as the runtime last read them, or why
     /// it could not.
     pub mounts: Result<Vec<MountRow>, String>,
@@ -1072,6 +1084,9 @@ impl Default for State {
             source: Source::Computer,
             package_name: None,
             script_output: Vec::new(),
+            recovery_partitions: false,
+            keep_recovery: true,
+            reflash: None,
             mounts: Ok(Vec::new()),
             mount_failure: None,
             backup: [true, true, false, true],
@@ -1961,10 +1976,17 @@ impl App {
     /// The system asked for sideload before the recovery started: the page
     /// opens over the home page, already receiving.
     pub fn start_sideload(&mut self) {
-        self.state.install = Install::Starting;
-        self.state.source = Source::Computer;
-        self.state.package_name = None;
+        self.begin_install(Install::Starting, Source::Computer, None);
         self.open(Screen::Installing);
+    }
+
+    /// Start an install from `source` afresh, of the file named `name` when
+    /// it is one on the phone: nothing the last install showed stays.
+    fn begin_install(&mut self, install: Install, source: Source, name: Option<String>) {
+        let s = &mut self.state;
+        (s.install, s.source, s.package_name) = (install, source, name);
+        s.script_output.clear();
+        s.reflash = None;
     }
 
     /// What the system asked of the recovery before it started.
@@ -2520,6 +2542,7 @@ impl App {
                 }
                 _ => {}
             },
+            Event::Reflashed(reflash) => self.state.reflash = Some(reflash),
             Event::Finished(outcome) => {
                 let damage = match (&outcome, &*install) {
                     (Outcome::Failed(_), Install::Updating { overwriting: true, .. }) => Some(Damage::System),
@@ -2606,6 +2629,7 @@ impl App {
                     Switch::Vibrate => &mut self.state.vibrate,
                     Switch::Compress => &mut self.state.compress,
                     Switch::Verify => &mut self.state.verify,
+                    Switch::KeepRecovery => &mut self.state.keep_recovery,
                 };
                 *on = !*on;
                 self.refresh();
@@ -2644,10 +2668,7 @@ impl App {
             Action::Brightness | Action::Pattern => {}
             Action::Sideload => match self.state.install {
                 Install::Idle | Install::Finished { .. } => {
-                    self.state.install = Install::Starting;
-                    self.state.source = Source::Computer;
-                    self.state.package_name = None;
-                    self.state.script_output.clear();
+                    self.begin_install(Install::Starting, Source::Computer, None);
                     if self.screen() == Screen::Installing {
                         self.refresh();
                     } else {
@@ -2870,10 +2891,8 @@ impl App {
     fn install_file(&mut self, place: Place, path: String, size: u64, now: u64) -> Vec<Effect> {
         match self.state.install {
             Install::Idle | Install::Finished { .. } => {
-                self.state.install = Install::Checking { size };
-                self.state.source = Source::File(place);
-                self.state.package_name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
-                self.state.script_output.clear();
+                let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
+                self.begin_install(Install::Checking { size }, Source::File(place), name);
                 self.open(Screen::Installing);
                 vec![Effect::InstallFile(place, path)]
             }
@@ -4458,6 +4477,45 @@ mod tests {
         assert_eq!(app.state.script_output.len(), SCRIPT_LINES);
         assert_eq!(app.state.script_output[0], "line 2");
         assert_eq!(app.frame(&f, &i).rows.as_ref().map(Rows::count), Some(SCRIPT_LINES));
+    }
+
+    #[test]
+    fn the_install_page_offers_to_keep_skyward_where_the_phone_has_recovery_partitions() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        let offered = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::KeepRecovery));
+        assert!(!offered(&mut app), "a phone whose recovery lives in boot");
+        app.state.recovery_partitions = true;
+        app.refresh();
+        assert!(offered(&mut app));
+        assert!(app.state.keep_recovery, "on until turned off");
+        tap(&mut app, &f, &i, Action::Toggle(Switch::KeepRecovery));
+        assert!(!app.state.keep_recovery);
+    }
+
+    #[test]
+    fn how_skyward_went_back_stays_until_the_next_install() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Script, 0);
+        app.install(Event::Running, 0);
+        let writing = Stage::Reflashing { done: 1 << 20, total: 4 << 20 };
+        app.install(Event::Progress(writing.clone()), 0);
+        assert_eq!(app.state.install, Install::Scripting { stage: Some(writing), running: true });
+        let why = "write /dev/block/by-name/recovery_a: Input/output error (os error 5)";
+        app.install(Event::Reflashed(Reflash::Failed(why.into())), 0);
+        app.install(Event::Finished(Outcome::Failed(Failure::Script(1))), 0);
+        assert_eq!(app.state.reflash, Some(Reflash::Failed(why.into())));
+        tap_at(&mut app, &f, &i, Action::Sideload, 1000);
+        assert_eq!(app.state.reflash, None, "sending again starts afresh");
+
+        app.install(Event::Waiting, 1000);
+        app.install(Event::Installing { version: None }, 1000);
+        app.install(Event::Progress(Stage::Reflashing { done: 1, total: 2 }), 1000);
+        assert!(matches!(app.state.install, Install::Updating { stage: Some(Stage::Reflashing { .. }), .. }), "an update writes it back too");
+        app.install(Event::Reflashed(Reflash::Written(vec![Slot::A])), 1000);
+        app.install(Event::Finished(Outcome::Installed { slot: Slot::A, wipe: false }), 1000);
+        assert_eq!(app.state.reflash, Some(Reflash::Written(vec![Slot::A])));
     }
 
     #[test]

@@ -62,7 +62,20 @@ pub enum Event {
     /// A line the install script shows.
     Print(String),
     Progress(Stage),
+    /// The install wrote over this recovery in the recovery partitions,
+    /// which the screen asked to keep: how writing it back went.
+    Reflashed(Reflash),
     Finished(Outcome),
+}
+
+/// How this recovery went back into the recovery partitions an install
+/// wrote over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reflash {
+    /// Into those of these slots.
+    Written(Vec<Slot>),
+    /// It could not be, for this reason.
+    Failed(String),
 }
 
 /// How far the work is.
@@ -79,6 +92,9 @@ pub enum Stage {
     Flashing { done: u64, total: u64 },
     /// The install script runs, as far as it says it is, in thousandths.
     Script { thousandths: u16 },
+    /// This recovery is written back into the recovery partitions the
+    /// install wrote over, and read back: bytes so far, of all.
+    Reflashing { done: u64, total: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

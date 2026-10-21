@@ -672,6 +672,13 @@ fn detach(services: Vec<Service>) -> Detach {
     })
 }
 
+/// Whether an install puts Skyward back into the recovery partitions it
+/// writes over: as the install page's switch is set, on a phone that has
+/// them.
+fn keep_recovery(app: &App) -> bool {
+    app.state.keep_recovery && app.state.recovery_partitions
+}
+
 /// Wait until a device, the installer or the recovery socket has something,
 /// or `timeout_ms` passes.
 fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
@@ -764,6 +771,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
     };
     app.state.phone_logs = cfg.wipe.logs.len();
+    // Skyward lives in a recovery partition of each slot where the phone
+    // has them, and the install page then offers to keep it there.
+    let by_name = Path::new(skyward_block::BY_NAME);
+    app.state.recovery_partitions = by_name.join("recovery_a").try_exists()? && by_name.join("recovery_b").try_exists()?;
     let mut eraser: Option<Eraser> = None;
     // Erasing the system asked for leaves on its own once it is done, as
     // does erasing an update asked for, sideloaded with a restart after it;
@@ -780,7 +791,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         Work::Sideload { .. } => {
             app.start_sideload();
-            installer = Some(Installer::start(detach(cfg.services.clone()))?);
+            installer = Some(Installer::start(detach(cfg.services.clone()), keep_recovery(&app))?);
         }
         Work::Menu | Work::Exit | Work::Fastboot | Work::PromptWipeData | Work::Unsupported(_) => {}
     }
@@ -1156,11 +1167,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::Sideload => {
                         ensure!(installer.is_none(), "an installer is running already");
-                        installer = Some(Installer::start(detach(cfg.services.clone()))?);
+                        installer = Some(Installer::start(detach(cfg.services.clone()), keep_recovery(&app))?);
                     }
                     Effect::InstallFile(place, path) => {
                         ensure!(installer.is_none(), "an installer is running already");
-                        installer = Some(Installer::open(in_place(place, &path), detach(cfg.services.clone()))?);
+                        installer = Some(Installer::open(in_place(place, &path), detach(cfg.services.clone()), keep_recovery(&app))?);
                     }
                     Effect::Flash { partition, pick } => {
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;

@@ -14,7 +14,7 @@ use crate::term::{self, Term};
 use crate::theme::Theme;
 use crate::widgets::{self, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DeviceInfo, VERSION};
-use skyward_install::{Outcome, Stage};
+use skyward_install::{Outcome, Reflash, Stage};
 use skyward_vab::Slot;
 use std::path::Path;
 
@@ -583,7 +583,7 @@ pub fn reboot(cx: &Ctx) -> Frame {
 /// where a package can come from.
 pub fn install(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
-    let mut c = page(t);
+    let mut c = long_page(t);
     let top = t.m.content_top;
     let mut facts = Vec::new();
     if let Some(v) = &i.os_version {
@@ -628,15 +628,21 @@ pub fn install(cx: &Ctx) -> Frame {
     rows.push(Row::new(install_title(Source::Computer)).icon(GREEN, Icon::Usb).subtitle("在电脑上运行 adb sideload"));
     let methods = widgets::list(&mut c, t, f, y, &rows);
     let from_usb = Action::Open(Screen::Choose(Place::UsbDrive));
-    let out = hits(&methods.rows[methods.rows.len() - 3..], &[from_storage, from_usb, Action::Sideload]);
-    widgets::footnote(
+    let mut out = hits(&methods.rows[methods.rows.len() - 3..], &[from_storage, from_usb, Action::Sideload]);
+    let mut y = widgets::footnote(
         &mut c,
         t,
         f,
         methods.bottom,
         "支持安装 A/B 完整更新包和带安装脚本的刷机包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动。选择文件时仅列出文件夹以及 .zip、.img 文件。",
     );
-    Frame::new(t, c, out, "安装", top)
+    if cx.state.recovery_partitions {
+        y = widgets::section(&mut c, t, f, y, "选项");
+        let options = widgets::list(&mut c, t, f, y, &[Row::new("自动重新刷入 Skyward").trail(Trail::Switch(cx.state.keep_recovery))]);
+        out.extend(hits(&options.rows, &[Action::Toggle(Switch::KeepRecovery)]));
+        y = widgets::footnote(&mut c, t, f, options.bottom, "开启后，安装系统更新或刷机包时被覆盖的 recovery 分区将重新刷入 Skyward。");
+    }
+    Frame::new(t, fit(c, t, y), out, "安装", top)
 }
 
 /// How installing from `source` is named: on the install page, and as the
@@ -685,15 +691,38 @@ fn update_stage(stage: Option<&Stage>) -> (String, Option<f32>) {
             (format!("第 2 步，共 3 步：校验 {partition}（{}/{count}）", index + 1), Some(*index as f32 / *count as f32))
         }
         Some(Stage::Finishing) => ("第 3 步，共 3 步：完成安装".into(), None),
+        Some(Stage::Reflashing { done, total }) => (REFLASHING.into(), Some(*done as f32 / *total as f32)),
         Some(Stage::Flashing { .. } | Stage::Script { .. }) | None => ("正在准备".into(), None),
     }
 }
 
-/// How far an install script says it is, once it says.
-fn script_share(stage: Option<&Stage>) -> Option<f32> {
+const REFLASHING: &str = "正在重新刷入 Skyward";
+
+/// What the card says while an install script runs, and how far it is: the
+/// last line the script showed and how far it says it is, then Skyward
+/// going back into the recovery partitions it wrote over.
+fn script_stage<'a>(stage: Option<&Stage>, said: &'a [String]) -> (&'a str, Option<f32>) {
+    let last = said.iter().rev().map(|line| line.trim()).find(|line| !line.is_empty()).unwrap_or("正在运行安装脚本");
     match stage {
-        Some(Stage::Script { thousandths }) => Some(f32::from(*thousandths) / 1000.0),
-        _ => None,
+        Some(Stage::Reflashing { done, total }) => (REFLASHING, Some(*done as f32 / *total as f32)),
+        Some(Stage::Script { thousandths }) => (last, Some(f32::from(*thousandths) / 1000.0)),
+        _ => (last, None),
+    }
+}
+
+/// How Skyward went back into the recovery partitions the install wrote
+/// over, where it did.
+fn reflashed(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
+    let (t, f) = (cx.t, cx.f);
+    match &cx.state.reflash {
+        None => y,
+        Some(Reflash::Written(slots)) => {
+            widgets::footnote(c, t, f, y, &format!("已将 Skyward 重新刷入{} 的 recovery 分区。", fmt::slots(slots)))
+        }
+        Some(Reflash::Failed(why)) => {
+            let y = widgets::footnote(c, t, f, y, "未能将 Skyward 重新刷入 recovery 分区。");
+            widgets::footnote(c, t, f, y, why)
+        }
     }
 }
 
@@ -852,8 +881,8 @@ pub fn installing(cx: &Ctx) -> Frame {
             widgets::footnote(&mut c, t, f, track.y + track.h, "返回将取消安装，不会运行安装脚本。")
         }
         Install::Scripting { stage, .. } => {
-            let said = s.script_output.iter().rev().map(|line| line.trim()).find(|line| !line.is_empty());
-            let y = widgets::progress_card(&mut c, t, f, top, "正在安装", said.unwrap_or("正在运行安装脚本"), script_share(stage.as_ref()));
+            let (detail, done) = script_stage(stage.as_ref(), &s.script_output);
+            let y = widgets::progress_card(&mut c, t, f, top, "正在安装", detail, done);
             let y = widgets::footnote(&mut c, t, f, y, until_installed(s.source));
             script_output(&mut c, cx, y, &mut rows)
         }
@@ -895,7 +924,7 @@ fn finished(
             let y = widgets::list(c, t, f, top, &[standing("安装成功", GREEN, Icon::Install, &detail)]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[restart]);
             out.extend(hits(&next.rows, &[Action::RebootTo(Target::System)]));
-            next.bottom
+            reflashed(c, cx, next.bottom)
         }
         Outcome::Flashed { partition, slots } => {
             let detail = format!("{partition} 已刷入{}。", fmt::slots(slots));
@@ -916,7 +945,8 @@ fn finished(
             let y = widgets::list(c, t, f, top, &[standing("安装成功", GREEN, Icon::Install, "安装脚本已运行完成。")]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[restart, again]);
             out.extend(hits(&next.rows, &[Action::RebootTo(Target::System), another]));
-            script_output(c, cx, next.bottom, rows)
+            let y = reflashed(c, cx, next.bottom);
+            script_output(c, cx, y, rows)
         }
         Outcome::Cancelled => {
             let y = widgets::list(c, t, f, top, &[standing("已取消", SLATE, Icon::Install, "未写入任何内容。")]).bottom;
@@ -950,6 +980,7 @@ fn finished(
             if let Some(d) = detail {
                 y = widgets::footnote(c, t, f, y, &d);
             }
+            let y = reflashed(c, cx, y);
             script_output(c, cx, y, rows)
         }
     }
@@ -1970,6 +2001,15 @@ mod tests {
 
     fn at(item: usize, done: u64, of: u64, checking: bool) -> BackupAt {
         BackupAt { item, done, of, checking }
+    }
+
+    #[test]
+    fn a_script_shows_its_last_line_until_skyward_goes_back() {
+        let said = ["- Flashing boot".to_string(), "  ".to_string()];
+        assert_eq!(script_stage(None, &[]), ("正在运行安装脚本", None));
+        assert_eq!(script_stage(Some(&Stage::Script { thousandths: 250 }), &said), ("- Flashing boot", Some(0.25)), "past a blank line");
+        assert_eq!(script_stage(Some(&Stage::Reflashing { done: 1, total: 4 }), &said), (REFLASHING, Some(0.25)));
+        assert_eq!(update_stage(Some(&Stage::Reflashing { done: 3, total: 4 })), (REFLASHING.to_string(), Some(0.75)));
     }
 
     #[test]

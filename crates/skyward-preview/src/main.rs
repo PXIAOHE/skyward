@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
-use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Refusal, Stage};
+use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Reflash, Refusal, Stage};
 use skyward_ui::app::{
     Action, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, EraseStop, FileKind,
     FileOp, FileRow, FileTask, Held, Install, JobEnd, Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch, UsbDrive,
@@ -280,7 +280,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 87] = [
+    let pages: [PageShot; 92] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -336,6 +336,24 @@ fn main() -> Result<()> {
         ("20-install-script-failed-dark", Screen::Installing, true, &|app| {
             script(app, Install::Finished { outcome: Outcome::Failed(Failure::Script(1)), damage: Some(Damage::Script) }, true)
         }),
+        ("20-install-script-reflashing", Screen::Installing, false, &|app| {
+            let stage = Some(Stage::Reflashing { done: 52_428_800, total: 209_715_200 });
+            script(app, Install::Scripting { stage, running: true }, false)
+        }),
+        ("20-install-script-ran-reflashed-dark", Screen::Installing, true, &|app| {
+            script(app, Install::Finished { outcome: Outcome::Ran { wipe_cache: false }, damage: None }, false);
+            app.state.reflash = Some(Reflash::Written(vec![Slot::A, Slot::B]));
+        }),
+        ("20-install-script-reflash-failed", Screen::Installing, false, &|app| {
+            script(app, Install::Finished { outcome: Outcome::Failed(Failure::Script(1)), damage: Some(Damage::Script) }, true);
+            let why = "write /dev/block/by-name/recovery_a: Input/output error (os error 5)";
+            app.state.reflash = Some(Reflash::Failed(why.into()));
+        }),
+        ("20-install-storage-installed-reflashed", Screen::Installing, false, &|app| {
+            from_storage(app, Install::Finished { outcome: Outcome::Installed { slot: Slot::A, wipe: false }, damage: None });
+            app.state.reflash = Some(Reflash::Written(vec![Slot::A]));
+        }),
+        ("11-install-light-recovery-partitions", Screen::Install, false, &|app| app.state.recovery_partitions = true),
         ("41-search-light", Screen::Search, false, &|_| {}),
         ("42-search-light-found", Screen::Search, false, &|app| app.state.search = "b".into()),
         ("43-search-dark-pinyin", Screen::Search, true, &|app| app.state.search = "zd".into()),
