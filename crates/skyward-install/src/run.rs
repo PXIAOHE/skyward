@@ -734,6 +734,7 @@ fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
 
     let started = Instant::now();
     let mut bar = Bar::default();
+    let thousandths = |bar: &Bar| bar.share(started.elapsed()).map(|share| (share * 1000.0).round() as u16);
     let (mut shown, mut told) = (None, Instant::now());
     let mut wipe_cache = false;
     let mut ended = None;
@@ -760,13 +761,10 @@ fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
             // Every output has closed: the script, and all it ran, are done.
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        if let Some(share) = bar.share(started.elapsed()) {
-            let thousandths = (share * 1000.0).round() as u16;
-            if shown != Some(thousandths) && told.elapsed() >= PROGRESS_EVERY {
-                shown = Some(thousandths);
-                told = Instant::now();
-                ctx.send(Event::Progress(Stage::Script { thousandths }));
-            }
+        if let Some(now) = thousandths(&bar).filter(|&now| shown != Some(now) && told.elapsed() >= PROGRESS_EVERY) {
+            shown = Some(now);
+            told = Instant::now();
+            ctx.send(Event::Progress(Stage::Script { thousandths: now }));
         }
         if ended.is_none() {
             ended = child.try_wait().context("see whether the install script has ended")?.map(|status| (status, Instant::now()));
@@ -781,6 +779,11 @@ fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
                 break;
             }
         }
+    }
+    // Where the script got last, which telling the screen at most so often
+    // may have held back.
+    if let Some(last) = thousandths(&bar).filter(|&last| shown != Some(last)) {
+        ctx.send(Event::Progress(Stage::Script { thousandths: last }));
     }
     let status = match ended {
         Some((status, _)) => status,
