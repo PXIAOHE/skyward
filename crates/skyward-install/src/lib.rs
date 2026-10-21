@@ -7,6 +7,7 @@ pub mod fuse;
 pub mod image;
 pub mod ota;
 pub mod package;
+pub mod script;
 
 #[cfg(target_os = "android")]
 mod ffs;
