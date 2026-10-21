@@ -166,35 +166,58 @@ pub fn unmap_whole(whole: &Whole) -> Result<()> {
     dm::remove(&whole.name)
 }
 
-/// Map each of the slot's logical partitions that is not mapped yet,
-/// writable and under its own name, as recoveries map them for install
-/// scripts, which look for them at /dev/block/mapper/<name>; while no
-/// update snapshot is outstanding. Gives the names it mapped.
-pub fn map_slot(slot: Slot) -> Result<Vec<String>> {
+/// What [`map_slot`] did to the slot's logical partitions, for
+/// [`unmap_slot`] to undo: those it mapped, and those the recovery had
+/// mapped read-only already, and still uses, that it made writable.
+#[derive(Debug, Default)]
+pub struct SlotMaps {
+    made: Vec<String>,
+    opened: Vec<(String, Vec<dm::Target>)>,
+}
+
+/// Map each of the slot's logical partitions writable and under its own
+/// name, as recoveries map them for install scripts, which look for them
+/// at /dev/block/mapper/<name>; while no update snapshot is outstanding.
+/// One the recovery has mapped read-only already is made writable where
+/// it is, in use or not.
+pub fn map_slot(slot: Slot) -> Result<SlotMaps> {
     ensure_no_snapshot()?;
     let super_dev = super_device();
     let md = skyward_lp::read(&super_dev, slot.number())?;
     let devices = block_devices(&md, &super_dev)?;
-    let mut mapped = Vec::new();
+    let mut maps = SlotMaps::default();
     for p in slot_partitions(&md, slot) {
-        if dm::status(&p.name)?.is_some() {
-            continue;
-        }
-        if let Err(e) = dm::create(&p.name, &targets(p, &devices), false) {
-            return Err(match unmap_slot(&mapped) {
+        if let Err(e) = map_writable(p, targets(p, &devices), &mut maps) {
+            return Err(match unmap_slot(&maps) {
                 Ok(()) => e,
-                Err(r) => e.context(format!("removing what was mapped before failed too: {r:#}")),
+                Err(r) => e.context(format!("undoing what was mapped before failed too: {r:#}")),
             });
         }
-        mapped.push(p.name.clone());
     }
-    Ok(mapped)
+    Ok(maps)
 }
 
-/// Remove the mappings [`map_slot`] made.
-pub fn unmap_slot(names: &[String]) -> Result<()> {
-    for name in names {
+/// Map partition `p` writable with `table`, or make the read-only mapping
+/// of it writable, keeping in `maps` what was done.
+fn map_writable(p: &Partition, table: Vec<dm::Target>, maps: &mut SlotMaps) -> Result<()> {
+    if dm::status(&p.name)?.is_none() {
+        dm::create(&p.name, &table, false)?;
+        maps.made.push(p.name.clone());
+    } else if dm::readonly(&p.name)? {
+        dm::reload(&p.name, &table, false)?;
+        maps.opened.push((p.name.clone(), table));
+    }
+    Ok(())
+}
+
+/// Undo [`map_slot`]: remove the mappings it made, and make those it made
+/// writable read-only again.
+pub fn unmap_slot(maps: &SlotMaps) -> Result<()> {
+    for name in &maps.made {
         dm::remove(name)?;
+    }
+    for (name, table) in &maps.opened {
+        dm::reload(name, table, true)?;
     }
     Ok(())
 }

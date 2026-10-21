@@ -198,6 +198,17 @@ mod sys {
         call(&control()?, DM_DEV_REMOVE, io.as_mut_bytes()).with_context(|| format!("remove device-mapper device {name}"))
     }
 
+    /// Give device `name`, which may be in use, `targets` as its table,
+    /// read-only or not: the device is suspended while the table is
+    /// swapped in, and resumes with it.
+    pub fn reload(name: &str, targets: &[Target], readonly: bool) -> Result<()> {
+        let ctl = control()?;
+        let mut table = table_load(name, targets, readonly)?;
+        call(&ctl, DM_TABLE_LOAD, &mut table).with_context(|| format!("load a new table for {name}"))?;
+        let mut resume = DmIoctl::new(name)?;
+        call(&ctl, DM_DEV_SUSPEND, resume.as_mut_bytes()).with_context(|| format!("swap in the new table of {name}"))
+    }
+
     /// The (major, minor) of device `name`, or `None` when there is none.
     pub fn status(name: &str) -> Result<Option<(u32, u32)>> {
         let mut io = DmIoctl::new(name)?;
@@ -206,6 +217,13 @@ mod sys {
             Err(e) if e.raw_os_error() == Some(libc::ENXIO) => Ok(None),
             Err(e) => Err(e).with_context(|| format!("look up device-mapper device {name}")),
         }
+    }
+
+    /// Whether device `name` is read-only.
+    pub fn readonly(name: &str) -> Result<bool> {
+        let mut io = DmIoctl::new(name)?;
+        call(&control()?, DM_DEV_STATUS, io.as_mut_bytes()).with_context(|| format!("look up device-mapper device {name}"))?;
+        Ok(io.flags & DM_READONLY_FLAG != 0)
     }
 
     fn decode(dev: u64) -> (u32, u32) {
@@ -239,12 +257,20 @@ mod sys {
         bail!("this host has no device-mapper to remove {name}")
     }
 
+    pub fn reload(name: &str, _targets: &[Target], _readonly: bool) -> Result<()> {
+        bail!("this host has no device-mapper to reload {name}")
+    }
+
     pub fn status(name: &str) -> Result<Option<(u32, u32)>> {
+        bail!("this host has no device-mapper to look up {name}")
+    }
+
+    pub fn readonly(name: &str) -> Result<bool> {
         bail!("this host has no device-mapper to look up {name}")
     }
 }
 
-pub use sys::{create, remove, status};
+pub use sys::{create, readonly, reload, remove, status};
 
 #[cfg(test)]
 mod tests {

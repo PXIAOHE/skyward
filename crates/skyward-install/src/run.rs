@@ -15,7 +15,7 @@ use crate::{Command, Event, Failure, Outcome, Reflash, Refusal, Stage, ENGINE_LO
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
 use skyward_info::Charge;
 use skyward_sys::{kmsg, prop};
-use skyward_vab::{Slot, SnapshotState};
+use skyward_vab::{Slot, SlotMaps, SnapshotState};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -586,7 +586,7 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
 /// Run the install script of the zip being served once the user agrees,
 /// as Android's recovery runs one, among what the recoveries such scripts
 /// are written for give them: their shell at /sbin, and the slot's
-/// partitions mapped and not mounted.
+/// partitions mapped writable and unmounted.
 fn run_script(ctx: &mut Context) -> Result<Done> {
     if let Some(refusal) = battery()? {
         return Ok(Done::Decided(Outcome::Refused(refusal)));
@@ -613,7 +613,7 @@ fn run_script(ctx: &mut Context) -> Result<Done> {
         SnapshotState::None => skyward_vab::map_slot(slot)?,
         state => {
             let _ = kmsg(&format!("install: the slot's partitions stay unmapped while an update is in flight ({state:?})"));
-            Vec::new()
+            SlotMaps::default()
         }
     };
     let mounted = skyward_block::mount::mount_ids()?;
@@ -789,9 +789,10 @@ fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
 }
 
 /// Take away what the script mounted and left mounted, the latest first,
-/// and the slot's partitions mapped for it; and mount /metadata again as
-/// the recovery keeps it, for a script that took it away.
-fn clean_up(before: &[(i32, PathBuf)], mapped: &[String]) -> Result<()> {
+/// and undo how the slot's partitions were mapped for it; and mount
+/// /metadata again as the recovery keeps it, for a script that took it
+/// away.
+fn clean_up(before: &[(i32, PathBuf)], mapped: &SlotMaps) -> Result<()> {
     let kept: HashSet<i32> = before.iter().map(|(id, _)| *id).collect();
     for (_, point) in skyward_block::mount::mount_ids()?.into_iter().rev().filter(|(id, _)| !kept.contains(id)) {
         skyward_block::mount::umount_detach(&point)?;
