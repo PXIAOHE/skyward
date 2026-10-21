@@ -375,7 +375,7 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
     Ok(match code? {
         0 => {
             if let Some(kept) = &kept {
-                reflash(ctx, kept, Some(slot.other()));
+                reflash(ctx, kept, Ok(slot.other()));
             }
             Done::Decided(Outcome::Installed { slot: slot.other(), wipe })
         }
@@ -398,10 +398,10 @@ fn hold(ctx: &Context, current: Slot) -> Result<Option<Kept>> {
 }
 
 /// Write this recovery back into the recovery partitions the install wrote
-/// over, telling the screen how far it is and then how it went; `updated`
-/// is the slot an update went to.
-fn reflash(ctx: &Context, kept: &Kept, updated: Option<Slot>) {
-    let slots = match kept.wanted(updated) {
+/// over and into that of `next`, the slot that starts next, telling the
+/// screen how far it is and then how it went.
+fn reflash(ctx: &Context, kept: &Kept, next: Result<Slot>) {
+    let slots = match next.and_then(|next| kept.wanted(next)) {
         Ok(slots) if slots.is_empty() => return,
         Ok(slots) => slots,
         Err(e) => return ctx.send(Event::Reflashed(Reflash::Failed(format!("{e:#}")))),
@@ -621,9 +621,11 @@ fn run_script(ctx: &mut Context) -> Result<Done> {
     if let Err(e) = clean_up(&mounted, &mapped) {
         let _ = kmsg(&format!("install: not all the script left behind was taken away: {e:#}"));
     }
-    // What the script wrote over goes back however it ended.
+    // What the script wrote over goes back however it ended, and so does
+    // the recovery of the slot that starts next, which a package that
+    // installs to the other slot switches to.
     if let Some(kept) = &kept {
-        reflash(ctx, kept, None);
+        reflash(ctx, kept, skyward_vab::boot::next_slot().context("ask which slot starts next"));
     }
     let (code, wipe_cache) = ran?;
     Ok(Done::Script { code, wipe_cache })

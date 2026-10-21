@@ -31,6 +31,14 @@ pub struct BootControl<'a> {
     service: Handle<'a>,
 }
 
+/// The slot the bootloader starts next, as the running boot control tells
+/// it.
+pub fn next_slot() -> Result<Slot> {
+    let binder = Binder::hardware()?;
+    let control = BootControl::open(&binder)?;
+    control.active()
+}
+
 impl<'a> BootControl<'a> {
     /// Reach the running boot control, or say that none is.
     pub fn open(binder: &'a Binder) -> Result<BootControl<'a>> {
@@ -39,18 +47,22 @@ impl<'a> BootControl<'a> {
         Ok(BootControl { service })
     }
 
-    /// What it holds of the slots now.
-    pub fn slots(&self) -> Result<BootSlots> {
+    /// The slot the bootloader starts next.
+    pub fn active(&self) -> Result<Slot> {
         let call = Message::call(SERVICE);
         let reply = self.service.transact(ACTIVE, &call).context("ask which slot starts next")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("ask which slot starts next")?;
-        let active = match read.i32().context("read which slot starts next")? {
-            0 => Slot::A,
-            1 => Slot::B,
+        match read.i32().context("read which slot starts next")? {
+            0 => Ok(Slot::A),
+            1 => Ok(Slot::B),
             other => bail!("the boot control says slot {other} starts next"),
-        };
-        let mut slots = BootSlots { active, bootable: [false; 2], successful: [false; 2] };
+        }
+    }
+
+    /// What it holds of the slots now.
+    pub fn slots(&self) -> Result<BootSlots> {
+        let mut slots = BootSlots { active: self.active()?, bootable: [false; 2], successful: [false; 2] };
         for slot in [Slot::A, Slot::B] {
             slots.bootable[slot.number() as usize] = self.holds(BOOTABLE, slot).with_context(|| format!("ask whether slot {} starts", slot.letter()))?;
             slots.successful[slot.number() as usize] =

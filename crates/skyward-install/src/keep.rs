@@ -45,12 +45,12 @@ impl Kept {
     }
 
     /// The slots whose recovery partition gets this recovery back, by what
-    /// the partitions hold once the install is done; `updated` is the slot
-    /// an update went to.
-    pub fn wanted(&self, updated: Option<Slot>) -> Result<Vec<Slot>> {
+    /// the partitions hold once the install is done; `next` is the slot
+    /// that starts next.
+    pub fn wanted(&self, next: Slot) -> Result<Vec<Slot>> {
         let (a, _) = read(&image::device(&self.dir, PARTITION, Slot::A))?;
         let (b, _) = read(&image::device(&self.dir, PARTITION, Slot::B))?;
-        Ok(restore(self.before, [a, b], self.own, updated))
+        Ok(restore(self.before, [a, b], self.own, next))
     }
 
     /// Write this recovery into the recovery partitions of `slots` and read
@@ -74,15 +74,15 @@ fn read(path: &Path) -> Result<(Held, Vec<u8>)> {
 
 /// The slots whose recovery partition gets this recovery back once an
 /// install is done, by what each held `before` and `after` it, slot A
-/// first: the slot an update went to, `updated`, which starts next, unless
-/// it holds this build, whose digest is `own`; and any other the install
-/// wrote over with something that is not Skyward.
-pub fn restore(before: [Held; 2], after: [Held; 2], own: [u8; 32], updated: Option<Slot>) -> Vec<Slot> {
+/// first: the slot that starts next, `next`, unless it holds this build,
+/// whose digest is `own`; and any other the install wrote over with
+/// something that is not Skyward.
+pub fn restore(before: [Held; 2], after: [Held; 2], own: [u8; 32], next: Slot) -> Vec<Slot> {
     [Slot::A, Slot::B]
         .into_iter()
         .filter(|&slot| {
             let k = slot.number() as usize;
-            match updated == Some(slot) {
+            match slot == next {
                 true => after[k].digest != own,
                 false => after[k].digest != before[k].digest && !after[k].skyward,
             }
@@ -103,19 +103,19 @@ mod tests {
     const OLD: Held = Held { digest: [3; 32], skyward: false };
 
     #[test]
-    fn an_update_gets_this_recovery_in_the_slot_it_went_to() {
-        assert_eq!(restore([SKYWARD, OLD], [SKYWARD, STOCK], OWN, Some(Slot::B)), [Slot::B]);
-        assert_eq!(restore([SKYWARD, OLD], [SKYWARD, OLD], OWN, Some(Slot::B)), [Slot::B], "an older recovery there, left by the update");
-        assert_eq!(restore([SKYWARD, OTHER_BUILD], [SKYWARD, OTHER_BUILD], OWN, Some(Slot::B)), [Slot::B], "the slot that starts next gets this build");
-        assert!(restore([SKYWARD, SKYWARD], [SKYWARD, SKYWARD], OWN, Some(Slot::A)).is_empty(), "this recovery is there already");
+    fn the_slot_that_starts_next_gets_this_build() {
+        assert_eq!(restore([SKYWARD, OLD], [SKYWARD, STOCK], OWN, Slot::B), [Slot::B], "an update or a package that went to slot B");
+        assert_eq!(restore([SKYWARD, OLD], [SKYWARD, OLD], OWN, Slot::B), [Slot::B], "an older recovery there, left alone by the install");
+        assert_eq!(restore([SKYWARD, OTHER_BUILD], [SKYWARD, OTHER_BUILD], OWN, Slot::B), [Slot::B], "another build of Skyward there");
+        assert!(restore([SKYWARD, SKYWARD], [SKYWARD, SKYWARD], OWN, Slot::A).is_empty(), "this recovery is there already");
     }
 
     #[test]
-    fn a_script_gets_it_back_only_where_it_wrote_something_else() {
-        assert!(restore([SKYWARD, OLD], [SKYWARD, OLD], OWN, None).is_empty(), "a script that left recovery alone, such as a root installer");
-        assert_eq!(restore([SKYWARD, OLD], [STOCK, OLD], OWN, None), [Slot::A]);
-        assert_eq!(restore([SKYWARD, OLD], [STOCK, STOCK], OWN, None), [Slot::A, Slot::B]);
-        assert!(restore([SKYWARD, OLD], [OTHER_BUILD, OTHER_BUILD], OWN, None).is_empty(), "a script that put another build of Skyward in");
+    fn elsewhere_it_goes_back_only_where_the_install_wrote_something_else() {
+        assert!(restore([SKYWARD, OLD], [SKYWARD, OLD], OWN, Slot::A).is_empty(), "a package that left recovery alone, such as a root installer");
+        assert_eq!(restore([SKYWARD, OLD], [SKYWARD, STOCK], OWN, Slot::A), [Slot::B]);
+        assert_eq!(restore([SKYWARD, OLD], [STOCK, STOCK], OWN, Slot::A), [Slot::A, Slot::B]);
+        assert!(restore([SKYWARD, OLD], [SKYWARD, OTHER_BUILD], OWN, Slot::A).is_empty(), "a package that put another build of Skyward in");
     }
 
     /// Recovery partitions of `size` bytes holding `a` and `b`.
@@ -135,20 +135,20 @@ mod tests {
         let size = skyward.len().max(stock.len()) + 4096;
         let dir = partitions(&skyward, &stock, size);
         let kept = Kept::hold(dir.path(), Slot::A).unwrap().expect("slot A's partition holds Skyward");
-        assert!(kept.wanted(None).unwrap().is_empty(), "nothing written over");
-        // A script puts the stock recovery in both slots.
+        assert!(kept.wanted(Slot::A).unwrap().is_empty(), "nothing written over");
+        // A package puts the stock recovery in both slots.
         let mut written = stock.clone();
         written.resize(size, 0);
         std::fs::write(dir.path().join("recovery_a"), &written).unwrap();
-        assert_eq!(kept.wanted(None).unwrap(), [Slot::A], "slot B held the stock recovery already");
+        assert_eq!(kept.wanted(Slot::A).unwrap(), [Slot::A], "slot B held the stock recovery already");
         let mut told = Vec::new();
         kept.write(&[Slot::A], &mut |done, total| told.push((done, total))).unwrap();
         assert_eq!(told.last(), Some(&(2 * size as u64, 2 * size as u64)), "written and read back");
         let mut whole = skyward.clone();
         whole.resize(size, 0);
         assert_eq!(std::fs::read(dir.path().join("recovery_a")).unwrap(), whole);
-        assert!(kept.wanted(None).unwrap().is_empty());
-        assert_eq!(kept.wanted(Some(Slot::B)).unwrap(), [Slot::B], "an update to slot B starts it next");
+        assert!(kept.wanted(Slot::A).unwrap().is_empty());
+        assert_eq!(kept.wanted(Slot::B).unwrap(), [Slot::B], "an install that has slot B start next");
     }
 
     #[test]
