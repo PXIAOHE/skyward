@@ -28,22 +28,45 @@ impl Sprite {
     }
 
     /// The sprite blurred by about `radius` pixels: three box passes each
-    /// way, together close to a Gaussian of half that deviation.
+    /// way, together close to a Gaussian of half that deviation. Each box
+    /// takes the mean of `2 half + 1` pixels, rounded, beyond the edges
+    /// counting as empty; the means of every sum are worked out once, and
+    /// the passes down the sprite run along whole rows at a time.
     pub fn blurred(&self, radius: f32) -> Sprite {
         let half = (radius / 2.0).round() as usize;
         if half == 0 {
             return self.clone();
         }
         let (w, h) = (self.w as usize, self.h as usize);
+        let width = 2 * half + 1;
+        let mean: Vec<u8> = (0..=255 * width).map(|s| ((s + width / 2) / width) as u8).collect();
         let mut a = self.cov.clone();
         let mut b = vec![0u8; a.len()];
-        let mut line = Vec::new();
+        let mut sums = vec![0u32; w];
         for _ in 0..3 {
-            for y in 0..h {
-                box_line(&a, &mut b, y * w, 1, w, half, &mut line);
+            // Along each row.
+            for (src, dst) in a.chunks_exact(w).zip(b.chunks_exact_mut(w)) {
+                let at = |i: usize| src.get(i).map_or(0, |&v| v as u32);
+                let mut sum: u32 = (0..=half).map(at).sum();
+                for (i, d) in dst.iter_mut().enumerate() {
+                    *d = mean[sum as usize];
+                    sum = sum + at(i + half + 1) - i.checked_sub(half).map_or(0, at);
+                }
             }
-            for x in 0..w {
-                box_line(&b, &mut a, x, w, h, half, &mut line);
+            // Down each column: a running sum per column, moved down a row
+            // at a time.
+            sums.fill(0);
+            for row in b.chunks_exact(w).take(half + 1) {
+                sums.iter_mut().zip(row).for_each(|(s, &v)| *s += v as u32);
+            }
+            for y in 0..h {
+                a[y * w..(y + 1) * w].iter_mut().zip(&sums).for_each(|(d, &s)| *d = mean[s as usize]);
+                if let Some(row) = b.get((y + half + 1) * w..(y + half + 2) * w) {
+                    sums.iter_mut().zip(row).for_each(|(s, &v)| *s += v as u32);
+                }
+                if let Some(up) = y.checked_sub(half) {
+                    sums.iter_mut().zip(&b[up * w..(up + 1) * w]).for_each(|(s, &v)| *s -= v as u32);
+                }
             }
         }
         Sprite { cov: a, ..*self }
@@ -188,23 +211,6 @@ impl Blurs {
         }
         let sharp = &self.sharp;
         self.blurred[half].get_or_insert_with(|| sharp.blurred(half as f32 * 2.0))
-    }
-}
-
-/// One box-filter pass along a line of `n` values `stride` apart from
-/// `start`, `half` either side; the ends are treated as empty. `line` is
-/// scratch room for the line with the empty margins around it.
-fn box_line(src: &[u8], dst: &mut [u8], start: usize, stride: usize, n: usize, half: usize, line: &mut Vec<u32>) {
-    line.clear();
-    line.resize(n + 2 * half + 1, 0);
-    for i in 0..n {
-        line[half + i] = src[start + i * stride] as u32;
-    }
-    let width = (2 * half + 1) as u32;
-    let mut sum: u32 = line[..2 * half + 1].iter().sum();
-    for i in 0..n {
-        dst[start + i * stride] = ((sum + width / 2) / width) as u8;
-        sum = sum + line[i + 2 * half + 1] - line[i];
     }
 }
 
