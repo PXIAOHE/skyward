@@ -33,16 +33,44 @@ pub fn over(top: Rgba, under: Rgba) -> Rgba {
 /// Source-over composite of `src` (with an extra coverage `cov` in 0..=1) onto
 /// `dst` (a 4-byte RGBA slice), straight alpha.
 pub fn blend_over(dst: &mut [u8], src: Rgba, cov: f32) {
-    let sa = (src.a as f32 / 255.0) * cov.clamp(0.0, 1.0);
-    if sa <= 0.0 {
+    let a = (src.a as f32 * cov.clamp(0.0, 1.0)).round() as u32;
+    blend_px(dst.try_into().expect("a pixel is four bytes"), src, a);
+}
+
+/// `src`'s colour laid over the pixel `dst` with strength `a` of 255: its
+/// own alpha and how much of the pixel it covers, together.
+#[inline]
+pub fn blend_px(dst: &mut [u8; 4], src: Rgba, a: u32) {
+    if a == 0 {
         return;
     }
-    // An opaque source at full coverage comes out of the formula below as
-    // itself, so write it directly.
-    if sa >= 1.0 {
-        dst.copy_from_slice(&[src.r, src.g, src.b, 255]);
+    // Wholly laid on, it comes out of the formulas below as itself.
+    if a >= 255 {
+        *dst = [src.r, src.g, src.b, 255];
         return;
     }
+    // Over an opaque pixel, which pages are, the result stays opaque and is
+    // a plain mix, worked out in integers.
+    if dst[3] == 255 {
+        let mix = |s: u8, d: u8| ((s as u32 * a + d as u32 * (255 - a) + 127) / 255) as u8;
+        dst[0] = mix(src.r, dst[0]);
+        dst[1] = mix(src.g, dst[1]);
+        dst[2] = mix(src.b, dst[2]);
+        return;
+    }
+    // Over a clear pixel it is the colour itself, as see-through as laid.
+    if dst[3] == 0 {
+        *dst = [src.r, src.g, src.b, a as u8];
+        return;
+    }
+    blend_clear(dst, src, a);
+}
+
+/// [`blend_px`] over a pixel not wholly opaque, as layers drawn on their
+/// own are; kept out of line so the common cases above are drawn in place.
+#[inline(never)]
+fn blend_clear(dst: &mut [u8; 4], src: Rgba, a: u32) {
+    let sa = a as f32 / 255.0;
     let da = dst[3] as f32 / 255.0;
     let out_a = sa + da * (1.0 - sa);
     if out_a <= 0.0 {
