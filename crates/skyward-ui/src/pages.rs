@@ -1439,7 +1439,11 @@ pub fn update(cx: &Ctx) -> Frame {
         widgets::footnote(&mut c, t, f, y, "合并完成前，暂不刷写 super 中的分区。返回后将继续合并。");
         return Frame::new(t, c, out, "系统更新", top);
     }
-    let (title, detail) = fmt::update(&s.update);
+    let next = match &s.boot_slots {
+        Some(Ok(slots)) => Some(slots.active),
+        _ => None,
+    };
+    let (title, detail) = fmt::update(&s.update, next);
     let color = match s.update {
         Standing::None => SLATE,
         Standing::Merged => GREEN,

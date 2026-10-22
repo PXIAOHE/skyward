@@ -1445,6 +1445,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         if merger.is_none() {
                             app.set_update(skyward_vab::standing(slot)?);
                         }
+                        // An update in the other slot starts with that slot,
+                        // which a system's updater may not have set yet.
+                        app.set_boot_slots(read_slots());
                     }
                     Effect::Merge => {
                         ensure!(merger.is_none(), "the update is being merged already");

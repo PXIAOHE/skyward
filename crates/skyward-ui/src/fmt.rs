@@ -233,13 +233,21 @@ pub fn backup_refusal(r: &BackupRefusal, restore: bool) -> String {
 }
 
 /// What the update page says of an update standing so, and the line under
-/// it on what comes next.
-pub fn update(s: &Standing) -> (&'static str, Option<String>) {
+/// it on what comes next; `next` is the slot the bootloader starts next,
+/// where the boot control could tell.
+pub fn update(s: &Standing, next: Option<Slot>) -> (&'static str, Option<String>) {
     match s {
         Standing::None => ("暂无待合并的更新", None),
         Standing::Unknown => ("无法读取更新状态", Some("无法读取 /metadata 中的更新记录".into())),
         Standing::Writing => ("更新未写入完成", Some("启动系统后将继续安装".into())),
-        Standing::Installed(slot) => ("更新已安装", Some(format!("重启后将从槽位 {} 启动新系统，启动后自动合并", slot.letter()))),
+        Standing::Installed(slot) => {
+            let detail = match next {
+                Some(next) if next == *slot => format!("重启后将从槽位 {} 启动新系统，启动后自动合并", slot.letter()),
+                Some(_) => format!("需在系统的「系统更新」中重启，才会从槽位 {} 启动新系统", slot.letter()),
+                None => format!("从槽位 {} 启动新系统后将自动合并", slot.letter()),
+            };
+            ("更新已安装", Some(detail))
+        }
         Standing::Waiting => ("更新等待合并", Some("启动新系统后将自动合并，也可以在此合并".into())),
         Standing::Compressed => ("更新等待合并", Some("此类更新需在系统中合并，启动系统后将自动合并".into())),
         Standing::Merging(_) => ("正在合并更新", None),
@@ -832,5 +840,17 @@ mod tests {
         assert_eq!(erase_stop(&EraseStop::Failed(Part::Art, "x".into())).0, "清除 ART 缓存失败。", "a Latin name stands apart");
         assert_eq!(erase_stop(&EraseStop::Failed(Part::Data, "x".into())).0, "清除 data 分区失败。");
         assert_eq!(erase_stop(&EraseStop::Failed(Part::Logs, "x".into())), ("清除日志失败。".into(), Some("x".into())));
+    }
+
+    #[test]
+    fn an_installed_update_says_whether_its_slot_starts_next() {
+        let installed = Standing::Installed(Slot::A);
+        assert_eq!(update(&installed, Some(Slot::A)).1.unwrap(), "重启后将从槽位 A 启动新系统，启动后自动合并");
+        assert_eq!(
+            update(&installed, Some(Slot::B)).1.unwrap(),
+            "需在系统的「系统更新」中重启，才会从槽位 A 启动新系统",
+            "the system's updater has not had slot A start next yet"
+        );
+        assert_eq!(update(&installed, None).1.unwrap(), "从槽位 A 启动新系统后将自动合并", "the boot control could not tell");
     }
 }

@@ -280,7 +280,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 95] = [
+    let pages: [PageShot; 96] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -443,6 +443,12 @@ fn main() -> Result<()> {
         ("113-update-light-waiting", Screen::Update, false, &|app| app.set_update(Standing::Waiting)),
         ("114-update-dark-merging", Screen::Update, true, &|app| app.set_update(Standing::Merging(0.37))),
         ("115-update-light-installed", Screen::Update, false, &|app| app.set_update(Standing::Installed(Slot::A))),
+        // Installed by an updater that has slot A start next only as it
+        // restarts the phone itself.
+        ("118-update-light-installed-unswitched", Screen::Update, false, &|app| {
+            app.set_update(Standing::Installed(Slot::A));
+            app.set_boot_slots(Ok(BootSlots { active: Slot::B, bootable: [false, true], successful: [false, true] }));
+        }),
         ("116-update-dark-failed", Screen::Update, true, &|app| app.set_update(Standing::Failed(FailureCode::ExpectedMergeTarget))),
         ("117-advanced-light-merged", Screen::Advanced, false, &|app| app.set_update(Standing::Merged)),
         ("58-license-light", Screen::License, false, &|_| {}),

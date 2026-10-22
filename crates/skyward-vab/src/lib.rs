@@ -345,8 +345,9 @@ pub enum Standing {
     Unknown,
     /// The system was writing it to the other slot, and has not finished.
     Writing,
-    /// Written to the other slot, which starts next; it merges once the
-    /// system there has started.
+    /// Written to the other slot; it merges once the system there has
+    /// started. A system's updater may leave having that slot start next
+    /// until it restarts the phone itself.
     Installed(Slot),
     /// Written to the slot the phone runs from, whose system has not
     /// started all the way: it merges once it has, or here.
