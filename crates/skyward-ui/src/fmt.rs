@@ -5,7 +5,7 @@ use jiff::Timestamp;
 use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
-use skyward_vab::{Hold, Slot, SnapshotState};
+use skyward_vab::{Hold, Slot, SnapshotState, Standing};
 use std::sync::OnceLock;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -220,7 +220,7 @@ pub fn backup_refusal(r: &BackupRefusal, restore: bool) -> String {
         BackupRefusal::Update(state) => {
             let what = if restore { "恢复启动分区和系统分区" } else { "备份系统分区" };
             match state {
-                SnapshotState::Snapshotted | SnapshotState::Merging => format!("更新合并完成前，暂不{what}。请先启动系统，等待更新完成。"),
+                SnapshotState::Snapshotted | SnapshotState::Merging => format!("更新合并完成前，暂不{what}。你可以在「高级 > 系统更新」中查看。"),
                 SnapshotState::MergeFailed => format!("更新合并失败。在系统中处理完成前，暂不{what}。"),
                 SnapshotState::Unknown => format!("无法读取更新状态，暂不{what}。"),
                 SnapshotState::None => unreachable!("no update in flight holds anything back"),
@@ -232,14 +232,33 @@ pub fn backup_refusal(r: &BackupRefusal, restore: bool) -> String {
     }
 }
 
-/// Why the mount page mounts nothing from super while an update is in
-/// flight; `None` when it is not.
-pub fn snapshot_mount_note(s: &SnapshotState) -> Option<&'static str> {
+/// What the update page says of an update standing so, and the line under
+/// it on what comes next.
+pub fn update(s: &Standing) -> (&'static str, Option<String>) {
     match s {
-        SnapshotState::None => None,
-        SnapshotState::Snapshotted | SnapshotState::Merging => Some("更新合并完成前，无法挂载 super 中的分区"),
-        SnapshotState::MergeFailed => Some("在系统中处理完成前，无法挂载 super 中的分区"),
-        SnapshotState::Unknown => Some("读取到更新状态前，无法挂载 super 中的分区"),
+        Standing::None => ("暂无待合并的更新", None),
+        Standing::Unknown => ("无法读取更新状态", Some("无法读取 /metadata 中的更新记录".into())),
+        Standing::Writing => ("更新未写入完成", Some("启动系统后将继续安装".into())),
+        Standing::Installed(slot) => ("更新已安装", Some(format!("重启后将从槽位 {} 启动新系统，启动后自动合并", slot.letter()))),
+        Standing::Waiting => ("更新等待合并", Some("启动新系统后将自动合并，也可以在此合并".into())),
+        Standing::Compressed => ("更新等待合并", Some("此类更新需在系统中合并，启动系统后将自动合并".into())),
+        Standing::Merging(_) => ("正在合并更新", None),
+        Standing::Failed(code) => ("更新合并失败", Some(format!("重启后将继续合并（{code:?}）"))),
+        Standing::Merged => ("更新已合并", Some("下次启动系统时将清理更新留下的文件".into())),
+    }
+}
+
+/// Where an update standing so is, beside the entry of its page.
+pub fn update_value(s: &Standing) -> &'static str {
+    match s {
+        Standing::None => "暂无",
+        Standing::Unknown => "无法读取",
+        Standing::Writing => "未写入完成",
+        Standing::Installed(_) => "已安装",
+        Standing::Waiting | Standing::Compressed => "等待合并",
+        Standing::Merging(_) => "正在合并",
+        Standing::Failed(_) => "合并失败",
+        Standing::Merged => "已合并",
     }
 }
 
@@ -287,11 +306,10 @@ pub fn users(users: &[u32]) -> String {
 /// it when there is that.
 pub fn erase_stop(s: &EraseStop) -> (String, Option<String>) {
     match s {
-        EraseStop::Update(Hold::Unconfirmed) => (
-            "当前槽位的系统更新尚未完成，暂无法清除。请先启动系统完成更新后重试。如果系统无法启动，多次启动失败后将切换回原槽位，之后即可清除。".into(),
-            None,
-        ),
-        EraseStop::Update(Hold::Merging) => ("系统更新正在合并，暂无法清除。请先启动系统，合并完成后重试。".into(), None),
+        EraseStop::Update(Hold::Unconfirmed) => {
+            ("当前槽位的系统更新尚未完成，暂无法清除。你可以在「高级 > 系统更新」中合并后重试。".into(), None)
+        }
+        EraseStop::Update(Hold::Merging) => ("系统更新正在合并，暂无法清除。你可以在「高级 > 系统更新」中查看，合并完成后重试。".into(), None),
         EraseStop::Update(Hold::MergeFailed) => ("系统更新合并失败，暂无法清除。请先启动系统处理后重试。".into(), None),
         EraseStop::NotRebuilt => ("本机系统开机时不会重新创建已清空的 data 分区，无法清除。".into(), None),
         EraseStop::NoCache => ("本机没有 cache 分区。".into(), None),

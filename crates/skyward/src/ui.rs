@@ -3,6 +3,7 @@ use crate::decrypt::{self, Decryptor};
 use crate::filework;
 use crate::haptics::Haptics;
 use crate::input::{monotonic_ms, Event, Inputs};
+use crate::merge;
 use crate::pty;
 use crate::services;
 use crate::wipe::{self, Eraser, Step};
@@ -21,6 +22,7 @@ use skyward_ui::app::{
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
+use skyward_vab::{Merge, Standing};
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io::Write;
@@ -887,6 +889,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut worker: Option<filework::Worker> = None;
     // Backing up or restoring under way.
     let mut backuper: Option<backup::Worker> = None;
+    // An update's merge followed: one the recovery found under way, which
+    // the kernel took up again as the snapshots were mapped, or one started
+    // on the update page.
+    let mut merger: Option<merge::Merger> = None;
+    if let Some(slot) = info.slot {
+        let standing = skyward_vab::standing(slot)?;
+        if matches!(standing, Standing::Merging(_)) && skyward_vab::snapshots_mapped(slot)? {
+            skyward_sys::kmsg("the update's merge goes on")?;
+            merger = Some(merge::Merger::start(slot, false)?);
+        }
+        app.set_update(standing);
+    }
     // The USB drive plugged in, looked for each second.
     let mut plugged: Option<Plugged> = None;
     let mut seen: Option<String> = None;
@@ -986,6 +1000,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(b) = &backuper {
             fds.push(b.fd());
+        }
+        if let Some(m) = &merger {
+            fds.push(m.fd());
         }
         if let Some(d) = &decryptor {
             fds.push(d.fd());
@@ -1118,6 +1135,34 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if backed {
             backuper = None;
+        }
+        if let Some(m) = &merger {
+            let slot = info.slot.context("only an A/B phone merges an update")?;
+            for ev in m.events() {
+                match ev {
+                    merge::Event::Looked(look) => {
+                        eprintln!("merge {look:?}");
+                        app.set_update(match look {
+                            Merge::Going(done) => Standing::Merging(done),
+                            Merge::Done | Merge::NeedsReboot => Standing::Merged,
+                            Merge::Failed(code) => Standing::Failed(code),
+                            Merge::Cancelled | Merge::Idle(_) => skyward_vab::standing(slot)?,
+                        });
+                    }
+                    merge::Event::Failed(why) => {
+                        skyward_sys::kmsg(&format!("the update did not merge: {why}"))?;
+                        app.report(&format!("未能合并更新：{why}"), now);
+                        app.set_update(skyward_vab::standing(slot)?);
+                    }
+                }
+            }
+            // Merged or not, the phone's readings say where the update
+            // stands now.
+            if m.ended() {
+                merger = None;
+                info = skyward_info::collect(cfg)?;
+                app.refresh();
+            }
         }
         if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
             decryptor = None;
@@ -1394,6 +1439,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         queue.extend(app.backup_deleted(deleted, now));
                     }
                     Effect::StopBackup => backuper.as_ref().context("there is no backup or restore to stop")?.stop(),
+                    Effect::ReadUpdate => {
+                        let slot = info.slot.context("only an A/B phone has an update to merge")?;
+                        // A merge followed tells where it stands itself.
+                        if merger.is_none() {
+                            app.set_update(skyward_vab::standing(slot)?);
+                        }
+                    }
+                    Effect::Merge => {
+                        ensure!(merger.is_none(), "the update is being merged already");
+                        let slot = info.slot.context("only an A/B phone merges an update")?;
+                        skyward_sys::kmsg("merging the update, as the update page asked")?;
+                        merger = Some(merge::Merger::start(slot, true)?);
+                    }
                     // Logs that cannot be saved are the page's to report;
                     // the recovery carries on.
                     Effect::ExportLogs { recovery, kernel, storage } => {

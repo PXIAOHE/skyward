@@ -28,6 +28,7 @@ pub const ENTRIES: &[Entry] = &[
     entry("文件管理", "高级", Screen::Files, &["wenjianguanli", "wjgl", "files", "file"]),
     entry("终端", "高级", Screen::Terminal, &["zhongduan", "zd", "terminal", "shell"]),
     entry("导出日志", "高级", Screen::Logs, &["daochurizhi", "dcrz", "rizhi", "rz", "logs", "dmesg"]),
+    entry("系统更新", "高级", Screen::Update, &["xitonggengxin", "xtgx", "hebing", "hb", "update", "ota", "merge", "snapshot"]),
     entry("设置", "主页", Screen::Settings, &["shezhi", "sz", "settings"]),
     entry("深色模式", "设置", Screen::Settings, &["shensemoshi", "ssms", "dark", "theme"]),
     entry("屏幕亮度", "设置", Screen::Settings, &["pingmuliangdu", "pmld", "liangdu", "ld", "brightness"]),

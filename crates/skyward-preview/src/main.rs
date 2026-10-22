@@ -9,7 +9,7 @@ use skyward_ui::app::{
 };
 use skyward_ui::widgets::{self, Bar, Layer};
 use skyward_ui::{fmt, pages, Canvas, Ctx, Fonts, Theme};
-use skyward_vab::{BootSlots, Hold, Slot, SnapshotState};
+use skyward_vab::{BootSlots, FailureCode, Hold, Slot, SnapshotState, Standing};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -280,7 +280,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 90] = [
+    let pages: [PageShot; 95] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -440,6 +440,11 @@ fn main() -> Result<()> {
         ("56-time-zone-light", Screen::TimeZone, false, &|_| {}),
         ("56-time-zone-dark-london", Screen::TimeZone, true, &|app| app.state.time_zone = 5),
         ("57-logs-light", Screen::Logs, false, &|_| {}),
+        ("113-update-light-waiting", Screen::Update, false, &|app| app.set_update(Standing::Waiting)),
+        ("114-update-dark-merging", Screen::Update, true, &|app| app.set_update(Standing::Merging(0.37))),
+        ("115-update-light-installed", Screen::Update, false, &|app| app.set_update(Standing::Installed(Slot::A))),
+        ("116-update-dark-failed", Screen::Update, true, &|app| app.set_update(Standing::Failed(FailureCode::ExpectedMergeTarget))),
+        ("117-advanced-light-merged", Screen::Advanced, false, &|app| app.set_update(Standing::Merged)),
         ("58-license-light", Screen::License, false, &|_| {}),
         ("59-font-license-light", Screen::FontLicense, false, &|_| {}),
         ("60-slot-dark", Screen::Slot, true, &|app| {

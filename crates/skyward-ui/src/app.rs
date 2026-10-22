@@ -14,7 +14,7 @@ use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Stage};
-use skyward_vab::{BootSlots, Hold, Slot, SnapshotState};
+use skyward_vab::{BootSlots, Hold, Slot, SnapshotState, Standing};
 
 /// The pages of the recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +57,9 @@ pub enum Screen {
     TimeZone,
     /// Saving the logs, as a bug report asks for them.
     Logs,
+    /// Where an update the system installed stands, and merging it into
+    /// the slot it went to.
+    Update,
     /// Skyward's own licence.
     License,
     /// The interface typeface and the terms it is used under.
@@ -486,6 +489,8 @@ pub enum Confirm {
     InstallWipe,
     /// Run the install script of the zip that waits to be agreed to.
     RunScript,
+    /// Merge the update that waits in the slot the phone runs from.
+    Merge,
 }
 
 /// What the wipe page erases: everything a factory reset erases, or any of
@@ -1066,6 +1071,9 @@ pub struct State {
     pub clash: Option<(Clip, String, Vec<String>)>,
     /// Work on files under way, or how it last ended.
     pub job: Option<FileJob>,
+    /// Where an update the system installed stands, as the runtime last
+    /// read it.
+    pub update: Standing,
 }
 
 impl Default for State {
@@ -1122,6 +1130,7 @@ impl Default for State {
             asking_delete: false,
             clash: None,
             job: None,
+            update: Standing::None,
         }
     }
 }
@@ -1268,6 +1277,11 @@ pub enum Effect {
     DeleteBackup { place: Place, name: String },
     /// Stop the backup under way, or the check before a restore.
     StopBackup,
+    /// Read where the update stands, telling it with [`App::set_update`].
+    ReadUpdate,
+    /// Merge the update that waits in the slot the phone runs from,
+    /// telling how it goes with [`App::set_update`].
+    Merge,
 }
 
 enum Drag {
@@ -2773,7 +2787,16 @@ impl App {
                 }
             }
             Screen::Decrypt if matches!(self.state.data, Data::Closed | Data::Failed(_)) => self.open_data(),
+            Screen::Update => vec![Effect::ReadUpdate],
             _ => Vec::new(),
+        }
+    }
+
+    /// Where the update stands, as the runtime read it or a merge has come.
+    pub fn set_update(&mut self, standing: Standing) {
+        if self.state.update != standing {
+            self.state.update = standing;
+            self.refresh();
         }
     }
 
@@ -3578,6 +3601,13 @@ impl App {
                 _ => self.say("无法读取启动槽位", now),
             },
             Confirm::FactoryReset => fx.push(Effect::FactoryReset),
+            Confirm::Merge => {
+                if self.state.update == Standing::Waiting {
+                    self.state.update = Standing::Merging(0.0);
+                    self.refresh();
+                    fx.push(Effect::Merge);
+                }
+            }
             Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
             Confirm::Flash => {
                 if let Install::Choosing(choice) = &self.state.install {
@@ -4134,7 +4164,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_mounts_while_an_update_waits_to_merge() {
+    fn partitions_mount_while_an_update_waits_to_merge() {
         let (f, mut i) = (fonts(), info());
         i.snapshot = SnapshotState::Snapshotted;
         let mut app = opened(Screen::Mount, &f, &i);
@@ -4143,11 +4173,38 @@ mod tests {
             MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: Vec::new() },
         ]));
         let frame = app.frame(&f, &i);
-        assert!(matches!(frame.hits[0].action, Action::Unavailable(_)), "vendor stays unmounted");
-        assert_eq!(frame.hits[1].action, Action::MountToggle(1), "odm can still come off");
-        let refused = frame.hits[0].action;
-        assert!(tap(&mut app, &f, &i, refused).is_empty());
-        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says why");
+        assert_eq!(frame.hits.iter().map(|h| h.action).collect::<Vec<_>>(), [Action::MountToggle(0), Action::MountToggle(1)]);
+        assert_eq!(tap(&mut app, &f, &i, Action::MountToggle(0)), vec![Effect::Mount("vendor".into())], "through its snapshot");
+    }
+
+    #[test]
+    fn an_update_waiting_in_the_slot_merges_with_a_swipe_and_shows_how_far_it_has_come() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        app.set_update(Standing::Waiting);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate], "the page reads where the update stands");
+        assert_eq!(app.screen(), Screen::Update);
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Merge), vec![Effect::Merge]);
+        assert_eq!(app.state.update, Standing::Merging(0.0), "the page turns to the merge at once");
+        assert!(app.frame(&f, &i).hits.is_empty(), "nothing to swipe while it merges");
+        app.set_update(Standing::Merging(0.5));
+        assert!(app.frame(&f, &i).hits.is_empty());
+        app.set_update(Standing::Merged);
+        assert!(app.frame(&f, &i).hits.is_empty(), "merged, nothing is left to do here");
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Advanced);
+        app.set_update(Standing::Installed(Slot::A));
+        tap(&mut app, &f, &i, Action::Open(Screen::Update));
+        assert!(app.frame(&f, &i).hits.is_empty(), "an update in the other slot merges once that slot has started");
+    }
+
+    #[test]
+    fn the_home_pages_word_on_a_waiting_update_opens_its_page() {
+        let (f, mut i) = (fonts(), info());
+        i.snapshot = SnapshotState::Snapshotted;
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate]);
+        assert_eq!(app.screen(), Screen::Update);
     }
 
     #[test]

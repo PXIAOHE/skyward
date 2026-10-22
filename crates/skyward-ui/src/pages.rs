@@ -15,7 +15,7 @@ use crate::theme::Theme;
 use crate::widgets::{self, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DeviceInfo, VERSION};
 use skyward_install::{Outcome, Reflash, Stage};
-use skyward_vab::Slot;
+use skyward_vab::{Slot, Standing};
 use std::path::Path;
 
 // Tile colours sampled from the stock Settings, plus orange and red from the
@@ -65,6 +65,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Language => language(cx),
         Screen::TimeZone => time_zone(cx),
         Screen::Logs => logs(cx),
+        Screen::Update => update(cx),
         Screen::License => license(cx),
         Screen::FontLicense => font_license(cx),
         Screen::Slot => slot(cx),
@@ -92,6 +93,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::Install => ("滑动以安装", false),
         Confirm::InstallWipe => ("滑动以安装并清除", true),
         Confirm::RunScript => ("滑动以安装", true),
+        Confirm::Merge => ("滑动以合并", true),
     }
 }
 
@@ -163,10 +165,13 @@ pub fn home(cx: &Ctx) -> Frame {
     }
     let mut rows = Vec::new();
     if let Some(note) = fmt::snapshot_note(&i.snapshot) {
-        rows.push(Row::new(fmt::snapshot(&i.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::None));
+        rows.push(Row::new(fmt::snapshot(&i.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::Arrow));
     }
     let card = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &stats, &rows);
     out.push(Hit { rect: card.rows[0], action: Action::Open(Screen::About) });
+    if let Some(&rect) = card.rows.get(1) {
+        out.push(Hit { rect, action: Action::Open(Screen::Update) });
+    }
     y = card.bottom + t.m.card_gap;
     let tools = widgets::list(&mut c, t, f, y, &[
         Row::new("安装").icon(GREEN, Icon::Install),
@@ -257,22 +262,14 @@ pub fn screen_off(cx: &Ctx) -> Frame {
 
 /// Mount manager: the slot's partitions, each with a switch to mount it
 /// read-only or unmount it; one that programs are using says which, and
-/// stays. While an update waits to merge, nothing more is mounted.
+/// stays.
 pub fn mount(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let mut c = long_page(t);
     let mut out = Vec::new();
     let top = t.m.content_top;
 
-    let pending = fmt::snapshot_mount_note(&cx.info.snapshot);
-    let y = match pending {
-        Some(note) => {
-            let warning = Row::new(fmt::snapshot(&cx.info.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::None);
-            let y = widgets::list(&mut c, t, f, top, &[warning]).bottom;
-            widgets::section(&mut c, t, f, y, "分区")
-        }
-        None => widgets::section_first(&mut c, t, f, top, "分区"),
-    };
+    let y = widgets::section_first(&mut c, t, f, top, "分区");
     let bottom = match &s.mounts {
         Err(why) => {
             let y = widgets::list(&mut c, t, f, y, &[Row::new("无法读取分区").trail(Trail::None)]).bottom;
@@ -294,11 +291,7 @@ pub fn mount(cx: &Ctx) -> Frame {
                 .collect();
             let list = widgets::list(&mut c, t, f, y, &rows);
             out.extend(list.rows.iter().zip(mounts).enumerate().map(|(i, (&rect, m))| {
-                let action = match (m.holders.is_empty(), m.mounted, pending) {
-                    (false, _, _) => Action::Unavailable("无法卸载正在使用的分区"),
-                    (true, false, Some(note)) => Action::Unavailable(note),
-                    _ => Action::MountToggle(i),
-                };
+                let action = if m.holders.is_empty() { Action::MountToggle(i) } else { Action::Unavailable("无法卸载正在使用的分区") };
                 Hit { rect, action }
             }));
             let y = match &s.mount_failure {
@@ -1421,9 +1414,50 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new("文件管理").icon(BLUE, Icon::Folder),
         Row::new("终端").icon(SLATE, Icon::Terminal),
         Row::new("导出日志").icon(ORANGE, Icon::Log),
+        Row::new("系统更新").icon(GREEN, Icon::Layers).trail(Trail::Value(fmt::update_value(&cx.state.update))),
     ]);
-    let out = hits(&tools.rows, &[Action::Open(Screen::Files), Action::Open(Screen::Terminal), Action::Open(Screen::Logs)]);
+    let out = hits(&tools.rows, &[
+        Action::Open(Screen::Files),
+        Action::Open(Screen::Terminal),
+        Action::Open(Screen::Logs),
+        Action::Open(Screen::Update),
+    ]);
     Frame::new(t, c, out, "高级", top)
+}
+
+/// Where an update the system installed stands, and merging it into the
+/// slot it went to: how far a merge under way has come, and a swipe to
+/// merge one that waits there for the system to start it.
+pub fn update(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = page(t);
+    let top = t.m.content_top;
+    let mut out = Vec::new();
+    if let Standing::Merging(done) = s.update {
+        let share = done as f32;
+        let y = widgets::progress_card(&mut c, t, f, top, "正在合并更新", &format!("已完成 {}%", percent(share)), Some(share));
+        widgets::footnote(&mut c, t, f, y, "合并完成前，暂不刷写 super 中的分区。返回后将继续合并。");
+        return Frame::new(t, c, out, "系统更新", top);
+    }
+    let (title, detail) = fmt::update(&s.update);
+    let color = match s.update {
+        Standing::None => SLATE,
+        Standing::Merged => GREEN,
+        Standing::Failed(_) | Standing::Unknown => RED,
+        _ => ORANGE,
+    };
+    let mut row = Row::new(title).icon(color, Icon::Layers).trail(Trail::None);
+    if let Some(detail) = &detail {
+        row = row.subtitle(detail);
+    }
+    let y = widgets::list(&mut c, t, f, top, &[row]).bottom;
+    if s.update == Standing::Waiting {
+        let (label, danger) = confirm_label(Confirm::Merge);
+        let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
+        out.push(Hit { rect: track, action: Action::Confirm(Confirm::Merge) });
+        widgets::footnote(&mut c, t, f, track.y + track.h, "合并后无法回到更新前的系统。");
+    }
+    Frame::new(t, c, out, "系统更新", top)
 }
 
 /// The file manager, every entry of the folder shown, folders first.

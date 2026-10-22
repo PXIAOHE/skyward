@@ -145,6 +145,27 @@ pub fn start_merge(slot: Slot, tell: &dyn Fn(MergeStatus) -> Result<()>) -> Resu
     snapshots::initiate(&snaps, slot, &md, tell)
 }
 
+/// Whether every snapshot the slot reads through is mapped as a kernel
+/// snapshot, as following a merge needs; `false` where it reads through
+/// none.
+pub fn snapshots_mapped(slot: Slot) -> Result<bool> {
+    let md = skyward_lp::read(&super_device(), slot.number())?;
+    let Some(snaps) = Snapshots::lock(false)? else { return Ok(false) };
+    if !snaps.needed(slot)? {
+        return Ok(false);
+    }
+    let mut any = false;
+    for p in slot_partitions(&md, slot) {
+        if snaps.live(p)?.is_some() {
+            if !snapshots::is_snapshot(&p.name)? {
+                return Ok(false);
+            }
+            any = true;
+        }
+    }
+    Ok(any)
+}
+
 /// Look at the merge into `slot`, cleaning up after each snapshot merged;
 /// see [`snapshots::check`].
 pub fn check_merge(slot: Slot, tell: &dyn Fn(MergeStatus) -> Result<()>) -> Result<Merge> {
