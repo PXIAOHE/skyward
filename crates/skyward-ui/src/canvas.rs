@@ -27,11 +27,41 @@ pub struct Run {
     pub cover: Cover,
 }
 
+/// Canvases at least this big leave their memory for the next ones, up to
+/// so many kept: memory freshly mapped costs a page fault, the kernel
+/// clearing the page, for every 4 KiB as it is first written, which costs
+/// more than drawing the page.
+const KEEP_BYTES: usize = 1 << 20;
+const KEEP: usize = 6;
+
+static KEPT: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
+/// Memory for `n` bytes of pixels, as it was left: the smallest kept that
+/// was written that far, whose pages are mapped already; else the smallest
+/// with room for them; else new.
+fn kept(n: usize) -> Vec<u8> {
+    let kept = if n >= KEEP_BYTES {
+        let mut kept = KEPT.lock().expect("no one panics holding the kept memory");
+        let best = |fits: &dyn Fn(&Vec<u8>) -> bool| {
+            kept.iter().enumerate().filter(|(_, v)| fits(v)).min_by_key(|(_, v)| v.capacity()).map(|(i, _)| i)
+        };
+        let best = best(&|v| v.len() >= n).or_else(|| best(&|v| v.capacity() >= n));
+        best.map(|i| kept.swap_remove(i))
+    } else {
+        None
+    };
+    kept.unwrap_or_else(|| Vec::with_capacity(n))
+}
+
 // Drawing primitives take geometry plus style as plain arguments.
 #[allow(clippy::too_many_arguments)]
 impl Canvas {
     pub fn new(w: u32, h: u32) -> Self {
-        Self { w, h, data: vec![0; (w * h * 4) as usize] }
+        let n = (w * h * 4) as usize;
+        let mut data = kept(n);
+        data.clear();
+        data.resize(n, 0);
+        Self { w, h, data }
     }
 
     #[inline]
@@ -617,6 +647,22 @@ impl Canvas {
                     self.blend(px, py, paint(px as f32 + 0.5, py as f32 + 0.5), cov);
                 }
             });
+        }
+    }
+}
+
+impl Drop for Canvas {
+    /// The canvas's memory is kept for the next canvases, in place of the
+    /// least kept once so many are: the biggest serve the most.
+    fn drop(&mut self) {
+        if self.data.capacity() >= KEEP_BYTES {
+            let data = std::mem::take(&mut self.data);
+            let mut kept = KEPT.lock().expect("no one panics holding the kept memory");
+            if kept.len() < KEEP {
+                kept.push(data);
+            } else if let Some(least) = kept.iter_mut().min_by_key(|v| v.capacity()).filter(|v| v.capacity() < data.capacity()) {
+                *least = data;
+            }
         }
     }
 }
