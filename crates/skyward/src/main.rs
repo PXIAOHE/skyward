@@ -614,6 +614,7 @@ fn slot() -> Result<()> {
                     let k = slot.number() as usize;
                     println!("{} bootable {} successful {}", slot.suffix(), slots.bootable[k], slots.successful[k]);
                 }
+                println!("update {:?}", control.merge_status()?);
             }
             Err(e) => println!("{e:#}"),
         }

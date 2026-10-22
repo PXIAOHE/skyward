@@ -13,6 +13,8 @@ use skyward_binder::hidl::{self, Answer, Message};
 /// the version it came with, which the service checks.
 pub const SERVICE: &str = "android.hardware.boot@1.2::IBootControl";
 const FIRST: &str = "android.hardware.boot@1.0::IBootControl";
+/// The version that tells the bootloader where an update stands.
+const MERGE: &str = "android.hardware.boot@1.1::IBootControl";
 const INSTANCE: &str = "default";
 
 /// The methods, numbered as the service numbers them: the first version's
@@ -20,7 +22,22 @@ const INSTANCE: &str = "default";
 const SET_ACTIVE: u32 = 4;
 const BOOTABLE: u32 = 6;
 const SUCCESSFUL: u32 = 7;
+const SET_MERGE_STATUS: u32 = 9;
+const MERGE_STATUS: u32 = 10;
 const ACTIVE: u32 = 11;
+
+/// Where an update stands, as the boot control keeps it for the bootloader,
+/// which will not erase or write the data partition, /metadata or super
+/// while an update's snapshots wait to be merged or are being merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeStatus {
+    None = 0,
+    Unknown = 1,
+    /// The new slot's partitions are snapshots, waiting to be merged.
+    Snapshotted = 2,
+    Merging = 3,
+    Cancelled = 4,
+}
 
 /// How the service answers whether something holds of a slot.
 const NO: i32 = 0;
@@ -69,6 +86,36 @@ impl<'a> BootControl<'a> {
                 self.holds(SUCCESSFUL, slot).with_context(|| format!("ask whether slot {} has started fully", slot.letter()))?;
         }
         Ok(slots)
+    }
+
+    /// Where an update stands, as the bootloader is told.
+    pub fn merge_status(&self) -> Result<MergeStatus> {
+        let call = Message::call(MERGE);
+        let reply = self.service.transact(MERGE_STATUS, &call).context("ask where an update stands")?;
+        let mut read = Answer::new(reply.bytes());
+        read.status().context("ask where an update stands")?;
+        Ok(match read.i32().context("read where an update stands")? {
+            0 => MergeStatus::None,
+            1 => MergeStatus::Unknown,
+            2 => MergeStatus::Snapshotted,
+            3 => MergeStatus::Merging,
+            4 => MergeStatus::Cancelled,
+            other => bail!("the boot control says an update stands at {other}"),
+        })
+    }
+
+    /// Tell the bootloader where an update stands.
+    pub fn set_merge_status(&self, status: MergeStatus) -> Result<()> {
+        let mut call = Message::call(MERGE);
+        call.u32(status as u32);
+        let what = || format!("tell the bootloader an update stands at {status:?}");
+        let reply = self.service.transact(SET_MERGE_STATUS, &call).with_context(what)?;
+        let mut read = Answer::new(reply.bytes());
+        read.status().with_context(what)?;
+        if !read.bool().with_context(what)? {
+            bail!("the boot control would not {}", what());
+        }
+        Ok(())
     }
 
     /// Whether what `method` asks holds of `slot`.

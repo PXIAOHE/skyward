@@ -161,6 +161,11 @@ impl<'a> Answer<'a> {
         Ok(i32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
     }
 
+    /// A truth value: a byte, padded to four as everything is.
+    pub fn bool(&mut self) -> Result<bool> {
+        Ok(self.take(4)?[0] != 0)
+    }
+
     /// The bytes an address in the reply points at. The driver has already
     /// moved them into this program's own room and rewritten the address,
     /// so they are read where they lie.
@@ -341,5 +346,14 @@ mod tests {
     fn reading_past_the_end_of_a_reply_is_an_error() {
         assert!(Answer::new(&[]).i32().is_err());
         assert!(Answer::new(&[0; 8]).pointed().is_err());
+    }
+
+    #[test]
+    fn a_truth_value_is_a_byte_padded_to_four() {
+        let mut read = Answer::new(&[1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0]);
+        assert!(read.bool().unwrap());
+        assert!(!read.bool().unwrap());
+        assert_eq!(read.i32().unwrap(), 7, "what follows it starts four bytes on");
+        assert!(Answer::new(&[1, 0]).bool().is_err());
     }
 }
