@@ -2651,12 +2651,15 @@ impl App {
         self.refresh();
     }
 
-    /// Render the current page if what it shows has changed.
+    /// Render the current page if what it shows has changed: the rows of
+    /// it on screen, the rest as they come into view.
     pub fn frame(&mut self, f: &Fonts, info: &DeviceInfo) -> &Frame {
         if self.frame.is_none() {
             let t = self.theme();
             let screen = self.screen();
-            let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: None };
+            let first = self.top().1.max(0.0) as u32;
+            let band = Band { rows: (first, first + self.h), cols: (0, self.w) };
+            let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
             let frame = pages::render(screen, &cx);
             self.height = frame.height(&t);
             self.frame = Some(frame);
@@ -2668,6 +2671,42 @@ impl App {
             }
         }
         self.frame.as_ref().expect("rendered above")
+    }
+
+    /// The current page rendered, all of it drawn.
+    pub fn whole_frame(&mut self, f: &Fonts, info: &DeviceInfo) -> &Frame {
+        let h = self.frame(f, info).canvas.h;
+        self.draw_rows(f, info, 0.0, h as f32);
+        self.frame.as_ref().expect("rendered above")
+    }
+
+    /// Draw the rows `from..to` of the current page it has not drawn yet,
+    /// a band at least a quarter of a screen tall at a time.
+    fn draw_rows(&mut self, f: &Fonts, info: &DeviceInfo, from: f32, to: f32) {
+        let Some(frame) = &self.frame else { return };
+        let h = frame.canvas.h;
+        let (from, to) = ((from.max(0.0) as u32).min(h), (to.max(0.0).ceil() as u32).min(h));
+        let held = frame.canvas.held();
+        let least = self.h / 4;
+        let mut bands = Vec::new();
+        if from < held.start {
+            bands.push((from.min(held.start.saturating_sub(least)), held.start));
+        }
+        if to > held.end {
+            bands.push((held.end, to.max(held.end + least).min(h)));
+        }
+        if bands.is_empty() {
+            return;
+        }
+        let t = self.theme();
+        let screen = self.screen();
+        for rows in bands {
+            let band = Band { rows, cols: (0, self.w) };
+            let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
+            let part = pages::render(screen, &cx).canvas;
+            self.frame.as_mut().expect("drawn above").canvas.join(&part);
+        }
+        self.layer = None;
     }
 
     fn max_scroll(&self) -> f32 {
@@ -2688,6 +2727,8 @@ impl App {
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
         self.frame(f, info);
         let screen = self.screen();
+        let scroll = self.top().1;
+        let offset = (scroll + self.overscroll(now)).round();
         let caret_on = match self.frame.as_ref().is_some_and(|fr| fr.caret.is_some()) {
             true => self.caret_up(screen, now),
             false => {
@@ -2719,6 +2760,10 @@ impl App {
             self.chip = Some((t.dark, art, x, y));
         }
         let slide = self.slid(now);
+        if self.frame.as_ref().is_some_and(|fr| fr.hero.is_none()) {
+            // What of the page is on screen, drawn if it has not been yet.
+            self.draw_rows(f, info, offset, offset + self.h as f32);
+        }
         // The row a finger holds, drawn once more as held down when it
         // starts darkening, and only that row: a finger that moves on
         // before then never waits for it.
@@ -2732,8 +2777,6 @@ impl App {
             assert_eq!((down.w, down.h), (page.w, page.h), "a page held down is laid out as it was");
             self.row_art = Some((page.crop(x, y, w, h), down.crop(x, y, w, h)));
         }
-        let scroll = self.top().1;
-        let offset = (scroll + self.overscroll(now)).round();
         let view = View {
             scroll,
             offset,
@@ -2837,14 +2880,14 @@ impl App {
             // The page rows on screen above a long list's rows, those rows,
             // and the page colour past the ends; every pixel is written
             // once.
-            let (row, h) = (out.w as usize * 4, out.h as f32);
+            let h = out.h as f32;
             let span = frame.rows.as_ref().map(|r| ((r.edges[0] - offset).clamp(0.0, h), (r.bottom() - offset).clamp(0.0, h)));
             let (list_top, list_end) = span.unwrap_or((h, h));
             let first = (-offset).clamp(0.0, h) as usize;
             let last = (frame.canvas.h as f32 - offset).clamp(first as f32, list_top) as usize;
             if first < last {
-                let from = (offset as isize + first as isize) as usize * row;
-                out.data[first * row..last * row].copy_from_slice(&frame.canvas.data[from..from + (last - first) * row]);
+                let from = offset as i32 + first as i32;
+                out.put_rows(&frame.canvas, from, from + (last - first) as i32, first as i32);
             }
             out.fill_rect(0.0, 0.0, out.w as f32, first as f32, frame.bg);
             out.fill_rect(0.0, last as f32, out.w as f32, list_top - last as f32, frame.bg);
@@ -2976,7 +3019,6 @@ impl App {
     fn compose_morph(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64, caret_on: bool) {
         let t = self.theme();
         let m = t.m;
-        let frame = self.frame.as_ref().expect("rendered above");
         let mut morph = self.morph.take().expect("composing it");
         let (q, _) = morph.at(now);
         let (field, _) = widgets::search_layout(&t);
@@ -2984,6 +3026,11 @@ impl App {
         let along = |a: f32, b: f32| a + (b - a) * q;
         let bar = Rect::new(m.margin, along(home.y, field.y), along(home.w, field.w), m.search_h);
         let rise = bar.y - home.y;
+        if !morph.into {
+            // The home page's rows coming down with its bar.
+            self.draw_rows(f, info, morph.scroll - rise, morph.scroll - rise + m.h as f32);
+        }
+        let frame = self.frame.as_ref().expect("rendered above");
         out.fill_rect(0.0, 0.0, out.w as f32, out.h as f32, frame.bg);
         if morph.into {
             // The search page's keyboard and what it shows under its

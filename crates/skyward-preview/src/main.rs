@@ -917,7 +917,7 @@ fn opened(screen: Screen, w: u32, h: u32, ppd: f32) -> App {
 fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo) -> Canvas {
     let t = app.theme();
     let (screen, state) = (app.screen(), app.state.clone());
-    let frame = app.frame(f, info);
+    let frame = app.whole_frame(f, info);
     let mut c = Canvas::new(frame.canvas.w, frame.height(&t) as u32);
     c.clear(frame.bg);
     c.put(&frame.canvas, 0);
