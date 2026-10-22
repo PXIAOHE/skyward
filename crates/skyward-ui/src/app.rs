@@ -4156,6 +4156,31 @@ mod tests {
     }
 
     #[test]
+    fn a_home_page_grown_by_an_update_notice_scrolls_down_to_its_last_row() {
+        let f = fonts();
+        let plain = info();
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        assert_eq!(app.frame(&f, &plain).canvas.h, H, "without the notice the page fits the screen");
+        let i = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info() };
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let fr = app.frame(&f, &i);
+        let reboot = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("a reboot row").rect;
+        assert!(reboot.y + reboot.h > H as f32, "the notice pushes the last row below the screen");
+        assert!(reboot.y + reboot.h <= fr.canvas.h as f32, "the page is drawn down to it");
+        app.touch(Touch::Down(700.0, 2800.0), &f, 0);
+        app.touch(Touch::Move(700.0, 2000.0), &f, 0);
+        app.touch(Touch::Move(700.0, 1200.0), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        for ms in (0..3000).step_by(8) {
+            app.tick(ms);
+        }
+        let (_, y) = spot(&mut app, &f, &i, Action::Open(Screen::Reboot));
+        assert!(y < H as f32, "scrolled up into view");
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Reboot), 3000);
+        assert_eq!(app.screen(), Screen::Reboot);
+    }
+
+    #[test]
     fn an_unreadable_partition_table_leaves_nothing_to_toggle() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Mount, &f, &i);
@@ -4867,6 +4892,22 @@ mod tests {
             }
         }
         panic!("the keys never came to {stop:?}");
+    }
+
+    #[test]
+    fn the_keys_reach_the_last_row_of_a_home_page_grown_by_an_update_notice() {
+        let f = fonts();
+        let i = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info() };
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.frame(&f, &i);
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Open(Screen::Reboot)));
+        for ms in (0..3000).step_by(8) {
+            app.tick(ms);
+        }
+        let (_, y) = spot(&mut app, &f, &i, Action::Open(Screen::Reboot));
+        assert!(y < H as f32, "the page scrolled the lit row into view");
+        press(&mut app, Key::Power, 3000);
+        assert_eq!(app.screen(), Screen::Reboot);
     }
 
     #[test]

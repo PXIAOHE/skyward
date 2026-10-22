@@ -134,7 +134,7 @@ fn hits(rects: &[Rect], actions: &[Action]) -> Vec<Hit> {
 /// card with the readings that matter before flashing, then grouped entries.
 pub fn home(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
-    let mut c = page(t);
+    let mut c = long_page(t);
     let mut out = Vec::new();
     let mut y = t.m.content_top;
     let search_top = y;
@@ -201,7 +201,7 @@ pub fn home(cx: &Ctx) -> Frame {
         Action::Open(Screen::Settings),
         Action::Open(Screen::Reboot),
     ]));
-    Frame { back: false, ..Frame::new(t, c, out, "Skyward", search_top) }
+    Frame { back: false, ..Frame::new(t, fit(c, t, system.bottom), out, "Skyward", search_top) }
 }
 
 /// Preferences, opening with the stock「显示与亮度」theme previews.
