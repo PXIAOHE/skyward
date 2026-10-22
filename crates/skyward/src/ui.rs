@@ -5,6 +5,7 @@ use crate::haptics::Haptics;
 use crate::input::{monotonic_ms, Event, Inputs};
 use crate::merge;
 use crate::pty;
+use crate::readings::{Reading, Readings};
 use crate::services;
 use crate::wipe::{self, Eraser, Step};
 use anyhow::{anyhow, ensure, Context, Result};
@@ -794,10 +795,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
 
     let mut screen = Canvas::new(w, h);
     let mut shown_clock = String::new();
-    // The readings are taken again every 30 seconds, the battery every
-    // second, so plugging the cable in or pulling it shows at once.
+    // The readings are taken again on a thread of their own; those taken
+    // here as work ends say how it left the phone, and readings started
+    // before them are out of date.
+    let readings = Readings::start(cfg)?;
     let mut read_at = Instant::now();
-    let mut battery_at = read_at;
     let mut installer: Option<Installer> = None;
     // Whether the panel's frame memory has been blacked out for an off
     // panel; cleared once a real frame is shown again.
@@ -934,17 +936,22 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             shown_clock = time;
             app.redraw();
         }
-        if read_at.elapsed().as_secs() >= 30 {
-            info = skyward_info::collect(cfg)?;
-            read_at = Instant::now();
-            battery_at = read_at;
-            app.refresh();
-        } else if battery_at.elapsed().as_secs() >= 1 {
-            let battery = skyward_info::battery_now()?;
-            battery_at = Instant::now();
-            if battery != info.battery {
-                info.battery = battery;
-                app.refresh();
+        for reading in readings.taken() {
+            match reading {
+                Reading::Battery(battery) => {
+                    let battery = battery?;
+                    if battery != info.battery {
+                        info.battery = battery;
+                        app.refresh();
+                    }
+                }
+                Reading::All(all, at) => {
+                    let all = (*all)?;
+                    if at >= read_at && all != info {
+                        info = all;
+                        app.refresh();
+                    }
+                }
             }
         }
         // In fastboot the page follows fastbootd and the cable each second.
@@ -1014,6 +1021,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(d) = &decryptor {
             fds.push(d.fd());
         }
+        fds.push(readings.fd());
         wait(&fds, timeout)?;
         let now = monotonic_ms();
         let mut drive_told = None;
@@ -1167,6 +1175,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             // stands now.
             if m.ended() {
                 merger = None;
+                read_at = Instant::now();
                 info = skyward_info::collect(cfg)?;
                 app.refresh();
             }
@@ -1505,6 +1514,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT)?;
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
                         crate::prepare(cfg, slot)?;
+                        read_at = Instant::now();
                         info = skyward_info::collect(cfg)?;
                         fastboot = false;
                         app.enter_recovery();

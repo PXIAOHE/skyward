@@ -20,6 +20,8 @@ mod merge;
 #[cfg(target_os = "android")]
 mod pty;
 #[cfg(target_os = "android")]
+mod readings;
+#[cfg(target_os = "android")]
 mod secure;
 #[cfg(target_os = "android")]
 mod services;
