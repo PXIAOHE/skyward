@@ -1,9 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use skyward_config::ramdisk as paths;
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+mod avb;
 mod image;
 mod ramdisk;
 
@@ -40,9 +43,11 @@ enum Cmd {
     },
     /// Build a Skyward recovery image on top of the device's stock recovery:
     /// its init, adbd, SELinux policy and libraries stay, the recovery
-    /// service becomes Skyward.
+    /// service becomes Skyward. The image fills the whole partition and ends
+    /// in an unsigned AVB footer of its own.
     Recovery {
-        /// The device's stock recovery image.
+        /// The device's stock recovery image: the whole partition, as the
+        /// phone or a full update package holds it, ending in its AVB footer.
         #[arg(long)]
         stock: PathBuf,
         /// Skyward built for the device (aarch64-linux-android).
@@ -77,14 +82,15 @@ fn main() -> Result<()> {
         Cmd::Repack { image, out } => {
             let mut img = BootImage::read(&image)?;
             img.ramdisk = Ramdisk::decode(&img.ramdisk)?.encode()?;
-            write(&out, &img)
+            write(&out, &img, &img.to_bytes()?)
         }
         Cmd::Boot { kernel, ramdisk, out } => {
             let mut img = BootImage::read(&ramdisk)?;
             img.kernel = BootImage::read(&kernel)?.kernel;
-            write(&out, &img)
+            write(&out, &img, &img.to_bytes()?)
         }
         Cmd::Recovery { stock, binary, config, font, mono, mono_license, out } => {
+            let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
@@ -119,9 +125,28 @@ fn main() -> Result<()> {
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
             img.ramdisk = rd.encode()?;
-            write(&out, &img)
+            let bytes = img.to_bytes()?;
+            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
         }
     }
+}
+
+/// The size of the partition `stock` fills: all of it, as the phone and a
+/// full update package hold it, which its AVB footer ends.
+fn partition_size(stock: &Path) -> Result<usize> {
+    let mut file = File::open(stock).with_context(|| format!("open {}", stock.display()))?;
+    let size = file.metadata().with_context(|| format!("stat {}", stock.display()))?.len();
+    let mut magic = [0u8; 4];
+    if size >= 64 {
+        file.seek(SeekFrom::Start(size - 64)).with_context(|| format!("seek in {}", stock.display()))?;
+        file.read_exact(&mut magic).with_context(|| format!("read {}", stock.display()))?;
+    }
+    ensure!(
+        &magic == b"AVBf",
+        "{} does not end in an AVB footer; give the whole recovery partition, as the phone or a full update package holds it",
+        stock.display()
+    );
+    Ok(usize::try_from(size)?)
 }
 
 /// What a recovery image says about the build it is: the version of its own
@@ -154,9 +179,16 @@ fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
     out
 }
 
-fn write(out: &Path, img: &BootImage) -> Result<()> {
-    std::fs::write(out, img.to_bytes()?).with_context(|| format!("write {}", out.display()))?;
-    println!("wrote {} ({} bytes kernel, {} bytes ramdisk)", out.display(), img.kernel.len(), img.ramdisk.len());
+/// Write `bytes`, the image `img` makes, to `out`.
+fn write(out: &Path, img: &BootImage, bytes: &[u8]) -> Result<()> {
+    std::fs::write(out, bytes).with_context(|| format!("write {}", out.display()))?;
+    println!(
+        "wrote {} ({} bytes kernel, {} bytes ramdisk, {} bytes in all)",
+        out.display(),
+        img.kernel.len(),
+        img.ramdisk.len(),
+        bytes.len()
+    );
     Ok(())
 }
 
@@ -230,6 +262,20 @@ mod tests {
                 assert!(plain.iter().any(|n| n == part), "{} is made of {part}, which is not a profile", a["Name"]);
             }
         }
+    }
+
+    #[test]
+    fn the_partition_is_as_large_as_a_stock_image_ending_in_its_footer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recovery.img");
+        let mut whole = vec![0u8; 8192];
+        whole[8192 - 64..8192 - 60].copy_from_slice(b"AVBf");
+        std::fs::write(&path, &whole).unwrap();
+        assert_eq!(partition_size(&path).unwrap(), 8192);
+        std::fs::write(&path, &whole[..8000]).unwrap();
+        assert!(partition_size(&path).is_err(), "an image cut short of its partition's end");
+        std::fs::write(&path, b"AVBf").unwrap();
+        assert!(partition_size(&path).is_err(), "too short to end in a footer");
     }
 
     #[test]

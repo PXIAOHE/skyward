@@ -1362,7 +1362,9 @@ dependencies = [
  "cpio",
  "lz4_flex",
  "serde_json",
+ "sha2",
  "skyward-config",
+ "tempfile",
 ]
 
 [[package]]
