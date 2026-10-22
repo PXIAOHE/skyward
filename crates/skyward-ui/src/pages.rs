@@ -1098,7 +1098,7 @@ pub fn search(cx: &Ctx) -> Frame {
     if let Some(rect) = field.clear {
         out.push(Hit { rect, action: Action::ClearSearch });
     }
-    Frame { header: false, ..Frame::new(t, c, out, "搜索", 0.0) }
+    Frame { header: false, caret: Some(field.caret), ..Frame::new(t, c, out, "搜索", 0.0) }
 }
 
 /// Backing up: what to take, where it goes, and how.
@@ -1601,10 +1601,10 @@ pub fn rename(cx: &Ctx) -> Frame {
     let mut c = page(t);
     let mut out = Vec::new();
     let top = t.m.content_top;
-    let y = widgets::text_field(&mut c, t, f, top, &s.new_name);
+    let (y, caret) = widgets::text_field(&mut c, t, f, top, &s.new_name);
     widgets::footnote(&mut c, t, f, y, "名称不能包含\"/\"。点击「完成」保存。");
     keyboard_hits(&mut c, t, f, s, "完成", &mut out);
-    Frame::new(t, c, out, "重命名", top)
+    Frame { caret: Some(caret), ..Frame::new(t, c, out, "重命名", top) }
 }
 
 /// The folder an entry goes to already holds its name: what to do.

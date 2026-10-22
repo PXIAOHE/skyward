@@ -663,13 +663,48 @@ pub struct SearchField {
     pub field: Rect,
     /// The clear button, while there is text to clear.
     pub clear: Option<Rect>,
+    pub caret: Caret,
 }
 
+/// A text field's cursor: the stretch of the field it stands in, drawn
+/// again with it, and where that stretch goes. The field itself is drawn
+/// without it, so the cursor blinks as this is laid over the field or not.
+pub struct Caret {
+    pub art: Canvas,
+    pub x: i32,
+    pub y: i32,
+}
+
+/// How wide a text cursor is and how round its ends are, in dp.
+const CARET_W_DP: f32 = 2.0;
+const CARET_RADIUS_DP: f32 = 0.35;
+
 /// The search bar opened for typing, from `x` across `w` and centred on
-/// `cy`: the text typed so far with the cursor after it, or the placeholder,
-/// and a button that clears the text.
+/// `cy`: the text typed so far, or the placeholder, a button that clears
+/// the text, and the cursor where the typing goes.
 #[allow(clippy::too_many_arguments)]
 pub fn search_field(c: &mut Canvas, t: &Theme, f: &Fonts, x: f32, w: f32, cy: f32, text: &str, placeholder: &str) -> SearchField {
+    let (field, clear, at) = draw_search_field(c, t, f, x, w, cy, text, placeholder, false);
+    let caret = caret_over(at, |art, dx, dy| {
+        draw_search_field(art, t, f, x - dx, w, cy - dy, text, placeholder, true);
+    });
+    SearchField { field, clear, caret }
+}
+
+/// Draw the search field, with its cursor if `caret`; returns where the
+/// field, its clear button and the cursor are.
+#[allow(clippy::too_many_arguments)]
+fn draw_search_field(
+    c: &mut Canvas,
+    t: &Theme,
+    f: &Fonts,
+    x: f32,
+    w: f32,
+    cy: f32,
+    text: &str,
+    placeholder: &str,
+    caret: bool,
+) -> (Rect, Option<Rect>, Rect) {
     let m = &t.m;
     let h = m.search_h;
     let y = cy - h / 2.0;
@@ -682,21 +717,24 @@ pub fn search_field(c: &mut Canvas, t: &Theme, f: &Fonts, x: f32, w: f32, cy: f3
     let tx = x + m.search_text_inset;
     let clear_d = m.dp(18.0);
     let room = w - m.search_text_inset - clear_d - m.dp(24.0);
-    let (ink_top, ink_bottom) = f.heading.ink(m.row_title_px);
-    let cursor_x = if text.is_empty() {
-        c.text_vc(&f.heading, placeholder, tx, cy, m.row_title_px, t.pal.placeholder, None);
-        tx
+    let px = m.row_title_px;
+    // A long query shows its end, where the typing is.
+    let mut shown = text;
+    while c.text_width(&f.heading, shown, px) > room {
+        let mut chars = shown.chars();
+        chars.next();
+        shown = chars.as_str();
+    }
+    // The text goes over the cursor, as the stock field draws them.
+    let at = cursor(t, f, tx + c.text_width(&f.heading, shown, px), cy, px);
+    if caret {
+        c.fill_round_rect(at.x, at.y, at.w, at.h, m.dp(CARET_RADIUS_DP), t.pal.accent);
+    }
+    if text.is_empty() {
+        c.text_vc(&f.heading, placeholder, tx, cy, px, t.pal.placeholder, None);
     } else {
-        // A long query shows its end, where the typing is.
-        let mut shown = text;
-        while c.text_width(&f.heading, shown, m.row_title_px) > room {
-            let mut chars = shown.chars();
-            chars.next();
-            shown = chars.as_str();
-        }
-        tx + c.text_vc(&f.heading, shown, tx, cy, m.row_title_px, t.pal.text, None)
-    };
-    c.line(cursor_x + m.dp(1.5), cy + ink_top - m.dp(2.0), cursor_x + m.dp(1.5), cy + ink_bottom + m.dp(2.0), m.dp(2.0), t.pal.accent);
+        c.text_vc(&f.heading, shown, tx, cy, px, t.pal.text, None);
+    }
     let clear = (!text.is_empty()).then(|| {
         let (ccx, r) = (x + w - m.dp(12.0) - clear_d / 2.0, clear_d / 2.0);
         c.fill_circle(ccx, cy, r, t.pal.search_icon);
@@ -705,7 +743,27 @@ pub fn search_field(c: &mut Canvas, t: &Theme, f: &Fonts, x: f32, w: f32, cy: f3
         c.line(ccx - s, cy + s, ccx + s, cy - s, m.dp(1.6), t.pal.search);
         Rect::new(ccx - h / 2.0, y, h, h)
     });
-    SearchField { field: Rect::new(x, y, w, h), clear }
+    (Rect::new(x, y, w, h), clear, at)
+}
+
+/// Where a cursor stands, with its left edge on `x`, in text of `px`
+/// whose ink is centred on `cy`: as tall as the face's line, from its
+/// ascent to its descent, as the stock text fields draw it.
+fn cursor(t: &Theme, f: &Fonts, x: f32, cy: f32, px: f32) -> Rect {
+    let (ink_top, ink_bottom) = f.heading.ink(px);
+    let base = cy - (ink_top + ink_bottom) / 2.0;
+    let (top, bottom) = f.heading.line(px);
+    Rect::new(x, base + top, t.m.dp(CARET_W_DP), bottom - top)
+}
+
+/// The stretch of a field round the cursor at `at`, drawn by `draw` into a
+/// canvas of its own; `draw` gets how far that canvas's corner is from
+/// the field's.
+fn caret_over(at: Rect, draw: impl FnOnce(&mut Canvas, f32, f32)) -> Caret {
+    let (x, y) = (at.x.floor() as i32 - 1, at.y.floor() as i32 - 1);
+    let mut art = Canvas::new(at.w.ceil() as u32 + 3, at.h.ceil() as u32 + 3);
+    draw(&mut art, x as f32, y as f32);
+    Caret { art, x, y }
 }
 
 /// Section caption between two cards. `prev_bottom` is the bottom of the card
@@ -780,12 +838,22 @@ pub fn dock_bar(t: &Theme, f: &Fonts, bg: Rgba, labels: &[&str]) -> (Canvas, Vec
     (c, rects)
 }
 
-/// A card holding text being typed, with the caret after it; text too long
-/// for the card shows its end, where the caret is. Returns where the card
-/// ends.
-pub fn text_field(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, text: &str) -> f32 {
+/// A card holding text being typed, with the cursor after it; text too long
+/// for the card shows its end, where the cursor is. Returns where the card
+/// ends, and the cursor.
+pub fn text_field(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, text: &str) -> (f32, Caret) {
+    let at = draw_text_field(c, t, f, t.m.margin, top, text, false);
+    let caret = caret_over(at, |art, dx, dy| {
+        draw_text_field(art, t, f, t.m.margin - dx, top - dy, text, true);
+    });
+    (top + t.m.dp(56.0), caret)
+}
+
+/// Draw the text field's card from `x0`, `top`, with its cursor if
+/// `caret`; returns where the cursor is.
+fn draw_text_field(c: &mut Canvas, t: &Theme, f: &Fonts, x0: f32, top: f32, text: &str, caret: bool) -> Rect {
     let m = &t.m;
-    let (x0, w, h) = (m.margin, m.w as f32 - m.margin * 2.0, m.dp(56.0));
+    let (w, h) = (m.w as f32 - m.margin * 2.0, m.dp(56.0));
     c.fill_round_rect(x0, top, w, h, m.card_radius, t.pal.card);
     let (x, room) = (x0 + m.inner, w - m.inner * 2.0 - m.dp(4.0));
     let px = m.row_title_px;
@@ -795,11 +863,12 @@ pub fn text_field(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, text: &str) ->
         rest.next();
         shown = rest.as_str();
     }
-    let (ink_top, ink_bottom) = f.heading.ink(px);
-    let base = top + h / 2.0 - (ink_top + ink_bottom) / 2.0;
-    let advance = c.text(&f.heading, shown, x, base, px, t.pal.text, None);
-    c.fill_rect(x + advance + m.dp(1.0), top + m.dp(16.0), m.dp(2.0), h - m.dp(32.0), t.pal.accent);
-    top + h
+    let at = cursor(t, f, x + c.text_width(&f.heading, shown, px), top + h / 2.0, px);
+    if caret {
+        c.fill_round_rect(at.x, at.y, at.w, at.h, m.dp(CARET_RADIUS_DP), t.pal.accent);
+    }
+    c.text_vc(&f.heading, shown, x, top + h / 2.0, px, t.pal.text, None);
+    at
 }
 
 /// A full-width button in the accent colour, for a page's one action that
@@ -1790,6 +1859,48 @@ mod tests {
         let (c, ox, oy) = art;
         let i = ((y as i32 - oy) as usize * c.w as usize + (x as i32 - ox) as usize) * 4;
         c.data[i..i + 4].try_into().unwrap()
+    }
+
+    /// The box round the pixels of `c` in `area` that `keep` picks: its
+    /// left, top, right and bottom edges.
+    fn ink_box(c: &Canvas, area: Rect, keep: impl Fn(&[u8]) -> bool) -> (f32, f32, f32, f32) {
+        let mut b = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for y in area.y as u32..(area.y + area.h) as u32 {
+            for x in area.x as u32..(area.x + area.w) as u32 {
+                let i = ((y * c.w + x) * 4) as usize;
+                if keep(&c.data[i..i + 4]) {
+                    b = (b.0.min(x as f32), b.1.min(y as f32), b.2.max(x as f32 + 1.0), b.3.max(y as f32 + 1.0));
+                }
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn the_search_cursor_stands_where_the_stock_field_puts_it() {
+        let f = crate::font::bundled();
+        // A Xiaomi 13 Ultra panel.
+        let t = Theme::light(1440, 3200, 3.5);
+        let (x, w, cy) = (t.m.dp(48.0), t.m.dp(340.0), t.m.dp(60.0));
+        let px = t.m.row_title_px;
+        let (ink_top, ink_bottom) = f.heading.ink(px);
+        let base = cy - (ink_top + ink_bottom) / 2.0;
+        let (line_top, line_bottom) = f.heading.line(px);
+        // The cursor's pixels are blue, darker where the placeholder crosses
+        // it; the field, its text and the placeholder are grey.
+        let blue = |p: &[u8]| p[2] as i32 - p[0] as i32 > 60;
+        for text in ["", "bf"] {
+            let mut c = Canvas::new(t.m.w, t.m.dp(120.0) as u32);
+            let field = search_field(&mut c, &t, &f, x, w, cy, text, "搜索功能与分区");
+            assert_eq!(ink_box(&c, field.field, blue).0, f32::MAX, "{text:?}: the field is drawn without its cursor");
+            // The cursor laid over the field, as the page does while it shows.
+            c.lay(&field.caret.art, field.caret.x, field.caret.y, 1.0);
+            let (cl, ct, cr, cb) = ink_box(&c, field.field, blue);
+            let left = x + t.m.search_text_inset + c.text_width(&f.heading, text, px);
+            let across = format!("{cl}..{cr} × {ct}..{cb}");
+            assert!((cl - left).abs() <= 1.0 && (cr - left - t.m.dp(2.0)).abs() <= 1.0, "{text:?}: 2 dp wide from where the next character goes: {across}");
+            assert!((ct - (base + line_top)).abs() <= 1.0 && (cb - (base + line_bottom)).abs() <= 1.0, "{text:?}: as tall as the line: {across}");
+        }
     }
 
     #[test]

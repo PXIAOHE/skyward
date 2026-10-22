@@ -223,7 +223,9 @@ const LIGHT: Palette = Palette {
     switch_off: Rgba::rgb(229, 229, 229),
     search: Rgba::rgb(229, 229, 229),
     search_icon: Rgba::rgb(161, 161, 161),
-    placeholder: Rgba::rgb(160, 160, 160),
+    // Black at 30%: 160 over the search field, and darker blue where it
+    // crosses the cursor.
+    placeholder: Rgba::rgb(0, 0, 0).with_alpha(77),
     badge: Rgba::rgb(235, 242, 254),
     avatar: Rgba::rgb(221, 223, 226),
     avatar_glyph: Rgba::rgb(255, 255, 255),
@@ -257,7 +259,8 @@ const DARK: Palette = Palette {
     switch_off: Rgba::rgb(58, 58, 58),
     search: Rgba::rgb(28, 28, 28),
     search_icon: Rgba::rgb(110, 110, 110),
-    placeholder: Rgba::rgb(110, 110, 110),
+    // White at 36%: 110 over the search field.
+    placeholder: Rgba::rgb(255, 255, 255).with_alpha(92),
     badge: Rgba::rgb(29, 40, 64),
     avatar: Rgba::rgb(51, 51, 51),
     avatar_glyph: Rgba::rgb(140, 140, 140),

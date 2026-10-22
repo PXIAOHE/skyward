@@ -38,6 +38,14 @@ impl Face {
         self.bounds('中', em_px)
     }
 
+    /// The line text is set on, above and below the baseline (negative is
+    /// above): the face's ascent and descent, which a text field's cursor
+    /// spans.
+    pub fn line(&self, em_px: f32) -> (f32, f32) {
+        let k = em_px / self.upem;
+        (-self.font.ascent_unscaled() * k, -self.font.descent_unscaled() * k)
+    }
+
     /// Height of a capital letter above the baseline, for Latin lettering
     /// placed by its cap line.
     pub fn cap(&self, em_px: f32) -> f32 {
@@ -191,4 +199,21 @@ impl Fonts {
 pub(crate) fn bundled() -> Fonts {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/fonts");
     Fonts::load(format!("{dir}/MiSansVF.ttf"), 0, format!("{dir}/KirkMono-Regular.ttf")).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_line_is_as_tall_as_the_stock_search_fields_cursor() {
+        // Xiaomi 17 Ultra, 3 px a dp, the search field's 16.9 dp text: its
+        // placeholder's ink 47 px tall, its cursor 69 px, measured on screen.
+        let f = bundled();
+        let em = 16.9 * 3.0;
+        let (ink_top, ink_bottom) = f.heading.ink(em);
+        let (top, bottom) = f.heading.line(em);
+        assert!((ink_bottom - ink_top - 47.0).abs() <= 2.0, "ink {ink_top}..{ink_bottom}");
+        assert!((bottom - top - 69.0).abs() <= 2.0, "line {top}..{bottom}");
+    }
 }

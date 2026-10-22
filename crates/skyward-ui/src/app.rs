@@ -856,6 +856,8 @@ pub struct Frame {
     /// A strip held at the bottom of the screen over the page; the page
     /// scrolls far enough for nothing to stay under it.
     pub dock: Option<Dock>,
+    /// A text field's blinking cursor, in page coordinates.
+    pub caret: Option<widgets::Caret>,
 }
 
 /// A strip held at the bottom of the screen over the page, such as the
@@ -942,6 +944,7 @@ impl Frame {
             pinned: None,
             scrollback: None,
             dock: None,
+            caret: None,
         }
     }
 
@@ -1341,6 +1344,9 @@ enum Press {
 }
 
 const TOAST_MS: u64 = 2000;
+/// How long a text field's cursor shows and then hides, as the stock
+/// fields blink it.
+const BLINK_MS: u64 = 500;
 /// The most lines of what an install script shows that its page keeps,
 /// the latest; the log keeps them all.
 const SCRIPT_LINES: usize = 500;
@@ -1603,6 +1609,15 @@ pub struct App {
     /// The panel at full brightness, or easing to the dim level it takes
     /// shortly before going off.
     bright: Fade,
+    /// While a text field's cursor is up: the page, how many edits had
+    /// been typed, and when it came up whole on them. It shows for the
+    /// first half of each blink from then on, so it is whole again at each
+    /// edit and on each page it comes up on.
+    blink: Option<(Screen, u64, u64)>,
+    /// Edits typed into any text field so far.
+    edits: u64,
+    /// Whether the frame last composed showed the cursor.
+    caret_shown: bool,
     dirty: bool,
     w: u32,
     h: u32,
@@ -1645,6 +1660,9 @@ impl App {
             active: None,
             woke_at: None,
             bright: full_brightness(),
+            blink: None,
+            edits: 0,
+            caret_shown: false,
             dirty: true,
             w,
             h,
@@ -1705,7 +1723,16 @@ impl App {
             Some((_, Press::Power { spot: Spot { stop: Stop::Hit(Action::OpenEntry(_)), .. }, at })) => Some(at + LONG_PRESS_MS),
             _ => None,
         };
-        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat].into_iter().flatten().min()
+        let blink = self.blink_at(now).filter(|_| self.display_on).map(|(_, next)| next);
+        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink].into_iter().flatten().min()
+    }
+
+    /// Whether a text field's cursor shows at `now`, and when it next turns;
+    /// `None` while no cursor is up.
+    fn blink_at(&self, now: u64) -> Option<(bool, u64)> {
+        let (_, _, since) = self.blink?;
+        let n = now.saturating_sub(since) / BLINK_MS;
+        Some((n.is_multiple_of(2), since + (n + 1) * BLINK_MS))
     }
 
     /// When sitting idle next changes the lit panel: when it dims, or once
@@ -1764,6 +1791,9 @@ impl App {
         }
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
+            self.dirty = true;
+        }
+        if self.blink_at(now).is_some_and(|(on, _)| on != self.caret_shown) {
             self.dirty = true;
         }
         if let Some(fling) = self.fling {
@@ -2413,6 +2443,15 @@ impl App {
     /// message, and the back cue while a swipe from an edge is under way.
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
         self.frame(f, info);
+        let screen = self.screen();
+        let caret_on = match self.frame.as_ref().is_some_and(|fr| fr.caret.is_some()) {
+            true => self.caret_up(screen, now),
+            false => {
+                self.blink = None;
+                self.caret_shown = false;
+                false
+            }
+        };
         let t = self.theme();
         let m = t.m;
         if let Some((which, track)) = self.knob.take() {
@@ -2430,7 +2469,6 @@ impl App {
             let (art, x, y) = widgets::back_chip(&t);
             self.chip = Some((t.dark, art, x, y));
         }
-        let screen = self.screen();
         let scroll = self.top().1;
         let offset = (scroll + self.overscroll(now)).round();
         let light = self.light(offset);
@@ -2509,6 +2547,9 @@ impl App {
                 draw_faded(out, big, 0.0, -offset, t.pal.text, level, (1.0 - level) * m.dp(TITLE_BLUR_DP));
             }
         }
+        if let Some(caret) = frame.caret.as_ref().filter(|_| caret_on) {
+            out.lay(&caret.art, caret.x, caret.y - offset as i32, 1.0);
+        }
         let bar = self.bar.level(now);
         let strip = frame.pinned.as_ref().map(|p| (p, pinned_top(&t, p, offset)));
         shine(out, Group::Page);
@@ -2557,6 +2598,18 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Whether the cursor of the text field on `screen` shows at `now`: it
+    /// comes up whole on each page it shows on and at each edit, then
+    /// blinks.
+    fn caret_up(&mut self, screen: Screen, now: u64) -> bool {
+        let key = (screen, self.edits);
+        if self.blink.is_none_or(|(s, e, _)| (s, e) != key) {
+            self.blink = Some((screen, self.edits, now));
+        }
+        self.caret_shown = self.blink_at(now).is_some_and(|(on, _)| on);
+        self.caret_shown
     }
 
     /// Put the page back where it rests, for a page just opened or returned
@@ -3036,6 +3089,7 @@ impl App {
             }
             Action::ClearSearch => {
                 self.state.search.clear();
+                self.edits += 1;
                 self.refresh();
             }
             Action::OpenEntry(i) => {
@@ -3172,13 +3226,18 @@ impl App {
             Cap::Char(ch) => {
                 let shifted = self.state.layer == Layer::Shifted;
                 self.typing().push(if shifted { ch.to_ascii_uppercase() } else { ch });
+                self.edits += 1;
                 if shifted {
                     self.state.layer = Layer::Letters;
                 }
             }
-            Cap::Space => self.typing().push(' '),
+            Cap::Space => {
+                self.typing().push(' ');
+                self.edits += 1;
+            }
             Cap::Backspace => {
                 self.typing().pop();
+                self.edits += 1;
             }
             Cap::Shift => {
                 self.state.layer = if self.state.layer == Layer::Shifted { Layer::Letters } else { Layer::Shifted };
@@ -4178,6 +4237,29 @@ mod tests {
         assert!(y < H as f32, "scrolled up into view");
         tap_at(&mut app, &f, &i, Action::Open(Screen::Reboot), 3000);
         assert_eq!(app.screen(), Screen::Reboot);
+    }
+
+    #[test]
+    fn the_cursor_blinks_and_comes_up_whole_at_each_edit() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Search, &f, &i);
+        let mut screen = Canvas::new(W, H);
+        let mut shows = |app: &mut App, now: u64| {
+            app.compose(&mut screen, &f, &i, "12:00", now);
+            app.caret_shown
+        };
+        assert!(shows(&mut app, 1000), "it comes up whole on the page");
+        assert_eq!(app.deadline(1200), Some(1500), "the loop wakes when it turns");
+        assert!(!shows(&mut app, 1500), "half a second on it hides");
+        assert!(shows(&mut app, 2000));
+        assert!(!shows(&mut app, 2600));
+        tap(&mut app, &f, &i, Action::Type(Cap::Char('b')));
+        assert!(shows(&mut app, 2700), "an edit brings it back whole at once");
+        assert!(!shows(&mut app, 3200));
+        tap_back(&mut app, &f, &i, 0);
+        assert_eq!(app.screen(), Screen::Home);
+        assert!(!shows(&mut app, 3300), "no cursor off the page");
+        assert!(app.deadline(3300).is_none_or(|d| d > 10_000), "nor a wake for it, only for the screen going off");
     }
 
     #[test]
