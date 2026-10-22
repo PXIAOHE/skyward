@@ -75,6 +75,7 @@ impl Sprite {
     /// Lay the sprite moved by (`dx`, `dy`), rounded to whole pixels, in
     /// `color` at `alpha` of its strength, over an opaque canvas.
     pub fn draw(&self, c: &mut Canvas, dx: f32, dy: f32, color: Rgba, alpha: f32) {
+        assert!(c.whole(), "a sprite is drawn on a canvas holding all its rows");
         if alpha <= 0.0 {
             return;
         }
@@ -113,6 +114,7 @@ impl Sprite {
             self.draw(c, dx, dy, color, alpha);
             return;
         }
+        assert!(c.whole(), "a sprite is drawn on a canvas holding all its rows");
         let Some((x0, y0, x1, y1)) = self.bounds(dx, dy, scale, c.w as usize, c.h as usize) else { return };
         if alpha <= 0.0 {
             return;

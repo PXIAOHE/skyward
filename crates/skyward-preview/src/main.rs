@@ -922,7 +922,7 @@ fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo) -> Canvas {
     c.clear(frame.bg);
     c.put(&frame.canvas, 0);
     if let Some(rows) = &frame.rows {
-        let cx = Ctx { t: &t, f, info, state: &state, term: None };
+        let cx = Ctx { t: &t, f, info, state: &state, term: None, band: None };
         for k in 0..rows.count() {
             let mut row = Canvas::new(c.w, (rows.edges[k + 1] - rows.edges[k]) as u32);
             pages::row(screen, &cx, k, &mut row);

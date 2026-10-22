@@ -37,6 +37,17 @@ pub struct Ctx<'a> {
     pub state: &'a State,
     /// The shell the terminal page shows, once one has started.
     pub term: Option<&'a Term>,
+    /// The part of the page to draw; all of it if none is given. The page
+    /// is laid out whole either way.
+    pub band: Option<Band>,
+}
+
+/// Rows `rows` of a page, and of them the columns `cols`, each from the
+/// first to one past the last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Band {
+    pub rows: (u32, u32),
+    pub cols: (u32, u32),
 }
 
 pub fn render(screen: Screen, cx: &Ctx) -> Frame {
@@ -111,17 +122,21 @@ const REBOOT_TARGETS: [(&str, Option<&str>); 6] = [
     ("关机", None),
 ];
 
-fn page(t: &Theme) -> Canvas {
-    let mut c = Canvas::new(t.m.w, t.m.h);
-    c.clear(t.pal.bg);
-    c
+/// A canvas for a page `h` tall in the colour `bg`, holding the rows `cx`
+/// asks to be drawn.
+fn sheet(cx: &Ctx, h: u32, bg: Rgba) -> Canvas {
+    let w = cx.t.m.w;
+    let Band { rows, cols } = cx.band.unwrap_or(Band { rows: (0, h), cols: (0, w) });
+    Canvas::band(w, h, rows.0..rows.1, cols.0..cols.1, bg)
+}
+
+fn page(cx: &Ctx) -> Canvas {
+    sheet(cx, cx.t.m.h, cx.t.pal.bg)
 }
 
 /// A canvas tall enough for a scrolling page; [`fit`] trims it to the content.
-fn long_page(t: &Theme) -> Canvas {
-    let mut c = Canvas::new(t.m.w, t.m.h * 3);
-    c.clear(t.pal.bg);
-    c
+fn long_page(cx: &Ctx) -> Canvas {
+    sheet(cx, cx.t.m.h * 3, cx.t.pal.bg)
 }
 
 /// Trim a long page to its content plus the bottom margin, and never shorter
@@ -139,7 +154,7 @@ fn hits(rects: &[Rect], actions: &[Action]) -> Vec<Hit> {
 /// card with the readings that matter before flashing, then grouped entries.
 pub fn home(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let mut y = t.m.content_top;
     let search_top = y;
@@ -212,7 +227,7 @@ pub fn home(cx: &Ctx) -> Frame {
 /// Preferences, opening with the stock「显示与亮度」theme previews.
 pub fn settings(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let themes = widgets::theme_picker(&mut c, t, f, top + t.m.dp(8.9));
@@ -252,7 +267,7 @@ pub fn settings(cx: &Ctx) -> Frame {
 /// settings.
 pub fn screen_off(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let mut c = page(cx);
     let top = t.m.content_top;
     let labels = SCREEN_OFF.map(fmt::screen_off);
     let rows: Vec<Row> = labels.iter().enumerate().map(|(k, label)| Row::new(label).trail(Trail::Check(s.screen_off == k))).collect();
@@ -270,7 +285,7 @@ pub fn screen_off(cx: &Ctx) -> Frame {
 /// stays.
 pub fn mount(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
 
@@ -365,7 +380,7 @@ pub fn about(cx: &Ctx) -> Frame {
 pub fn specs(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let gap = t.m.card_gap;
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     // This page leaves more room under the title than the settings pages.
     let top = t.m.dp(188.0);
@@ -450,7 +465,7 @@ pub fn specs(cx: &Ctx) -> Frame {
 /// a user whose files wait on one is asked with the control that lock is
 /// answered with, from the start.
 pub fn decrypt(cx: &Ctx) -> Frame {
-    let c = page(cx.t);
+    let c = page(cx);
     match &cx.state.data {
         Data::Locked { user, keys, checking } => code(cx, c, *user, *keys, *checking),
         Data::Closed | Data::Opening => data_status(cx, c, Icon::Lock, "解密 data 分区", Some("正在读取锁屏方式"), None),
@@ -544,7 +559,7 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
 /// Reboot target picker with a swipe-to-confirm control.
 pub fn reboot(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let mut c = page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let mut y = widgets::section_first(&mut c, t, f, top, "重启到");
@@ -585,7 +600,7 @@ pub fn reboot(cx: &Ctx) -> Frame {
 /// where a package can come from.
 pub fn install(cx: &Ctx) -> Frame {
     let (t, f, i) = (cx.t, cx.f, cx.info);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let top = t.m.content_top;
     let mut facts = Vec::new();
     if let Some(v) = &i.os_version {
@@ -753,7 +768,7 @@ fn pick_title(pick: Pick, current: Option<Slot>) -> String {
 /// with `adb sideload`, or reading the file chosen, then installing it.
 pub fn installing(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let (mut out, mut rows) = (Vec::new(), None);
     let top = t.m.content_top;
     let computer = s.source == Source::Computer;
@@ -1036,7 +1051,7 @@ fn wipe_row(w: Wipe, s: &State) -> (&'static str, String) {
 pub fn wipe(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let chosen = |w: Wipe| s.wipe[WIPES.iter().position(|&x| x == w).expect("every choice is one of WIPES")];
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let y = widgets::section_first(&mut c, t, f, top, "恢复出厂设置");
@@ -1079,7 +1094,7 @@ fn keyboard_hits(c: &mut Canvas, t: &Theme, f: &Fonts, s: &State, enter: &str, o
 pub fn search(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let m = &t.m;
-    let mut c = page(t);
+    let mut c = page(cx);
     let mut out = Vec::new();
     let (at, cancel) = widgets::search_layout(t);
     let field = widgets::search_field(&mut c, t, f, at.x, at.w, at.y + at.h / 2.0, &s.search, SEARCH_HINT);
@@ -1112,7 +1127,7 @@ pub fn search(cx: &Ctx) -> Frame {
 /// Backing up: what to take, where it goes, and how.
 pub fn backup(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let y = widgets::section_first(&mut c, t, f, top, "备份内容");
@@ -1161,7 +1176,7 @@ pub fn backup(cx: &Ctx) -> Frame {
 /// read are listed after them, to be deleted.
 pub fn restore(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let y = widgets::section_first(&mut c, t, f, top, "备份");
@@ -1191,7 +1206,7 @@ pub fn restore(cx: &Ctx) -> Frame {
 pub fn restore_backup(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
     let (entry, chosen) = s.restore.as_ref().expect("the restore page shows a backup");
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let y = match &entry.held {
@@ -1317,7 +1332,7 @@ fn part_state(job: &BackupJob, k: usize) -> String {
 pub fn backup_job(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let job = s.backup_job.as_ref().expect("the backup page shows work");
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let (did, doing, icon) = if job.restore { ("已恢复", "正在恢复", Icon::Restore) } else { ("已备份", "正在备份", Icon::Backup) };
@@ -1416,7 +1431,7 @@ pub fn backup_job(cx: &Ctx) -> Frame {
 /// Tools for the experienced.
 pub fn advanced(cx: &Ctx) -> Frame {
     let (t, f) = (cx.t, cx.f);
-    let mut c = page(t);
+    let mut c = page(cx);
     let top = t.m.content_top;
     let tools = widgets::list(&mut c, t, f, top, &[
         Row::new("文件管理").icon(BLUE, Icon::Folder),
@@ -1438,7 +1453,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
 /// merge one that waits there for the system to start it.
 pub fn update(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let mut c = page(cx);
     let top = t.m.content_top;
     let mut out = Vec::new();
     if let Standing::Merging(done) = s.update {
@@ -1521,8 +1536,7 @@ fn listing(
 ) -> Frame {
     let (t, f) = (cx.t, cx.f);
     let bg = files::page(t);
-    let mut c = Canvas::new(t.m.w, t.m.h);
-    c.clear(bg);
+    let mut c = sheet(cx, t.m.h, bg);
     let rows = match (absent, &folder.entries) {
         (Some((note, why)), _) => {
             files::note(&mut c, t, f, note, Some(why));
@@ -1561,7 +1575,7 @@ pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
 pub fn file_info(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let e = s.file.as_ref().expect("the file page shows an entry");
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let top = t.m.content_top;
     let folder = matches!(e.kind, FileKind::Folder { .. });
     let mut facts = vec![("名称", e.name.clone()), ("位置", Path::new(&s.files.path).join(&e.name).to_string_lossy().into_owned())];
@@ -1606,7 +1620,7 @@ pub fn file_info(cx: &Ctx) -> Frame {
 /// A new name for the entry the file page shows, typed on the keyboard.
 pub fn rename(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let mut c = page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let (y, caret) = widgets::text_field(&mut c, t, f, top, &s.new_name);
@@ -1624,7 +1638,7 @@ pub fn clash(cx: &Ctx) -> Frame {
         FileOp::Copy => "复制",
         FileOp::Move => "移动",
     };
-    let mut c = page(t);
+    let mut c = page(cx);
     let top = t.m.content_top;
     let y = widgets::paragraph(&mut c, t, f, top, &format!("\"{into}\"中已有同名的\"{name}\"。"));
     let skip = format!("保留已有的同名项，不{verb}该项");
@@ -1663,7 +1677,7 @@ pub fn file_job(cx: &Ctx) -> Frame {
         }
         (Some((_, entries)), _) => (format!("已{verb} {} 项，共 {} 项", entries.0, entries.1), share(entries)),
     };
-    let mut c = page(t);
+    let mut c = page(cx);
     let top = t.m.content_top;
     let y = widgets::progress_card(&mut c, t, f, top, &name, &detail, Some(done));
     let mut out = Vec::new();
@@ -1694,7 +1708,7 @@ pub fn file_job(cx: &Ctx) -> Frame {
 /// lacks, and the keyboard, every key of which goes to the shell.
 pub fn terminal(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let mut c = page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     keyboard_hits(&mut c, t, f, s, "回车", &mut out);
@@ -1708,7 +1722,7 @@ pub fn terminal(cx: &Ctx) -> Frame {
 /// The interface's languages; only Simplified Chinese is written yet.
 pub fn language(cx: &Ctx) -> Frame {
     let (t, f) = (cx.t, cx.f);
-    let mut c = page(t);
+    let mut c = page(cx);
     let top = t.m.content_top;
     let list = widgets::list(&mut c, t, f, top, &[
         Row::new("简体中文").trail(Trail::Check(true)),
@@ -1723,7 +1737,7 @@ pub fn language(cx: &Ctx) -> Frame {
 /// The time zone the status bar's clock and the times on the pages keep.
 pub fn time_zone(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let top = t.m.content_top;
     let rows: Vec<Row> =
         TIME_ZONES.iter().enumerate().map(|(k, &(name, cities, _))| Row::new(name).subtitle(cities).trail(Trail::Check(k == s.time_zone))).collect();
@@ -1737,7 +1751,7 @@ pub fn time_zone(cx: &Ctx) -> Frame {
 /// Saving the logs, as a bug report asks for them.
 pub fn logs(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let mut c = page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let y = widgets::section_first(&mut c, t, f, top, "日志内容");
@@ -1772,7 +1786,7 @@ You should have received a copy of the GNU General Public License along with thi
 /// Skyward's own licence.
 pub fn license(cx: &Ctx) -> Frame {
     let (t, f) = (cx.t, cx.f);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let top = t.m.content_top;
     let y = widgets::info_card(&mut c, t, f, top, &[("许可证", "GNU 通用公共许可证第 3 版或更新的版本（GPL-3.0-or-later）".to_string())]);
     let y = widgets::paragraph(&mut c, t, f, y + t.m.dp(4.0), LICENSE_NOTICE);
@@ -1788,7 +1802,7 @@ const MONO_LICENSE: &str = include_str!("../../../resources/fonts/KirkMono-OFL.t
 /// The typefaces, as they name themselves, and the terms each is used under.
 pub fn font_license(cx: &Ctx) -> Frame {
     let (t, f) = (cx.t, cx.f);
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let top = t.m.content_top;
     let y = widgets::section_first(&mut c, t, f, top, "界面文字");
     let y = widgets::info_card(&mut c, t, f, y, &[
@@ -1826,7 +1840,7 @@ pub fn font_license(cx: &Ctx) -> Frame {
 /// While an update is in flight the slot stays as the update set it.
 pub fn slot(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
-    let mut c = page(t);
+    let mut c = page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let Some(current) = i.slot else {
@@ -1874,7 +1888,7 @@ pub fn slot(cx: &Ctx) -> Frame {
 /// keys and lit where they are.
 pub fn fastboot(cx: &Ctx) -> Frame {
     let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
-    let mut c = page(t);
+    let mut c = page(cx);
     let top = t.m.content_top;
     let running = if s.fastboot.running { "正在运行" } else { "未运行" };
     let link = match s.fastboot.link {
@@ -1931,7 +1945,7 @@ pub fn erase(cx: &Ctx) -> Frame {
     use std::cmp::Ordering;
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let e = &s.erase;
-    let mut c = long_page(t);
+    let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let failed = matches!(e.outcome, Some(Err(_)));
@@ -1994,7 +2008,7 @@ pub fn erase(cx: &Ctx) -> Frame {
 /// data: start it again, look around the recovery first, or erase.
 pub fn cant_start(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let mut c = page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let mut y = widgets::paragraph(
@@ -2025,7 +2039,7 @@ pub fn cant_start(cx: &Ctx) -> Frame {
 /// was asked, and where to go instead.
 pub fn unhandled(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(t);
+    let mut c = page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let mut items = vec![("请求", s.asked.unhandled.clone().unwrap_or_default())];

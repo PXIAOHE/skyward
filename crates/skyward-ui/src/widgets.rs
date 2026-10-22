@@ -562,6 +562,7 @@ pub fn strip_mask(c: &mut Canvas, t: &Theme, color: Rgba, level: f32, top: f32, 
 /// are left as they are.
 fn mask(c: &mut Canvas, h: f32, stops: &[(f32, f32)], color: Rgba, level: f32, skip: std::ops::Range<u32>) {
     const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    assert!(c.whole(), "the mask lies over a whole screen");
     let ink = [color.r as u32, color.g as u32, color.b as u32];
     let row_len = c.w as usize * 4;
     for y in (0..(h.ceil() as u32).min(c.h)).filter(|y| !skip.contains(y)) {

@@ -372,6 +372,7 @@ pub fn paint(out: &mut Canvas, field: &Field, fade: f32, layer: &Layer, dither: 
     const ROWS: usize = 32;
     let w = out.w as usize;
     assert_eq!(dither.w, w, "the dither was made for this screen");
+    assert!(out.whole() && layer.canvas.whole(), "the field fills a whole screen under a whole page");
     out.data.par_chunks_mut(ROWS * w * 4).enumerate().for_each(|(k, band)| paint_band(band, k * ROWS, w, field, fade, layer, dither));
 }
 
@@ -444,6 +445,7 @@ fn lay_span(dst: &mut [[u8; 4]], src: &[[u8; 4]]) {
 /// pixels, dithered as the field is.
 #[allow(clippy::too_many_arguments)]
 pub fn ink_wordmark(out: &mut Canvas, field: &Field, look: &Ink, sprite: &Sprite, scale: f32, alpha: f32, fade: f32, dither: &Dither) {
+    assert!(out.whole(), "the wordmark is inked on a whole screen");
     let w = out.w as usize;
     let Some((x0, y0, x1, y1)) = sprite.bounds(0.0, 0.0, scale, w, out.h as usize) else { return };
     if alpha <= 0.0 {

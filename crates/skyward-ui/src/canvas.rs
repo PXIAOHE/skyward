@@ -5,10 +5,21 @@ use ab_glyph::{point, Font, GlyphId, PxScale, ScaleFont};
 /// A straight-alpha RGBA8 raster target. All primitives are antialiased via
 /// signed-distance coverage so the same code produces crisp output on the
 /// device framebuffer and in host PNG previews.
+///
+/// A canvas may hold only a band of its rows, and of those only some
+/// columns, for a page drawn a part at a time: everything is drawn where it
+/// lies on the whole, and only what falls in the part held is written.
+#[derive(Clone)]
 pub struct Canvas {
     pub w: u32,
     pub h: u32,
+    /// The rows held, rows `top..bottom`, top to bottom; of each, the
+    /// `span` columns from column `left`.
     pub data: Vec<u8>,
+    top: u32,
+    bottom: u32,
+    left: u32,
+    span: u32,
 }
 
 /// How a layer covers a stretch of pixels.
@@ -57,20 +68,129 @@ fn kept(n: usize) -> Vec<u8> {
 #[allow(clippy::too_many_arguments)]
 impl Canvas {
     pub fn new(w: u32, h: u32) -> Self {
-        let n = (w * h * 4) as usize;
+        Self::filled(w, h, Rgba { r: 0, g: 0, b: 0, a: 0 })
+    }
+
+    /// A canvas every pixel of which is `color`.
+    pub fn filled(w: u32, h: u32, color: Rgba) -> Self {
+        Self::band(w, h, 0..h, 0..w, color)
+    }
+
+    /// A canvas `w` × `h` that holds only rows `rows` of it, and of those
+    /// only columns `cols`, every pixel of them `color`.
+    pub fn band(w: u32, h: u32, rows: std::ops::Range<u32>, cols: std::ops::Range<u32>, color: Rgba) -> Self {
+        let (top, bottom) = (rows.start.min(h), rows.end.clamp(rows.start.min(h), h));
+        let (left, right) = (cols.start.min(w), cols.end.clamp(cols.start.min(w), w));
+        let span = right - left;
+        let n = (span * (bottom - top) * 4) as usize;
         let mut data = kept(n);
         data.clear();
-        data.resize(n, 0);
-        Self { w, h, data }
+        if n > 0 {
+            // One pixel, then all written so far copied after itself.
+            data.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+            while data.len() < n {
+                data.extend_from_within(..data.len().min(n - data.len()));
+            }
+        }
+        Self { w, h, data, top, bottom, left, span }
+    }
+
+    /// A canvas `w` × `h` that holds rows `rows` of it whole, as whatever
+    /// its memory held before: for drawing into a part at a time, where
+    /// what is not drawn yet is never shown.
+    pub fn unfilled(w: u32, h: u32, rows: std::ops::Range<u32>) -> Self {
+        let (top, bottom) = (rows.start.min(h), rows.end.clamp(rows.start.min(h), h));
+        let n = (w * (bottom - top) * 4) as usize;
+        let mut data = kept(n);
+        if data.len() >= n {
+            data.truncate(n);
+        } else {
+            data.resize(n, 0);
+        }
+        Self { w, h, data, top, bottom, left: 0, span: w }
+    }
+
+    /// The rows the canvas holds.
+    pub fn held(&self) -> std::ops::Range<u32> {
+        self.top..self.bottom
+    }
+
+    /// The columns of the rows held the canvas holds.
+    pub fn cols(&self) -> std::ops::Range<u32> {
+        self.left..self.left + self.span
+    }
+
+    /// Whether the canvas holds all of itself.
+    pub fn whole(&self) -> bool {
+        self.held() == (0..self.h) && self.cols() == (0..self.w)
+    }
+
+    /// Take on the rows `band` holds, the same columns of them as this
+    /// canvas holds, which run on from this canvas's last row or up to its
+    /// first.
+    pub fn join(&mut self, band: &Canvas) {
+        assert_eq!((band.w, band.h, band.cols()), (self.w, self.h, self.cols()), "a band joins a canvas of its size, in its columns");
+        let (mine, theirs) = (self.held(), band.held());
+        if theirs.start == mine.end {
+            self.data.extend_from_slice(&band.data);
+            self.bottom = theirs.end;
+        } else {
+            assert_eq!(theirs.end, mine.start, "a band joins where the rows held end or begin");
+            self.data.splice(0..0, band.data.iter().copied());
+            self.top = theirs.start;
+        }
+    }
+
+    /// Take what `band` holds in place of this canvas's own, where it holds
+    /// the same.
+    pub fn replace(&mut self, band: &Canvas) {
+        assert_eq!((band.w, band.h), (self.w, self.h), "a band replaces part of a canvas of its size");
+        let (rows, cols) = (self.rows(band.top as i32, band.held().end as i32), self.columns(band.left as i32, (band.left + band.span) as i32));
+        if cols.0 >= cols.1 {
+            return;
+        }
+        let n = (cols.1 - cols.0) as usize * 4;
+        for y in rows.0..rows.1.min(band.held().end as i32) {
+            let (to, from) = (self.at(cols.0, y), band.at(cols.0, y));
+            self.data[to..to + n].copy_from_slice(&band.data[from..from + n]);
+        }
+    }
+
+    /// The rows of `y0..y1` this canvas holds.
+    #[inline]
+    fn rows(&self, y0: i32, y1: i32) -> (i32, i32) {
+        let held = self.held();
+        (y0.max(held.start as i32), y1.min(held.end as i32))
+    }
+
+    /// The columns of `x0..x1` this canvas holds.
+    #[inline]
+    fn columns(&self, x0: i32, x1: i32) -> (i32, i32) {
+        (x0.max(self.left as i32), x1.min((self.left + self.span) as i32))
+    }
+
+    /// Where the pixel (`x`, `y`) of a row and column held starts in `data`.
+    #[inline]
+    fn at(&self, x: i32, y: i32) -> usize {
+        (((y - self.top as i32) * self.span as i32 + x - self.left as i32) * 4) as usize
     }
 
     #[inline]
     fn px(&mut self, x: i32, y: i32) -> Option<&mut [u8]> {
-        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
+        if x < self.left as i32 || x >= (self.left + self.span) as i32 || y < self.top as i32 || y >= self.bottom as i32 {
             return None;
         }
-        let i = ((y as u32 * self.w + x as u32) * 4) as usize;
+        let i = self.at(x, y);
         Some(&mut self.data[i..i + 4])
+    }
+
+    /// Make this canvas, which holds all of itself, `h` tall: the rows it
+    /// keeps as they were, any it gains clear.
+    pub fn resize(&mut self, h: u32) {
+        assert!(self.whole(), "only a canvas holding all of itself is resized");
+        self.h = h;
+        self.bottom = h;
+        self.data.resize((self.w * h * 4) as usize, 0);
     }
 
     #[inline]
@@ -88,36 +208,37 @@ impl Canvas {
 
     /// Overwrite a pixel-aligned rectangle with `color`.
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba) {
-        let x0 = (x.floor().max(0.0) as u32).min(self.w);
-        let y0 = (y.floor().max(0.0) as u32).min(self.h);
-        let x1 = ((x + w).ceil().max(0.0) as u32).min(self.w);
-        let y1 = ((y + h).ceil().max(0.0) as u32).min(self.h);
+        let (x0, x1) = self.columns(x.floor().max(0.0) as i32, (x + w).ceil().max(0.0) as i32);
+        let (y0, y1) = self.rows(y.floor().max(0.0) as i32, (y + h).ceil().max(0.0) as i32);
+        if x0 >= x1 {
+            return;
+        }
         let px = [color.r, color.g, color.b, color.a];
         for row in y0..y1 {
-            let start = ((row * self.w + x0) * 4) as usize;
-            let end = ((row * self.w + x1) * 4) as usize;
-            for p in self.data[start..end].as_chunks_mut::<4>().0 {
-                *p = px;
-            }
+            let (start, end) = (self.at(x0, row), self.at(x1, row));
+            self.data[start..end].as_chunks_mut::<4>().0.fill(px);
         }
     }
 
     /// Paint rows `y0..y1` with a colour computed per pixel centre.
     pub fn shade_rows(&mut self, y0: u32, y1: u32, paint: impl Fn(f32, f32) -> Rgba) {
-        for y in y0..y1.min(self.h) {
-            for x in 0..self.w {
+        let (y0, y1) = self.rows(y0 as i32, y1 as i32);
+        let (x0, x1) = self.columns(0, self.w as i32);
+        for y in y0..y1 {
+            for x in x0..x1 {
                 let c = paint(x as f32 + 0.5, y as f32 + 0.5);
-                self.blend(x as i32, y as i32, c, 1.0);
+                self.blend(x, y, c, 1.0);
             }
         }
     }
 
-    /// Overwrite row `y` with `paint(x)` for every column `x`.
+    /// Overwrite row `y`, which the canvas holds, with `paint(x)` for every
+    /// column `x` it holds.
     pub fn paint_row(&mut self, y: u32, paint: impl Fn(usize) -> Rgba) {
-        let start = (y * self.w * 4) as usize;
-        let row = &mut self.data[start..start + (self.w * 4) as usize];
+        let start = self.at(self.left as i32, y as i32);
+        let row = &mut self.data[start..start + (self.span * 4) as usize];
         for (x, p) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let c = paint(x);
+            let c = paint(self.left as usize + x);
             *p = [c.r, c.g, c.b, c.a];
         }
     }
@@ -125,19 +246,22 @@ impl Canvas {
     /// Lay `layer`, whose top-left corner goes at (`x`, `y`), over this
     /// opaque canvas at `alpha` of its strength.
     pub fn lay(&mut self, layer: &Canvas, x: i32, y: i32, alpha: f32) {
+        assert!(layer.whole(), "a layer laid holds all of itself");
         if alpha <= 0.0 {
             return;
         }
         let strength = (alpha * 256.0).round() as u32;
-        let (lw, sw) = (layer.w as i32, self.w as i32);
-        let (x0, x1) = ((-x).max(0), (sw - x).min(lw));
-        for ly in 0..layer.h as i32 {
-            let py = y + ly;
-            if py < 0 || py >= self.h as i32 || x0 >= x1 {
-                continue;
-            }
+        let lw = layer.w as i32;
+        let (from, to) = self.columns(x, x + lw);
+        let (x0, x1) = (from - x, to - x);
+        if x0 >= x1 {
+            return;
+        }
+        let (first, last) = self.rows(y, y + layer.h as i32);
+        for py in first..last {
+            let ly = py - y;
             let src = &layer.data[((ly * lw + x0) * 4) as usize..((ly * lw + x1) * 4) as usize];
-            let start = ((py * sw + x + x0) * 4) as usize;
+            let start = self.at(x + x0, py);
             let dst = &mut self.data[start..start + src.len()];
             for (s, d) in src.as_chunks::<4>().0.iter().zip(dst.as_chunks_mut::<4>().0) {
                 if s[3] == 0 {
@@ -157,6 +281,7 @@ impl Canvas {
     /// wholly wherever `layer` does.
     pub fn relay(&mut self, layer: &Canvas, now: &Canvas, x: i32, y: i32, level: f32) {
         assert_eq!((layer.w, layer.h), (now.w, now.h), "the two layers are one size");
+        assert!(self.whole() && layer.whole() && now.whole(), "layers are laid again whole on a whole canvas");
         if level <= 0.0 {
             return;
         }
@@ -205,6 +330,7 @@ impl Canvas {
     /// once.
     pub fn slide(&mut self, front: &Canvas, behind: &Canvas, at: i32, shift: i32, dim: f32, radius: f32) {
         assert!((front.w, front.h) == (self.w, self.h) && (behind.w, behind.h) == (self.w, self.h), "the pages are one size");
+        assert!(self.whole() && front.whole() && behind.whole(), "pages slide whole");
         let (w, h) = (self.w as i32, self.h as i32);
         let (at, shift) = (at.clamp(0, w), shift.clamp(0, w));
         let keep = ((1.0 - dim.clamp(0.0, 1.0)) * 256.0).round() as u32;
@@ -250,14 +376,15 @@ impl Canvas {
         }
     }
 
-    /// A copy of the `w` × `h` pixels from (`x`, `y`), which lie on this
-    /// canvas.
+    /// A copy of the `w` × `h` pixels from (`x`, `y`), which lie in the rows
+    /// this canvas holds.
     pub fn crop(&self, x: u32, y: u32, w: u32, h: u32) -> Canvas {
-        assert!(x + w <= self.w && y + h <= self.h, "the part cropped lies on the canvas");
+        let (held, cols) = (self.held(), self.cols());
+        assert!(cols.start <= x && x + w <= cols.end && held.start <= y && y + h <= held.end, "the part cropped lies in what is held");
         let mut out = Canvas::new(w, h);
-        let (row, part) = (self.w as usize * 4, w as usize * 4);
+        let part = w as usize * 4;
         for (k, dst) in out.data.chunks_exact_mut(part).enumerate() {
-            let at = (y as usize + k) * row + x as usize * 4;
+            let at = self.at(x as i32, (y as usize + k) as i32);
             dst.copy_from_slice(&self.data[at..at + part]);
         }
         out
@@ -267,6 +394,7 @@ impl Canvas {
     /// row at `y`; rows past either edge are left out.
     pub fn put(&mut self, strip: &Canvas, y: i32) {
         assert_eq!(strip.w, self.w, "a strip spans the canvas");
+        assert!(self.whole() && strip.whole(), "a strip is put whole on a whole canvas");
         let first = (-y).clamp(0, strip.h as i32);
         let last = (self.h as i32 - y).clamp(first, strip.h as i32);
         if first == last {
@@ -280,9 +408,11 @@ impl Canvas {
 
     /// Copy rows `from..to` of the opaque `src`, as wide as this canvas,
     /// over it with the first of them at `y`; rows past either edge, of
-    /// either canvas, are left out.
+    /// either canvas, are left out. Those that land on this canvas are rows
+    /// `src` holds.
     pub fn put_rows(&mut self, src: &Canvas, from: i32, to: i32, y: i32) {
         assert_eq!(src.w, self.w, "the rows span the canvas");
+        assert!(self.whole(), "rows are put on a whole canvas");
         // Rows asked for above `src`'s top are left out, the rest landing
         // where they would have.
         let skip = (-from).max(0);
@@ -293,8 +423,11 @@ impl Canvas {
         if first == last {
             return;
         }
+        let held = src.held();
+        assert!(held.start as i32 <= from + first && from + last <= held.end as i32, "the rows put are held");
+        assert_eq!(src.cols(), 0..src.w, "the rows put are held whole");
         let row = self.w as usize * 4;
-        let (dst, at) = ((y + first) as usize * row, (from + first) as usize * row);
+        let (dst, at) = ((y + first) as usize * row, src.at(0, from + first));
         let len = (last - first) as usize * row;
         self.data[dst..dst + len].copy_from_slice(&src.data[at..at + len]);
     }
@@ -302,6 +435,7 @@ impl Canvas {
     /// Each row as runs of clear, solid and partly covered pixels, for
     /// laying the canvas over something that keeps changing.
     pub fn runs(&self) -> Vec<Vec<Run>> {
+        assert!(self.whole(), "runs are found on a whole canvas");
         let w = self.w as usize;
         let cover = |a: u8| match a {
             0 => Cover::Clear,
@@ -329,7 +463,10 @@ impl Canvas {
     /// Drop everything below row `h`, for pages measured after drawing.
     pub fn crop_height(mut self, h: u32) -> Canvas {
         let h = h.min(self.h);
-        self.data.truncate((self.w * h * 4) as usize);
+        let held = self.held();
+        self.data.truncate((self.span * (h.clamp(held.start, held.end) - held.start) * 4) as usize);
+        self.top = self.top.min(h);
+        self.bottom = self.bottom.min(h);
         self.h = h;
         self
     }
@@ -343,10 +480,8 @@ impl Canvas {
         let (cx, cy) = (x + w / 2.0, y + h / 2.0);
         let (hx, hy) = (w / 2.0, h / 2.0);
         let r = r.min(hx).min(hy);
-        let x0 = (x - 1.0).floor() as i32;
-        let y0 = (y - 1.0).floor() as i32;
-        let x1 = (x + w + 1.0).ceil() as i32;
-        let y1 = (y + h + 1.0).ceil() as i32;
+        let (x0, x1) = self.columns((x - 1.0).floor() as i32, (x + w + 1.0).ceil() as i32);
+        let (y0, y1) = self.rows((y - 1.0).floor() as i32, (y + h + 1.0).ceil() as i32);
         for py in y0..y1 {
             let fy = py as f32 + 0.5;
             // Pixels at least half a pixel inside the straight edges are fully
@@ -380,10 +515,8 @@ impl Canvas {
         let (hx, hy) = (w / 2.0, h / 2.0);
         let r = r.min(hx).min(hy);
         let pad = t + 1.0;
-        let x0 = (x - pad).floor() as i32;
-        let y0 = (y - pad).floor() as i32;
-        let x1 = (x + w + pad).ceil() as i32;
-        let y1 = (y + h + pad).ceil() as i32;
+        let (x0, x1) = self.columns((x - pad).floor() as i32, (x + w + pad).ceil() as i32);
+        let (y0, y1) = self.rows((y - pad).floor() as i32, (y + h + pad).ceil() as i32);
         for py in y0..y1 {
             for px in x0..x1 {
                 let d = rr_sdf(px as f32 + 0.5, py as f32 + 0.5, cx, cy, hx, hy, r);
@@ -396,10 +529,8 @@ impl Canvas {
     }
 
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, color: Rgba) {
-        let x0 = (cx - r - 1.0).floor() as i32;
-        let y0 = (cy - r - 1.0).floor() as i32;
-        let x1 = (cx + r + 1.0).ceil() as i32;
-        let y1 = (cy + r + 1.0).ceil() as i32;
+        let (x0, x1) = self.columns((cx - r - 1.0).floor() as i32, (cx + r + 1.0).ceil() as i32);
+        let (y0, y1) = self.rows((cy - r - 1.0).floor() as i32, (cy + r + 1.0).ceil() as i32);
         for py in y0..y1 {
             for px in x0..x1 {
                 let dx = px as f32 + 0.5 - cx;
@@ -414,10 +545,8 @@ impl Canvas {
     }
 
     pub fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, t: f32, color: Rgba) {
-        let x0 = (cx - r - t).floor() as i32;
-        let y0 = (cy - r - t).floor() as i32;
-        let x1 = (cx + r + t).ceil() as i32;
-        let y1 = (cy + r + t).ceil() as i32;
+        let (x0, x1) = self.columns((cx - r - t).floor() as i32, (cx + r + t).ceil() as i32);
+        let (y0, y1) = self.rows((cy - r - t).floor() as i32, (cy + r + t).ceil() as i32);
         for py in y0..y1 {
             for px in x0..x1 {
                 let dx = px as f32 + 0.5 - cx;
@@ -439,10 +568,8 @@ impl Canvas {
         let (sx, sy) = (cx + r * start.cos(), cy + r * start.sin());
         let end = start + sweep;
         let (ex, ey) = (cx + r * end.cos(), cy + r * end.sin());
-        let x0 = (cx - r - t).floor() as i32;
-        let y0 = (cy - r - t).floor() as i32;
-        let x1 = (cx + r + t).ceil() as i32;
-        let y1 = (cy + r + t).ceil() as i32;
+        let (x0, x1) = self.columns((cx - r - t).floor() as i32, (cx + r + t).ceil() as i32);
+        let (y0, y1) = self.rows((cy - r - t).floor() as i32, (cy + r + t).ceil() as i32);
         for py in y0..y1 {
             for px in x0..x1 {
                 let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
@@ -466,10 +593,8 @@ impl Canvas {
     /// Ellipse outline using a first-order distance estimate, which is accurate
     /// for the thin strokes icons use.
     pub fn stroke_ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, t: f32, color: Rgba) {
-        let x0 = (cx - rx - t).floor() as i32;
-        let y0 = (cy - ry - t).floor() as i32;
-        let x1 = (cx + rx + t).ceil() as i32;
-        let y1 = (cy + ry + t).ceil() as i32;
+        let (x0, x1) = self.columns((cx - rx - t).floor() as i32, (cx + rx + t).ceil() as i32);
+        let (y0, y1) = self.rows((cy - ry - t).floor() as i32, (cy + ry + t).ceil() as i32);
         for py in y0..y1 {
             for px in x0..x1 {
                 let (x, y) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
@@ -486,10 +611,8 @@ impl Canvas {
     }
 
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Rgba) {
-        let minx = (x0.min(x1) - t).floor() as i32;
-        let miny = (y0.min(y1) - t).floor() as i32;
-        let maxx = (x0.max(x1) + t).ceil() as i32;
-        let maxy = (y0.max(y1) + t).ceil() as i32;
+        let (minx, maxx) = self.columns((x0.min(x1) - t).floor() as i32, (x0.max(x1) + t).ceil() as i32);
+        let (miny, maxy) = self.rows((y0.min(y1) - t).floor() as i32, (y0.max(y1) + t).ceil() as i32);
         let vx = x1 - x0;
         let vy = y1 - y0;
         let len2 = (vx * vx + vy * vy).max(1e-6);
@@ -533,8 +656,10 @@ impl Canvas {
             .collect();
         let minx = pts.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i32 - 1;
         let maxx = pts.iter().map(|p| p.0).fold(f32::MIN, f32::max).ceil() as i32 + 1;
+        let (minx, maxx) = self.columns(minx, maxx);
         let miny = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i32 - 1;
         let maxy = pts.iter().map(|p| p.1).fold(f32::MIN, f32::max).ceil() as i32 + 1;
+        let (miny, maxy) = self.rows(miny, maxy);
         for py in miny..maxy {
             for px in minx..maxx {
                 let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);

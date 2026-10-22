@@ -6,7 +6,7 @@ use crate::font::Fonts;
 use crate::geom::Rect;
 use crate::glow::{self, GlowClock};
 use crate::motion::{self, Spring};
-use crate::pages::{self, Ctx};
+use crate::pages::{self, Band, Ctx};
 use crate::sprite::{Blurs, Sprite};
 use crate::search;
 use crate::term::{self, Term, TermKey};
@@ -2656,7 +2656,7 @@ impl App {
         if self.frame.is_none() {
             let t = self.theme();
             let screen = self.screen();
-            let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref() };
+            let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: None };
             let frame = pages::render(screen, &cx);
             self.height = frame.height(&t);
             self.frame = Some(frame);
@@ -2720,15 +2720,16 @@ impl App {
         }
         let slide = self.slid(now);
         // The row a finger holds, drawn once more as held down when it
-        // starts darkening: a finger that moves on before then never waits
-        // for it.
+        // starts darkening, and only that row: a finger that moves on
+        // before then never waits for it.
         if let (Some(press), None) = (self.row_press.filter(|p| now >= p.rise), &self.row_art) {
-            let pressed = t.pressed();
-            let cx = Ctx { t: &pressed, f, info, state: &self.state, term: self.term.as_ref() };
-            let down = pages::render(screen, &cx).canvas;
             let page = &self.frame.as_ref().expect("rendered above").canvas;
-            assert_eq!((down.w, down.h), (page.w, page.h), "a page held down is laid out as it was");
             let (x, y, w, h) = row_part(press.rect, page);
+            let pressed = t.pressed();
+            let band = Band { rows: (y, y + h), cols: (x, x + w) };
+            let cx = Ctx { t: &pressed, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
+            let down = pages::render(screen, &cx).canvas;
+            assert_eq!((down.w, down.h), (page.w, page.h), "a page held down is laid out as it was");
             self.row_art = Some((page.crop(x, y, w, h), down.crop(x, y, w, h)));
         }
         let scroll = self.top().1;
@@ -2862,9 +2863,8 @@ impl App {
                         None => {
                             let (f, info) = fresh.expect("a page drawn again as it last showed has its rows in view drawn");
                             let mut c = self.spare.pop().unwrap_or_else(|| Canvas::new(out.w, 0));
-                            c.h = (rows.edges[i + 1] - rows.edges[i]) as u32;
-                            c.data.resize((c.w * c.h * 4) as usize, 0);
-                            let cx = Ctx { t, f, info, state: &self.state, term: self.term.as_ref() };
+                            c.resize((rows.edges[i + 1] - rows.edges[i]) as u32);
+                            let cx = Ctx { t, f, info, state: &self.state, term: self.term.as_ref(), band: None };
                             pages::row(screen, &cx, i, &mut c);
                             self.drawn.push((i, c));
                             self.drawn.len() - 1
@@ -4666,6 +4666,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_page_drawn_a_band_at_a_time_is_the_page_drawn_whole() {
+        let (f, i) = (fonts(), info());
+        let state = State::default();
+        // The About page lies over its field and is drawn whole.
+        let screens = [
+            Screen::Decrypt,
+            Screen::Home,
+            Screen::Settings,
+            Screen::Reboot,
+            Screen::Wipe,
+            Screen::Mount,
+            Screen::Install,
+            Screen::Choose(Place::Storage),
+            Screen::Specs,
+            Screen::ScreenOff,
+            Screen::Search,
+            Screen::Backup,
+            Screen::Restore,
+            Screen::Advanced,
+            Screen::Files,
+            Screen::Terminal,
+            Screen::Language,
+            Screen::TimeZone,
+            Screen::Logs,
+            Screen::Update,
+            Screen::License,
+            Screen::FontLicense,
+            Screen::Slot,
+            Screen::Fastboot,
+            Screen::Erase,
+            Screen::CantStart,
+            Screen::Unhandled,
+        ];
+        for t in [Theme::light(W, H, PPD), Theme::dark(W, H, PPD).pressed()] {
+            for screen in screens {
+                let cx = |band| Ctx { t: &t, f: &f, info: &i, state: &state, term: None, band };
+                let whole = pages::render(screen, &cx(None)).canvas;
+                let row = whole.w as usize * 4;
+                let differs = |c: &Canvas| c.data.chunks(row).zip(whole.data.chunks(row)).position(|(a, b)| a != b);
+                // Cuts through cards, text and icons, and a band one row
+                // tall, the bands joined one under another.
+                let mut cuts: Vec<u32> = [0, 1, 377, 1201, 3000, 3001, 4444, u32::MAX].map(|k| k.min(whole.h)).to_vec();
+                cuts.dedup();
+                let mut joined: Option<Canvas> = None;
+                for rows in cuts.windows(2) {
+                    let part = pages::render(screen, &cx(Some(Band { rows: (rows[0], rows[1]), cols: (0, W) }))).canvas;
+                    assert_eq!((part.h, part.held()), (whole.h, rows[0]..rows[1]), "{screen:?}: a band is laid out as the whole");
+                    match &mut joined {
+                        Some(c) => c.join(&part),
+                        None => joined = Some(part),
+                    }
+                }
+                let joined = joined.expect("a page has rows");
+                assert!(joined.whole(), "{screen:?}: the bands make the whole");
+                assert_eq!(differs(&joined), None, "{screen:?}: the first row drawn otherwise in bands");
+                // The page drawn across a part at a time, as one sliding
+                // in, into a canvas holding all of it: cuts through cards
+                // and text, and a part one column wide.
+                let mut across = Canvas::unfilled(W, whole.h, 0..whole.h);
+                for cols in [0, 1, 333, 720, W - 1, W].windows(2) {
+                    let part = pages::render(screen, &cx(Some(Band { rows: (0, whole.h), cols: (cols[0], cols[1]) }))).canvas;
+                    assert_eq!(part.cols(), cols[0]..cols[1], "{screen:?}: a part across holds its columns");
+                    across.replace(&part);
+                }
+                assert_eq!(differs(&across), None, "{screen:?}: the first row drawn otherwise across");
+            }
+        }
+    }
+
     /// Where on screen the first control doing `action` sits.
     /// Where on screen the control doing `action` is: among the page's
     /// controls, on its pinned strip, or a row of its long list.
@@ -4863,7 +4933,7 @@ mod tests {
 
     /// A copy of the screen.
     fn shot(c: &Canvas) -> Canvas {
-        Canvas { w: c.w, h: c.h, data: c.data.clone() }
+        c.clone()
     }
 
     /// How a slide opening a page, or going `back`, stands `ms` into it:
