@@ -1,4 +1,4 @@
-use skyward_lp::{read, Extent, Geometry, ATTR_READONLY, ATTR_UPDATED, HEADER_FLAG_VIRTUAL_AB_DEVICE};
+use skyward_lp::{read, read_image, Extent, Geometry, ATTR_READONLY, ATTR_UPDATED, HEADER_FLAG_VIRTUAL_AB_DEVICE};
 use std::path::{Path, PathBuf};
 
 /// The first 405504 bytes of the super partition of a Xiaomi 13 Ultra on
@@ -91,6 +91,25 @@ fn both_geometry_copies_damaged_is_an_error() {
     let md = read(&path, 1);
     std::fs::remove_file(&path).unwrap();
     assert!(format!("{:#}", md.unwrap_err()).contains("both geometry copies"));
+}
+
+#[test]
+fn an_image_file_keeps_the_geometry_then_one_copy_of_the_metadata() {
+    // Laid out as liblp writes an image file: the geometry block, then the
+    // header and its tables with nothing after them.
+    let data = std::fs::read(fixture()).unwrap();
+    let header_size = u32::from_le_bytes(data[PRIMARY_SLOT_1 + 8..PRIMARY_SLOT_1 + 12].try_into().unwrap()) as usize;
+    let tables_size = u32::from_le_bytes(data[PRIMARY_SLOT_1 + 44..PRIMARY_SLOT_1 + 48].try_into().unwrap()) as usize;
+    let mut image = data[PRIMARY_GEOMETRY..PRIMARY_GEOMETRY + 4096].to_vec();
+    image.extend_from_slice(&data[PRIMARY_SLOT_1..PRIMARY_SLOT_1 + header_size + tables_size]);
+    let path = std::env::temp_dir().join(format!("skyward-lp-image-{}", std::process::id()));
+    std::fs::write(&path, &image).unwrap();
+    let read_back = read_image(&path);
+    std::fs::write(&path, &image[..image.len() - 1]).unwrap();
+    let cut = read_image(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(read_back.unwrap(), read(fixture(), 1).unwrap());
+    assert!(format!("{:#}", cut.unwrap_err()).contains("tables run past"), "an image cut short");
 }
 
 #[test]

@@ -230,16 +230,26 @@ pub fn read(super_dev: &Path, slot: u32) -> Result<Metadata> {
     );
 
     let size = geometry.metadata_max_size as usize;
-    let mut metadata = match parse_metadata(&geometry, &at(geometry.primary_offset(slot), size)?, slot) {
+    let mut metadata = match parse_metadata(&geometry, &at(geometry.primary_offset(slot), size)?, Some(slot)) {
         Ok(m) => m,
         Err(e) => {
             damaged.push(format!("primary metadata for slot {slot}: {e:#}"));
-            parse_metadata(&geometry, &at(geometry.backup_offset(slot), size)?, slot)
+            parse_metadata(&geometry, &at(geometry.backup_offset(slot), size)?, Some(slot))
                 .with_context(|| format!("both metadata copies for slot {slot} are damaged; primary: {e:#}"))?
         }
     };
     metadata.damaged = damaged;
     Ok(metadata)
+}
+
+/// Read metadata kept in a file of its own, as libfiemap keeps where its
+/// images lie on the data partition: the geometry, then a single copy of
+/// the metadata, its names taken as they are.
+pub fn read_image(path: &Path) -> Result<Metadata> {
+    let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let geometry = data.get(..GEOMETRY_SIZE as usize).with_context(|| format!("{} ends inside its geometry", path.display()))?;
+    let geometry = Geometry::parse(geometry).with_context(|| format!("read the geometry of {}", path.display()))?;
+    parse_metadata(&geometry, &data[GEOMETRY_SIZE as usize..], None).with_context(|| format!("read the metadata of {}", path.display()))
 }
 
 impl Geometry {
@@ -309,11 +319,10 @@ fn name(field: &[u8; NAME_LEN]) -> Result<String> {
     String::from_utf8(field[..end].to_vec()).map_err(|_| anyhow!("name {:?} is not text", &field[..end]))
 }
 
-/// Names flagged as slot-suffixed (retrofit devices) get the slot's suffix.
-fn suffixed(name: String, flagged: bool, slot: u32) -> Result<String> {
-    if !flagged {
-        return Ok(name);
-    }
+/// Names flagged as slot-suffixed (retrofit devices) get the suffix of the
+/// slot read, where one is.
+fn suffixed(name: String, flagged: bool, slot: Option<u32>) -> Result<String> {
+    let Some(slot) = slot.filter(|_| flagged) else { return Ok(name) };
     let suffix = match slot {
         0 => "_a",
         1 => "_b",
@@ -324,7 +333,7 @@ fn suffixed(name: String, flagged: bool, slot: u32) -> Result<String> {
     Ok(full)
 }
 
-fn parse_metadata(geometry: &Geometry, buf: &[u8], slot: u32) -> Result<Metadata> {
+fn parse_metadata(geometry: &Geometry, buf: &[u8], slot: Option<u32>) -> Result<Metadata> {
     ensure!(buf.len() >= size_of::<RawHeader>(), "short metadata copy");
     let mut header = RawHeader::new_zeroed();
     header.as_mut_bytes()[..HEADER_V1_0_SIZE].copy_from_slice(&buf[..HEADER_V1_0_SIZE]);
