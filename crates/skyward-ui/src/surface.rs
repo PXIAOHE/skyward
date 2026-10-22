@@ -323,7 +323,7 @@ pub mod kms {
         Ok(c)
     }
 
-    /// Direct scanout on the built-in panel: its preferred mode on the CRTC
+    /// Direct scanout on the built-in panel: its fastest mode on the CRTC
     /// driving it, two dumb buffers swapped on one primary plane, and every
     /// other connector and plane taken off that CRTC.
     pub struct KmsSurface {
@@ -469,6 +469,7 @@ pub mod kms {
             }
             let crtc_props = Props::read(&card, crtc)?;
             let blob = card.create_property_blob(&mode).context("create mode blob")?;
+            let first = card.create_property_blob(preferred).context("create mode blob")?;
             req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
             // The mode is DSC-compressed: select its DSC variant, as Android's
             // compositor does.
@@ -482,7 +483,7 @@ pub mod kms {
             if let Ok((id, _)) = conn_props.get("frame_trigger_mode") {
                 req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "posted_start")?));
             }
-            req.add_property(crtc, crtc_props.handle("MODE_ID")?, blob);
+            req.add_property(crtc, crtc_props.handle("MODE_ID")?, first);
             req.add_property(crtc, crtc_props.handle("ACTIVE")?, property::Value::Boolean(true));
             for &other in attached.iter().filter(|&&p| !candidates.iter().any(|c| c.0 == p)) {
                 let props = Props::read(&card, other)?;
@@ -506,7 +507,18 @@ pub mod kms {
                 req.add_property(*plane, props.handle("CRTC_H")?, property::Value::UnsignedRange(h as u64));
                 planes.push((*plane, fb_prop));
             }
+            // The panel comes up in its preferred mode, then switches to the
+            // fastest. Powered up in the fast mode directly, the display
+            // controller runs at the fast rate but the panel keeps its own:
+            // the 13 Ultra's sends its TE at 60 Hz, and every frame waits two
+            // TEs. Switching a running panel sends it the commands for the
+            // new rate, as Android's switches do.
             commit(&card, req, AtomicCommitFlags::ALLOW_MODESET).context("set the panel mode")?;
+            if mode.vrefresh() != preferred.vrefresh() {
+                let mut req = atomic::AtomicModeReq::new();
+                req.add_property(crtc, crtc_props.handle("MODE_ID")?, blob);
+                commit(&card, req, AtomicCommitFlags::ALLOW_MODESET).context("switch the panel to its fastest refresh")?;
+            }
 
             let ids: Vec<u32> = planes.iter().map(|p| u32::from(p.0)).collect();
             let summary = format!(
