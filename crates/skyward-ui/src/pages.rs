@@ -1068,15 +1068,18 @@ fn keyboard_hits(c: &mut Canvas, t: &Theme, f: &Fonts, s: &State, enter: &str, o
     top
 }
 
-/// Finding a feature or partition: the field where the title would be,
-/// what it finds, and the keyboard.
+/// Finding a feature or partition: the field where the title would be, the
+/// button that leaves the search beside it, what it finds, and the
+/// keyboard.
 pub fn search(cx: &Ctx) -> Frame {
     let (t, f, s) = (cx.t, cx.f, cx.state);
     let m = &t.m;
     let mut c = page(t);
     let mut out = Vec::new();
-    let x = m.back_x + m.back_w + m.dp(18.0);
-    let field = widgets::search_field(&mut c, t, f, x, m.w as f32 - m.margin - x, m.back_cy, &s.search, "搜索功能与分区");
+    let (at, cancel) = widgets::search_layout(t);
+    let field = widgets::search_field(&mut c, t, f, at.x, at.w, at.y + at.h / 2.0, &s.search, "搜索功能与分区");
+    widgets::cancel_button(&mut c, t, cancel);
+    out.push(Hit { rect: cancel, action: Action::CloseSearch });
     let top = field.field.y + field.field.h + m.dp(12.0);
     let kb_top = m.h as f32 - widgets::keyboard_height(t);
     if s.search.trim().is_empty() {
@@ -1098,7 +1101,7 @@ pub fn search(cx: &Ctx) -> Frame {
     if let Some(rect) = field.clear {
         out.push(Hit { rect, action: Action::ClearSearch });
     }
-    Frame { header: false, caret: Some(field.caret), ..Frame::new(t, c, out, "搜索", 0.0) }
+    Frame { back: false, header: false, caret: Some(field.caret), ..Frame::new(t, c, out, "搜索", 0.0) }
 }
 
 /// Backing up: what to take, where it goes, and how.

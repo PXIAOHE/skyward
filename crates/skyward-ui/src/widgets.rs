@@ -679,6 +679,42 @@ pub struct Caret {
 const CARET_W_DP: f32 = 2.0;
 const CARET_RADIUS_DP: f32 = 0.35;
 
+/// The search page, as the stock one lays it out: how far down its field
+/// stands, and the round button beside it that leaves the search, its
+/// distance from the screen's edge and from the field, and its cross.
+const SEARCH_TOP_DP: f32 = 51.7;
+const CANCEL_RIGHT_DP: f32 = 14.0;
+const CANCEL_GAP_DP: f32 = 10.0;
+const CANCEL_ARM_DP: f32 = 8.0;
+const CANCEL_STROKE_DP: f32 = 1.8;
+
+/// Where the search page puts its field and the button that leaves the
+/// search.
+pub fn search_layout(t: &Theme) -> (Rect, Rect) {
+    let m = &t.m;
+    let (top, d) = (m.dp(SEARCH_TOP_DP), m.search_h);
+    let cancel = Rect::new(m.w as f32 - m.dp(CANCEL_RIGHT_DP) - d, top, d, d);
+    (Rect::new(m.margin, top, cancel.x - m.dp(CANCEL_GAP_DP) - m.margin, d), cancel)
+}
+
+/// The round button that leaves the search, in `r`.
+pub fn cancel_button(c: &mut Canvas, t: &Theme, r: Rect) {
+    draw_disc(c, r, t.pal.search);
+    draw_cross(c, t, r, t.pal.text);
+}
+
+fn draw_disc(c: &mut Canvas, r: Rect, color: Rgba) {
+    let (cx, cy) = r.centre();
+    c.fill_circle(cx, cy, r.w / 2.0, color);
+}
+
+fn draw_cross(c: &mut Canvas, t: &Theme, r: Rect, color: Rgba) {
+    let m = &t.m;
+    let ((cx, cy), arm, stroke) = (r.centre(), m.dp(CANCEL_ARM_DP), m.dp(CANCEL_STROKE_DP));
+    c.line(cx - arm, cy - arm, cx + arm, cy + arm, stroke, color);
+    c.line(cx - arm, cy + arm, cx + arm, cy - arm, stroke, color);
+}
+
 /// The search bar opened for typing, from `x` across `w` and centred on
 /// `cy`: the text typed so far, or the placeholder, a button that clears
 /// the text, and the cursor where the typing goes.

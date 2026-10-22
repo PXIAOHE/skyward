@@ -791,6 +791,8 @@ pub enum Action {
     TermKey(TermKey),
     /// Empty the search field.
     ClearSearch,
+    /// Leave the search, by the round button beside its field.
+    CloseSearch,
     /// Open the file manager's entry at this place in the folder.
     OpenEntry(usize),
     /// Open the entry at this place in a place's folder: a folder to look
@@ -2877,7 +2879,7 @@ impl App {
                 self.settle_page();
                 self.refresh();
             }
-            Action::Back => return self.back(now),
+            Action::Back | Action::CloseSearch => return self.back(now),
             Action::Theme { dark } => {
                 if self.state.dark != dark {
                     self.state.dark = dark;
@@ -4256,8 +4258,8 @@ mod tests {
         tap(&mut app, &f, &i, Action::Type(Cap::Char('b')));
         assert!(shows(&mut app, 2700), "an edit brings it back whole at once");
         assert!(!shows(&mut app, 3200));
-        tap_back(&mut app, &f, &i, 0);
-        assert_eq!(app.screen(), Screen::Home);
+        tap(&mut app, &f, &i, Action::CloseSearch);
+        assert_eq!(app.screen(), Screen::Home, "the round button leaves the search");
         assert!(!shows(&mut app, 3300), "no cursor off the page");
         assert!(app.deadline(3300).is_none_or(|d| d > 10_000), "nor a wake for it, only for the screen going off");
     }

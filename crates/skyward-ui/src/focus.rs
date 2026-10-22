@@ -114,7 +114,9 @@ pub fn lit(t: &Theme, stop: Stop, r: Rect, keypad: bool) -> (Rect, f32) {
         Stop::Hit(Action::TermKey(_)) => (r, m.dp(crate::term::KEY_RADIUS_DP)),
         // The swipe and brightness tracks and the buttons are tinted
         // already, and lit as a halo round them.
-        Stop::Hit(Action::Confirm(_) | Action::Brightness | Action::OpenData | Action::ExportLogs | Action::Unpick | Action::Paste) => {
+        Stop::Hit(
+            Action::Confirm(_) | Action::Brightness | Action::OpenData | Action::ExportLogs | Action::Unpick | Action::Paste | Action::CloseSearch,
+        ) => {
             let halo = m.dp(HALO_DP);
             (Rect::new(r.x - halo, r.y - halo, r.w + halo * 2.0, r.h + halo * 2.0), r.h / 2.0 + halo)
         }
