@@ -110,6 +110,14 @@ impl Canvas {
         Self { w, h, data, top, bottom, left: 0, span: w }
     }
 
+    /// Keep memory for `n` canvases `w` × `h`, written to once, for the
+    /// first canvases drawn on to take without the kernel mapping it a page
+    /// at a time as they are.
+    pub fn keep_ready(w: u32, h: u32, n: usize) {
+        let canvases: Vec<Canvas> = (0..n).map(|_| Canvas::new(w, h)).collect();
+        drop(canvases);
+    }
+
     /// The rows the canvas holds.
     pub fn held(&self) -> std::ops::Range<u32> {
         self.top..self.bottom

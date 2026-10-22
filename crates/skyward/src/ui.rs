@@ -794,6 +794,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mounts = || read_mounts(&cfg.services).map_err(|e| format!("{e:#}"));
 
     let mut screen = Canvas::new(w, h);
+    // A page sliding over another draws on three screens' worth of canvas
+    // besides the panel's: made ready now, the first slide finds them so.
+    Canvas::keep_ready(w, h, 3);
     let mut shown_clock = String::new();
     // The readings are taken again on a thread of their own; those taken
     // here as work ends say how it left the phone, and readings started
