@@ -23,6 +23,13 @@ pub fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
     Rgba { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }
 }
 
+/// `top` laid over `under`, both straight alpha.
+pub fn over(top: Rgba, under: Rgba) -> Rgba {
+    let mut px = [under.r, under.g, under.b, under.a];
+    blend_over(&mut px, top, 1.0);
+    Rgba { r: px[0], g: px[1], b: px[2], a: px[3] }
+}
+
 /// Source-over composite of `src` (with an extra coverage `cov` in 0..=1) onto
 /// `dst` (a 4-byte RGBA slice), straight alpha.
 pub fn blend_over(dst: &mut [u8], src: Rgba, cov: f32) {

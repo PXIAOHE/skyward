@@ -121,6 +121,64 @@ impl Canvas {
         }
     }
 
+    /// Where `layer` was laid with its top-left corner at (`x`, `y`), show
+    /// `now` instead, `level` of the way: as if `now` had been laid there
+    /// over what `layer` covered. `now` is as big as `layer` and covers
+    /// wholly wherever `layer` does.
+    pub fn relay(&mut self, layer: &Canvas, now: &Canvas, x: i32, y: i32, level: f32) {
+        assert_eq!((layer.w, layer.h), (now.w, now.h), "the two layers are one size");
+        if level <= 0.0 {
+            return;
+        }
+        let (k, k8) = (level.min(1.0), (level.min(1.0) * 256.0).round() as i32);
+        let (lw, sw) = (layer.w as i32, self.w as i32);
+        let (x0, x1) = ((-x).max(0), (sw - x).min(lw));
+        for ly in 0..layer.h as i32 {
+            let py = y + ly;
+            if py < 0 || py >= self.h as i32 || x0 >= x1 {
+                continue;
+            }
+            let (from, to) = (((ly * lw + x0) * 4) as usize, ((ly * lw + x1) * 4) as usize);
+            let start = ((py * sw + x + x0) * 4) as usize;
+            let dst = &mut self.data[start..start + to - from];
+            let pairs = layer.data[from..to].as_chunks::<4>().0.iter().zip(now.data[from..to].as_chunks::<4>().0);
+            for ((was, is), d) in pairs.zip(dst.as_chunks_mut::<4>().0) {
+                if was == is {
+                    continue;
+                }
+                if was[3] == 255 {
+                    for c in 0..3 {
+                        let o = d[c] as i32;
+                        d[c] = (o + (((is[c] as i32 - o) * k8 + 128) >> 8)) as u8;
+                    }
+                    continue;
+                }
+                // What lay under the layer comes back from what it made
+                // of it.
+                let (wa, na) = (was[3] as f32 / 255.0, is[3] as f32 / 255.0);
+                for c in 0..3 {
+                    let o = d[c] as f32;
+                    let under = (o - was[c] as f32 * wa) / (1.0 - wa);
+                    let target = is[c] as f32 * na + under * (1.0 - na);
+                    d[c] = (o + (target - o) * k).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    /// A copy of the `w` × `h` pixels from (`x`, `y`), which lie on this
+    /// canvas.
+    pub fn crop(&self, x: u32, y: u32, w: u32, h: u32) -> Canvas {
+        assert!(x + w <= self.w && y + h <= self.h, "the part cropped lies on the canvas");
+        let mut out = Canvas::new(w, h);
+        let (row, part) = (self.w as usize * 4, w as usize * 4);
+        for (k, dst) in out.data.chunks_exact_mut(part).enumerate() {
+            let at = (y as usize + k) * row + x as usize * 4;
+            dst.copy_from_slice(&self.data[at..at + part]);
+        }
+        out
+    }
+
     /// Copy the opaque `strip`, as wide as this canvas, over it with its top
     /// row at `y`; rows past either edge are left out.
     pub fn put(&mut self, strip: &Canvas, y: i32) {
@@ -548,6 +606,45 @@ mod tests {
         let mut c = Canvas::new(2, 4);
         c.put_rows(&src, 6, 10, -1);
         assert_eq!(greys(&c), [7, 8, 9, 0], "rows above this canvas's top are left out");
+    }
+
+    #[test]
+    fn a_layer_laid_again_in_place_shows_what_the_other_would_have_over_the_same_ground() {
+        // A pixel of card and one of a black word on it, over a field that
+        // is not one grey; then the card darker, opaque as the settings'
+        // cards are and see-through as the About page's dark ones are.
+        let card = |grey: u8, a: u8| {
+            let mut c = Canvas::new(2, 1);
+            c.data.copy_from_slice(&[grey, grey, grey, a, 0, 0, 0, 255]);
+            c
+        };
+        for (was, is) in [(card(255, 255), card(225, 255)), (card(255, 36), card(255, 62))] {
+            let ground = |c: &mut Canvas| c.data.copy_from_slice(&[20, 20, 20, 255, 90, 90, 90, 255]);
+            let (mut shown, mut wanted) = (Canvas::new(2, 1), Canvas::new(2, 1));
+            ground(&mut shown);
+            ground(&mut wanted);
+            shown.lay(&was, 0, 0, 1.0);
+            wanted.lay(&is, 0, 0, 1.0);
+            let before = shown.data.clone();
+            shown.relay(&was, &is, 0, 0, 1.0);
+            for (k, (&got, &want)) in shown.data.iter().zip(&wanted.data).enumerate() {
+                assert!(got.abs_diff(want) <= 1, "byte {k}: {got} for {want}");
+            }
+            assert_eq!(shown.data[4..7], before[4..7], "the word is as it was");
+            let mut half = Canvas::new(2, 1);
+            half.data.copy_from_slice(&before);
+            half.relay(&was, &is, 0, 0, 0.5);
+            let mid = (before[0] as f32 + wanted.data[0] as f32) / 2.0;
+            assert!((half.data[0] as f32 - mid).abs() <= 1.0, "half way: {} for {mid}", half.data[0]);
+        }
+    }
+
+    #[test]
+    fn a_crop_copies_the_part_asked_for() {
+        let src = graded(6);
+        let part = src.crop(1, 2, 1, 3);
+        assert_eq!((part.w, part.h), (1, 3));
+        assert_eq!(part.data.chunks(4).map(|p| p[0]).collect::<Vec<_>>(), [2, 3, 4]);
     }
 }
 

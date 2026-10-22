@@ -1,5 +1,5 @@
 use crate::canvas::Canvas;
-use crate::color::{blend_over, mix, Rgba};
+use crate::color::{blend_over, mix, over, Rgba};
 use crate::font::{Face, Fonts};
 use crate::geom::Rect;
 use crate::sprite::Sprite;
@@ -399,8 +399,13 @@ fn battery(t: &Theme, f: &Fonts, level: u8, plugged: bool, right: f32, cy: f32) 
 
 /// The `<` back control.
 pub fn back_arrow(c: &mut Canvas, t: &Theme, color: Rgba) {
+    arrow_at(c, t, 0.0, 0.0, color);
+}
+
+/// The `<` moved by (`dx`, `dy`).
+fn arrow_at(c: &mut Canvas, t: &Theme, dx: f32, dy: f32, color: Rgba) {
     let m = &t.m;
-    let (x, cy, w, h, sw) = (m.back_x, m.back_cy, m.back_w, m.back_h, m.back_stroke);
+    let (x, cy, w, h, sw) = (m.back_x + dx, m.back_cy + dy, m.back_w, m.back_h, m.back_stroke);
     let (tip, end) = (x + sw / 2.0, x + w - sw / 2.0);
     c.line(tip, cy, end, cy - h / 2.0 + sw / 2.0, sw, color);
     c.line(tip, cy, end, cy + h / 2.0 - sw / 2.0, sw, color);
@@ -701,6 +706,39 @@ pub fn search_layout(t: &Theme) -> (Rect, Rect) {
 pub fn cancel_button(c: &mut Canvas, t: &Theme, r: Rect) {
     draw_disc(c, r, t.pal.search);
     draw_cross(c, t, r, t.pal.text);
+}
+
+/// How strongly `<` and the cross of the search page's round button show
+/// while held down, sampled from the stock settings: black at 61% and at
+/// 66% in the light theme.
+const BACK_HELD_ALPHA: u8 = 156;
+const CANCEL_HELD_ALPHA: u8 = 168;
+
+/// The `<` held down: a disc darkening what is behind it, and the `<`
+/// lighter on it. The see-through `<` is inked once where its strokes
+/// meet, as one shape.
+pub fn back_held(c: &mut Canvas, t: &Theme) {
+    let (cx, cy, r) = back_disc(t);
+    c.fill_circle(cx, cy, r, t.pal.button_press);
+    let side = (r * 2.0).ceil() as u32 + 2;
+    let arrow = Sprite::capture(cx - r - 1.0, cy - r - 1.0, side, side, |c, dx, dy| arrow_at(c, t, dx, dy, Rgba::rgb(0, 0, 0)));
+    arrow.draw(c, 0.0, 0.0, t.pal.text, BACK_HELD_ALPHA as f32 / 255.0);
+}
+
+/// The round button that leaves the search held down, in `r`: its disc
+/// darker and its cross lighter, inked once where its strokes cross.
+pub fn cancel_held(c: &mut Canvas, t: &Theme, r: Rect) {
+    draw_disc(c, r, over(t.pal.button_press, t.pal.search));
+    let cross = Sprite::capture(r.x, r.y, r.w.ceil() as u32 + 1, r.h.ceil() as u32 + 1, |c, dx, dy| {
+        draw_cross(c, t, Rect::new(r.x + dx, r.y + dy, r.w, r.h), Rgba::rgb(0, 0, 0))
+    });
+    cross.draw(c, 0.0, 0.0, t.pal.text, CANCEL_HELD_ALPHA as f32 / 255.0);
+}
+
+/// The home page's search bar held down, in `r`: darker, its words and
+/// icon with it.
+pub fn search_bar_held(c: &mut Canvas, t: &Theme, r: Rect) {
+    c.fill_round_rect(r.x, r.y, r.w, r.h, r.h / 2.0, t.pal.button_press);
 }
 
 fn draw_disc(c: &mut Canvas, r: Rect, color: Rgba) {

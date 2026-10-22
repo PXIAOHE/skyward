@@ -1363,6 +1363,17 @@ const MORPH_CANCEL_BLUR_DP: f32 = 8.0;
 /// When what the search page shows under its field comes in after the move
 /// starts, and how long it takes, in ms.
 const MORPH_BODY_MS: (u64, u64) = (380, 120);
+/// A row a finger lands on starts darkening this long after, as the stock
+/// settings' rows do; a finger moving on before then scrolls the page, and
+/// the row never shows pressed.
+const ROW_PRESS_DELAY_MS: u64 = 90;
+/// The spring a row held down darkens on, and fades back on once let go:
+/// critically damped, fitted to frames of the stock settings on a Xiaomi
+/// 17 Ultra.
+const ROW_PRESS_PERIOD: f32 = 0.18;
+/// A row let go before it showed pressed shows pressed from the lift this
+/// long, as Android shows a quick tap.
+const QUICK_TAP_MS: u64 = 64;
 /// The most lines of what an install script shows that its page keeps,
 /// the latest; the log keeps them all.
 const SCRIPT_LINES: usize = 500;
@@ -1586,6 +1597,66 @@ impl Morph {
     }
 }
 
+/// A row of the page under a finger, darkening behind its words and icon:
+/// where it lies on the page, when it starts darkening, and when it starts
+/// fading back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RowPress {
+    rect: Rect,
+    rise: u64,
+    fall: Option<u64>,
+}
+
+impl RowPress {
+    /// How dark the row is at `now`, from 0 to 1.
+    fn level(&self, now: u64) -> f32 {
+        if now < self.rise {
+            return 0.0;
+        }
+        let up = |t: u64| motion::settle(t - self.rise, ROW_PRESS_PERIOD);
+        match self.fall {
+            Some(fall) if now >= fall => up(fall) * (1.0 - motion::settle(now - fall, ROW_PRESS_PERIOD)),
+            _ => up(now),
+        }
+    }
+
+    /// Whether it has faded back after being let go.
+    fn gone(&self, now: u64) -> bool {
+        self.fall.is_some_and(|fall| now >= fall && motion::settle(now - fall, ROW_PRESS_PERIOD) == 1.0)
+    }
+
+    /// Whether it is darkening or fading back at `now`.
+    fn changing(&self, now: u64) -> bool {
+        let dark = self.fall.is_none() && now >= self.rise && motion::settle(now - self.rise, ROW_PRESS_PERIOD) == 1.0;
+        now >= self.rise && !dark && !self.gone(now)
+    }
+
+    /// The finger lifted at `now`: a row that had not shown pressed yet
+    /// shows it a moment.
+    fn lift(&mut self, now: u64) {
+        if now < self.rise {
+            self.rise = now;
+            self.fall = Some(now + QUICK_TAP_MS);
+        } else {
+            self.fall = Some(now);
+        }
+    }
+}
+
+/// Whether a control is a row: as wide as the cards it lies on.
+fn row_wide(t: &Theme, r: Rect) -> bool {
+    let m = &t.m;
+    (r.x - m.margin).abs() < 0.5 && (r.w - (m.w as f32 - m.margin * 2.0)).abs() < 0.5
+}
+
+/// The whole pixels of the page's `canvas` a held row's `rect` covers:
+/// left, top, width and height.
+fn row_part(r: Rect, canvas: &Canvas) -> (u32, u32, u32, u32) {
+    let (x0, y0) = (r.x.floor().max(0.0) as u32, r.y.floor().max(0.0) as u32);
+    let (x1, y1) = (((r.x + r.w).ceil() as u32).min(canvas.w), ((r.y + r.h).ceil() as u32).min(canvas.h));
+    (x0, y0, x1 - x0, y1 - y0)
+}
+
 /// The keyboard at the foot of a typing page's `frame`, and where it rests.
 fn keyboard_strip(t: &Theme, frame: &Frame) -> (Canvas, i32) {
     let top = (t.m.h as f32 - widgets::keyboard_height(t)).floor() as i32;
@@ -1679,6 +1750,10 @@ pub struct App {
     /// The home page's search bar on its way to the search page's field,
     /// or back.
     morph: Option<Morph>,
+    /// The row a finger holds down, or let go of while it fades back, and
+    /// the part of the page it lies on as drawn and as drawn held down.
+    row_press: Option<RowPress>,
+    row_art: Option<(Canvas, Canvas)>,
     dirty: bool,
     w: u32,
     h: u32,
@@ -1725,6 +1800,8 @@ impl App {
             edits: 0,
             caret_shown: false,
             morph: None,
+            row_press: None,
+            row_art: None,
             dirty: true,
             w,
             h,
@@ -1772,10 +1849,12 @@ impl App {
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
+                || self.row_press.is_some_and(|p| p.changing(now) || p.gone(now))
                 || self.glowing());
         if moving {
             return Some(0);
         }
+        let darkens = self.row_press.map(|p| p.rise).filter(|&rise| rise > now);
         let easing = self.bright.moving(now).then_some(now + BACKLIGHT_STEP_MS);
         let held = match self.drag {
             Drag::Press { action: Some(Action::OpenEntry(_)), at, .. } => Some(at + LONG_PRESS_MS),
@@ -1787,7 +1866,7 @@ impl App {
             _ => None,
         };
         let blink = self.blink_at(now).filter(|_| self.display_on).map(|(_, next)| next);
-        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink].into_iter().flatten().min()
+        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink, darkens].into_iter().flatten().min()
     }
 
     /// Whether a text field's cursor shows at `now`, and when it next turns;
@@ -1858,6 +1937,15 @@ impl App {
         }
         if self.blink_at(now).is_some_and(|(on, _)| on != self.caret_shown) || self.morph.is_some() {
             self.dirty = true;
+        }
+        if let Some(p) = self.row_press {
+            if p.gone(now) {
+                self.row_press = None;
+                self.row_art = None;
+                self.dirty = true;
+            } else if p.changing(now) {
+                self.dirty = true;
+            }
         }
         if let Some(fling) = self.fling {
             let (y, done) = fling.at(now);
@@ -2036,6 +2124,8 @@ impl App {
         self.pull = 0.0;
         self.cue = None;
         self.morph = None;
+        self.row_press = None;
+        self.row_art = None;
     }
 
     /// Something laid over the page changed (the clock): compose again.
@@ -2048,6 +2138,7 @@ impl App {
         self.frame = None;
         self.spots = None;
         self.knob = None;
+        self.row_art = None;
         self.spare.extend(self.drawn.drain(..).map(|(_, c)| c));
         self.dirty = true;
     }
@@ -2539,6 +2630,19 @@ impl App {
             let (art, x, y) = widgets::back_chip(&t);
             self.chip = Some((t.dark, art, x, y));
         }
+        // The row a finger holds, drawn once more as held down when it
+        // starts darkening: a finger that moves on before then never waits
+        // for it.
+        if let (Some(press), None) = (self.row_press.filter(|p| now >= p.rise), &self.row_art) {
+            let pressed = t.pressed();
+            let cx = Ctx { t: &pressed, f, info, state: &self.state, term: self.term.as_ref() };
+            let down = pages::render(screen, &cx).canvas;
+            let page = &self.frame.as_ref().expect("rendered above").canvas;
+            assert_eq!((down.w, down.h), (page.w, page.h), "a page held down is laid out as it was");
+            let (x, y, w, h) = row_part(press.rect, page);
+            self.row_art = Some((page.crop(x, y, w, h), down.crop(x, y, w, h)));
+        }
+        let pressing = self.pressing();
         let scroll = self.top().1;
         let offset = (scroll + self.overscroll(now)).round();
         let light = self.light(offset);
@@ -2553,6 +2657,14 @@ impl App {
         };
         let frame = self.frame.as_ref().expect("rendered above");
         let (_, big, small) = self.titles.as_mut().expect("drawn above");
+        // The row a finger holds darkens as part of the page, under what is
+        // laid over the page.
+        let press_row = |out: &mut Canvas| {
+            if let (Some(press), Some((was, is))) = (self.row_press, &self.row_art) {
+                let (x, y, _, _) = row_part(press.rect, &frame.canvas);
+                out.relay(was, is, x as i32, y as i32 - offset as i32, press.level(now));
+            }
+        };
 
         if let Some(art) = &frame.hero {
             // The field fills the screen and fades as the page scrolls; the
@@ -2564,6 +2676,7 @@ impl App {
             let field = glow::sample(glow, out.w as usize, out.h as usize, FIELD_CELL, top, t.pal.bg, fade);
             let dither = self.dither.get_or_insert_with(|| glow::Dither::new(out.w as usize, out.h as usize));
             glow::paint(out, &field, fade, &glow::Layer { canvas: &frame.canvas, runs: &art.runs, offset: offset as isize }, dither);
+            press_row(out);
             let range = m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(&t);
             let v = (scroll / range).clamp(0.0, 1.0);
             art.version.draw_scaled(out, 0.0, 0.0, 1.0 - 0.1 * v, t.hero.version, 1.0 - v);
@@ -2612,9 +2725,21 @@ impl App {
                 // Off a long list, its rows' canvases are not kept.
                 self.spare.clear();
             }
+            press_row(out);
             if frame.header {
                 let level = (1.0 - scroll / m.dp(TITLE_FADE_DP)).clamp(0.0, 1.0);
                 draw_faded(out, big, 0.0, -offset, t.pal.text, level, (1.0 - level) * m.dp(TITLE_BLUR_DP));
+            }
+        }
+        // The search page's round button and the home page's search bar
+        // darken at once under a finger.
+        if let Some(a) = pressing.filter(|&a| a != Action::Back) {
+            let r = frame.hits.iter().find(|h| h.action == a).expect("a button held down is on its page").rect;
+            let r = Rect { y: r.y - offset, ..r };
+            if a == Action::CloseSearch {
+                widgets::cancel_held(out, &t, r);
+            } else {
+                widgets::search_bar_held(out, &t, r);
             }
         }
         if let Some(caret) = frame.caret.as_ref().filter(|_| caret_on) {
@@ -2645,7 +2770,11 @@ impl App {
         if frame.back {
             let (_, chip, x, y) = self.chip.as_ref().expect("drawn above");
             out.lay(chip, *x, *y, bar);
-            widgets::back_arrow(out, &t, t.pal.text);
+            if pressing == Some(Action::Back) {
+                widgets::back_held(out, &t);
+            } else {
+                widgets::back_arrow(out, &t, t.pal.text);
+            }
             shine(out, Group::Fixed);
         }
         let level = self.title.level(now);
@@ -2752,6 +2881,8 @@ impl App {
         self.adjusting = false;
         self.titles = None;
         self.glow = None;
+        self.row_press = None;
+        self.row_art = None;
         let hero = self.screen() == Screen::About;
         self.title = title_fade(hero);
         self.bar = bar_fade(hero);
@@ -3473,6 +3604,7 @@ impl App {
         let (slop, edge) = (m.dp(8.0), m.dp(20.0));
         let scroll = self.top().1;
         let mut fx = Vec::new();
+        let pressing = self.pressing();
         match ev {
             Touch::Down(x, y) => {
                 self.tracker.clear();
@@ -3520,6 +3652,12 @@ impl App {
                     self.frame.as_ref().and_then(|fr| fr.hit(x, y + scroll)).map(|h| (h.action, h.rect))
                 };
                 let action = hit.map(|h| h.0);
+                // A row of the page darkens behind its words a moment after
+                // the finger lands on it, if the finger stays.
+                let row = hit
+                    .filter(|&(a, r)| self.frame.as_ref().is_some_and(|fr| fr.hits.contains(&Hit { rect: r, action: a })))
+                    .filter(|&(a, r)| row_wide(&t, r) && !matches!(a, Action::Open(Screen::Search) | Action::Confirm(_)))
+                    .map(|(_, r)| r);
                 self.drag = match hit {
                     Some((Action::Brightness, track)) => {
                         self.set_brightness(&t, track, x);
@@ -3534,7 +3672,13 @@ impl App {
                         self.trace(&t, x, y + scroll);
                         Drag::Pattern
                     }
-                    _ => Drag::Press { x, y, action, edge: at_edge, at: now },
+                    _ => {
+                        if let Some(rect) = row {
+                            self.row_press = Some(RowPress { rect, rise: now + ROW_PRESS_DELAY_MS, fall: None });
+                            self.row_art = None;
+                        }
+                        Drag::Press { x, y, action, edge: at_edge, at: now }
+                    }
                 };
             }
             Touch::Move(x, y) => match std::mem::replace(&mut self.drag, Drag::Idle) {
@@ -3562,6 +3706,9 @@ impl App {
                         }
                         _ => Drag::Press { x: x0, y: y0, action, edge: at_edge, at },
                     };
+                    if !matches!(self.drag, Drag::Press { .. }) {
+                        self.let_row_go(now);
+                    }
                 }
                 Drag::Scroll { last } => {
                     self.tracker.add(now, y);
@@ -3599,7 +3746,12 @@ impl App {
                 Drag::Idle => {}
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {
-                Drag::Press { action: Some(a), .. } => fx.extend(self.act(a, now)),
+                Drag::Press { action: Some(a), .. } => {
+                    if let Some(p) = &mut self.row_press {
+                        p.lift(now);
+                    }
+                    fx.extend(self.act(a, now));
+                }
                 Drag::Scroll { .. } if self.pull != 0.0 => {
                     // A page let go past its end springs back.
                     self.bounce = Some(Spring::new(now, motion::rubber(self.pull, self.h as f32), 0.0, 0.4));
@@ -3634,6 +3786,9 @@ impl App {
                 _ => {}
             },
         }
+        if self.pressing() != pressing {
+            self.dirty = true;
+        }
         // A key of the on-screen keyboard shows held down while the finger
         // rests on it.
         let held = match self.drag {
@@ -3645,6 +3800,28 @@ impl App {
             self.refresh();
         }
         fx
+    }
+
+    /// The button a finger holds down, which shows held at once: `<`, the
+    /// search page's round button, or the home page's search bar.
+    fn pressing(&self) -> Option<Action> {
+        match self.drag {
+            Drag::Press { action: Some(a @ (Action::Back | Action::CloseSearch | Action::Open(Screen::Search))), .. } => Some(a),
+            _ => None,
+        }
+    }
+
+    /// The finger left the row it held, scrolling the page or swiping: a
+    /// row not darkening yet never does, and one darkening fades back.
+    fn let_row_go(&mut self, now: u64) {
+        let Some(p) = self.row_press else { return };
+        if now < p.rise {
+            self.row_press = None;
+            self.row_art = None;
+        } else if p.fall.is_none() {
+            self.row_press = Some(RowPress { fall: Some(now), ..p });
+        }
+        self.dirty = true;
     }
 
     /// No touchscreen answers: the keys work the pages, their light shown
@@ -4253,6 +4430,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::over;
     use crate::fmt;
     use skyward_info::{Boot, Charge, Cpu, Storage};
     use skyward_install::{Failure, Refusal};
@@ -4472,6 +4650,132 @@ mod tests {
         assert_eq!(top(&screen), Some(home.ceil()));
     }
 
+    /// The grey of the screen's pixel at (`x`, `y`).
+    fn grey_at(c: &Canvas, x: f32, y: f32) -> u8 {
+        c.data[((y as u32 * c.w + x as u32) * 4) as usize]
+    }
+
+    /// The darkest grey of the screen within `r`.
+    fn darkest(c: &Canvas, r: Rect) -> u8 {
+        let (x0, y0, x1, y1) = (r.x as u32, r.y as u32, (r.x + r.w) as u32, (r.y + r.h) as u32);
+        (y0..y1).flat_map(|y| (x0..x1).map(move |x| c.data[((y * c.w + x) * 4) as usize])).min().expect("a part of the screen")
+    }
+
+    #[test]
+    fn a_row_held_darkens_behind_its_words_a_moment_after_the_finger_lands() {
+        let (f, i) = (fonts(), info());
+        let t = Theme::light(W, H, PPD);
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut c = Canvas::new(W, H);
+        let row = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Open(Screen::Backup)).expect("on the home page").rect;
+        // The card between the row's words and its arrow.
+        let (x, y) = (W as f32 * 0.6, row.y + row.h / 2.0);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        let ink = darkest(&c, row);
+        assert_eq!(grey_at(&c, x, y), t.pal.card.r);
+
+        app.touch(Touch::Down(x, y), &f, 1000);
+        let rise = 1000 + ROW_PRESS_DELAY_MS;
+        assert_eq!(app.deadline(1000), Some(rise), "nothing moves until the row starts darkening");
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        assert!(app.row_art.is_none(), "a finger that may yet scroll does not wait for the row drawn held down");
+        app.compose(&mut c, &f, &i, "12:00", rise);
+        assert_eq!(grey_at(&c, x, y), t.pal.card.r, "it has not started yet");
+        app.compose(&mut c, &f, &i, "12:00", rise + 30);
+        let partway = grey_at(&c, x, y);
+        assert!(partway < 255 && partway > 225, "darkening after 30 ms: {partway}");
+        app.compose(&mut c, &f, &i, "12:00", 2000);
+        assert_eq!(grey_at(&c, x, y), 225, "as dark as the stock settings' row held down");
+        assert_eq!(darkest(&c, row), ink, "its words keep their ink");
+        assert_ne!(app.deadline(2000), Some(0), "held still, nothing moves");
+
+        // The finger moves on to scroll: the row fades back.
+        app.touch(Touch::Move(x, y + t.m.dp(30.0)), &f, 2100);
+        assert_eq!(app.deadline(2100), Some(0));
+        app.touch(Touch::Up, &f, 2200);
+        app.tick(3000);
+        assert!(app.row_press.is_none() && app.row_art.is_none(), "faded, it is let go");
+        assert_eq!(app.screen(), Screen::Home, "a scroll opens nothing");
+    }
+
+    #[test]
+    fn a_row_scrolled_away_from_before_it_darkens_never_shows_held() {
+        let (f, i) = (fonts(), info());
+        let t = Theme::light(W, H, PPD);
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let row = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Open(Screen::Backup)).expect("on the home page").rect;
+        let (x, y) = (W as f32 * 0.6, row.y + row.h / 2.0);
+        app.touch(Touch::Down(x, y), &f, 1000);
+        app.touch(Touch::Move(x, y + t.m.dp(30.0)), &f, 1050);
+        assert!(app.row_press.is_none());
+    }
+
+    #[test]
+    fn a_row_tapped_quickly_shows_held_from_the_lift_and_fades_back() {
+        let (f, i) = (fonts(), info());
+        let t = Theme::light(W, H, PPD);
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        let mut c = Canvas::new(W, H);
+        let row = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Toggle(Switch::Vibrate)).expect("on the settings page").rect;
+        let (x, y) = (W as f32 * 0.6, row.y + row.h / 2.0);
+        tap_at(&mut app, &f, &i, Action::Toggle(Switch::Vibrate), 1000);
+        assert!(!app.state.vibrate, "the tap worked the switch");
+        app.compose(&mut c, &f, &i, "12:00", 1040);
+        let held = grey_at(&c, x, y);
+        assert!(held < t.pal.card.r, "held from the lift: {held}");
+        app.tick(1040 + QUICK_TAP_MS + 1000);
+        assert!(app.row_press.is_none(), "and let go once faded");
+        app.compose(&mut c, &f, &i, "12:00", 2200);
+        assert_eq!(grey_at(&c, x, y), t.pal.card.r);
+    }
+
+    #[test]
+    fn the_back_control_and_the_search_buttons_darken_at_once_under_a_finger() {
+        let (f, i) = (fonts(), info());
+        let t = Theme::light(W, H, PPD);
+        let mut c = Canvas::new(W, H);
+
+        // `<`: a disc behind it, the `<` lighter on it.
+        let mut app = opened(Screen::Mount, &f, &i);
+        let (cx, cy, r) = widgets::back_disc(&t);
+        let (bx, by) = widgets::back_rect(&t).centre();
+        let around = Rect::new(cx - r, cy - r, r * 2.0, r * 2.0);
+        app.compose(&mut c, &f, &i, "12:00", 5000);
+        assert_eq!(grey_at(&c, cx + r * 0.6, cy), t.pal.bg.r);
+        assert_eq!(darkest(&c, around), 0);
+        app.touch(Touch::Down(bx, by), &f, 6000);
+        app.compose(&mut c, &f, &i, "12:00", 6000);
+        let disc = over(t.pal.button_press, t.pal.bg).r;
+        assert_eq!(grey_at(&c, cx + r * 0.6, cy), disc, "darker at once");
+        let arrow = darkest(&c, around);
+        assert!(arrow.abs_diff(85) <= 2, "the stock `<` held down is 85, not {arrow}");
+        // A finger moving off lets it go.
+        app.touch(Touch::Move(bx, by + t.m.dp(40.0)), &f, 6050);
+        app.compose(&mut c, &f, &i, "12:00", 6050);
+        assert_eq!(grey_at(&c, cx + r * 0.6, cy), t.pal.bg.r);
+        app.touch(Touch::Up, &f, 6100);
+        assert_eq!(app.screen(), Screen::Mount);
+
+        // The search page's round button.
+        let mut app = App::new(Screen::Search, W, H, PPD);
+        app.frame(&f, &i);
+        let (_, button) = widgets::search_layout(&t);
+        let (x, y) = button.centre();
+        app.touch(Touch::Down(x, y), &f, 1000);
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        assert_eq!(grey_at(&c, x, y + button.h * 0.35), over(t.pal.button_press, t.pal.search).r);
+        let cross = darkest(&c, button);
+        assert!(cross.abs_diff(70) <= 2, "the stock cross held down is 70, not {cross}");
+
+        // The home page's search bar, clear of its words.
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let bar = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Open(Screen::Search)).expect("on the home page").rect;
+        let (x, y) = (bar.x + bar.w * 0.8, bar.y + bar.h / 2.0);
+        app.touch(Touch::Down(x, y), &f, 1000);
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        assert_eq!(grey_at(&c, x, y), over(t.pal.button_press, t.pal.search).r);
+    }
+
     #[test]
     fn an_unreadable_partition_table_leaves_nothing_to_toggle() {
         let (f, i) = (fonts(), info());
@@ -4555,7 +4859,8 @@ mod tests {
         assert_eq!(frame.hits[1].action, Action::MountToggle(1));
         let busy = frame.hits[0].action;
         assert!(tap(&mut app, &f, &i, busy).is_empty());
-        assert_eq!(app.deadline(0), Some(TOAST_MS), "it says why");
+        app.tick(1000);
+        assert_eq!(app.deadline(1000), Some(TOAST_MS), "it says why");
     }
 
     #[test]
@@ -5039,7 +5344,9 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Language, W, H, PPD);
         tap(&mut app, &f, &i, Action::Unavailable("暂不支持该语言"));
-        assert_eq!(app.deadline(0), Some(TOAST_MS));
+        // Once the row tapped has faded back, only the message waits.
+        app.tick(1000);
+        assert_eq!(app.deadline(1000), Some(TOAST_MS));
         app.tick(TOAST_MS);
         assert_eq!(app.deadline(TOAST_MS), app.idle_due());
     }
@@ -5857,7 +6164,8 @@ mod tests {
         tap(&mut app, &f, &i, Action::LogPart(0));
         tap(&mut app, &f, &i, Action::LogsTo(1));
         assert!(tap(&mut app, &f, &i, Action::ExportLogs).is_empty(), "internal storage waits for the data partition");
-        assert_eq!(app.deadline(0), Some(TOAST_MS), "and says so");
+        app.tick(1000);
+        assert_eq!(app.deadline(1000), Some(TOAST_MS), "and says so");
         app.data_waiting(None);
         assert_eq!(tap(&mut app, &f, &i, Action::ExportLogs), vec![Effect::ExportLogs { recovery: false, kernel: true, storage: true }]);
         tap(&mut app, &f, &i, Action::LogPart(1));
@@ -6877,8 +7185,10 @@ mod tests {
         tap(&mut app, &f, &i, Action::ScreenOff(0));
         assert_eq!(app.state.screen_off, 0);
         assert_eq!(app.screen(), Screen::ScreenOff, "the page stays");
-        // Fifteen seconds, dim for the last three.
-        assert_eq!(app.deadline(0), Some(12_000));
+        // Fifteen seconds, dim for the last three, once the row tapped has
+        // faded back.
+        app.tick(1000);
+        assert_eq!(app.deadline(1000), Some(12_000));
         app.tick(15_000);
         assert!(!app.display_on());
     }

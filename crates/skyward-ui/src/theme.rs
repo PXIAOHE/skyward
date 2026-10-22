@@ -1,4 +1,4 @@
-use crate::color::Rgba;
+use crate::color::{over, Rgba};
 use crate::glow::{self, Glow};
 
 #[derive(Clone, Copy)]
@@ -31,6 +31,12 @@ pub struct Palette {
     pub outline: Rgba,
     /// Captions under the About page's spec values.
     pub spec_label: Rgba,
+    /// Laid over the card behind a row a finger holds down, under the
+    /// row's words and icon.
+    pub row_press: Rgba,
+    /// Laid over the `<`, the search page's round button and the home
+    /// page's search bar while a finger holds them down.
+    pub button_press: Rgba,
 }
 
 /// The status bar battery's inks, partly see-through as the stock status
@@ -147,6 +153,14 @@ impl Theme {
     pub fn dark(w: u32, h: u32, px_per_dp: f32) -> Self {
         Theme { pal: DARK, hero: DARK_HERO, m: metrics(w, h, px_per_dp), dark: true }
     }
+
+    /// This theme with every card as it shows behind a row held down.
+    pub fn pressed(&self) -> Theme {
+        let mut t = *self;
+        t.pal.card = over(self.pal.row_press, self.pal.card);
+        t.hero.card = over(self.pal.row_press, self.hero.card);
+        t
+    }
 }
 
 fn metrics(w: u32, h: u32, px_per_dp: f32) -> Metrics {
@@ -244,6 +258,10 @@ const LIGHT: Palette = Palette {
     info: Rgba::rgb(51, 51, 51),
     outline: Rgba::rgb(102, 102, 102),
     spec_label: Rgba::rgb(127, 127, 127),
+    // A white card held down goes to 225; the page under `<` goes from 243
+    // to 219, the search field and its round button from 229 to 206.
+    row_press: Rgba::rgb(0, 0, 0).with_alpha(30),
+    button_press: Rgba::rgb(0, 0, 0).with_alpha(26),
 };
 
 const DARK: Palette = Palette {
@@ -280,6 +298,9 @@ const DARK: Palette = Palette {
     info: Rgba::rgb(214, 214, 214),
     outline: Rgba::rgb(140, 140, 140),
     spec_label: Rgba::rgb(128, 128, 128),
+    // White as strong as the black in the light theme.
+    row_press: Rgba::rgb(255, 255, 255).with_alpha(30),
+    button_press: Rgba::rgb(255, 255, 255).with_alpha(26),
 };
 
 // Sampled from the stock「我的设备」page: in light mode the cards are
