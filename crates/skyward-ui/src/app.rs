@@ -1808,6 +1808,9 @@ pub struct App {
     /// While a page slides: the page shown drawn on its own, and how it
     /// showed, to slide it again as it was while it shows the same.
     layer: Option<(View, Canvas)>,
+    /// How many columns from the left edge of the page's rows drawn are
+    /// drawn; a page opened is drawn across as it slides in.
+    cols: u32,
     /// The canvas the last page left was drawn on, to draw the next on.
     backdrop: Option<Canvas>,
     /// How round the screen's corners are, in pixels.
@@ -1863,6 +1866,7 @@ impl App {
             shown: None,
             turn: None,
             layer: None,
+            cols: 0,
             backdrop: None,
             corners: 0.0,
             dirty: true,
@@ -2654,13 +2658,27 @@ impl App {
     /// Render the current page if what it shows has changed: the rows of
     /// it on screen, the rest as they come into view.
     pub fn frame(&mut self, f: &Fonts, info: &DeviceInfo) -> &Frame {
+        self.render(f, info, self.w)
+    }
+
+    /// [`App::frame`], drawing of a page rendered anew only its columns
+    /// from the left edge to `wide`.
+    fn render(&mut self, f: &Fonts, info: &DeviceInfo, wide: u32) -> &Frame {
         if self.frame.is_none() {
             let t = self.theme();
             let screen = self.screen();
             let first = self.top().1.max(0.0) as u32;
-            let band = Band { rows: (first, first + self.h), cols: (0, self.w) };
+            let band = Band { rows: (first, first + self.h), cols: (0, wide.min(self.w)) };
             let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
-            let frame = pages::render(screen, &cx);
+            let mut frame = pages::render(screen, &cx);
+            // A page drawn in part across holds its rows whole, the columns
+            // of them drawn on as they are needed.
+            self.cols = frame.canvas.cols().end;
+            if self.cols < self.w {
+                let mut whole = Canvas::unfilled(self.w, frame.canvas.h, frame.canvas.held());
+                whole.replace(&frame.canvas);
+                frame.canvas = whole;
+            }
             self.height = frame.height(&t);
             self.frame = Some(frame);
             self.clamp_scroll();
@@ -2676,12 +2694,32 @@ impl App {
     /// The current page rendered, all of it drawn.
     pub fn whole_frame(&mut self, f: &Fonts, info: &DeviceInfo) -> &Frame {
         let h = self.frame(f, info).canvas.h;
+        self.draw_cols(f, info, self.w);
         self.draw_rows(f, info, 0.0, h as f32);
         self.frame.as_ref().expect("rendered above")
     }
 
+    /// Draw the columns of the current page's rows drawn from where they
+    /// were drawn to, on to `wide`.
+    fn draw_cols(&mut self, f: &Fonts, info: &DeviceInfo, wide: u32) {
+        let wide = wide.min(self.w);
+        let Some(frame) = &self.frame else { return };
+        if self.cols >= wide {
+            return;
+        }
+        let held = frame.canvas.held();
+        let t = self.theme();
+        let band = Band { rows: (held.start, held.end), cols: (self.cols, wide) };
+        let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
+        let part = pages::render(self.screen(), &cx).canvas;
+        self.frame.as_mut().expect("drawn above").canvas.replace(&part);
+        self.cols = wide;
+        self.layer = None;
+    }
+
     /// Draw the rows `from..to` of the current page it has not drawn yet,
-    /// a band at least a quarter of a screen tall at a time.
+    /// a band at least a quarter of a screen tall at a time; the rows drawn
+    /// are drawn across first.
     fn draw_rows(&mut self, f: &Fonts, info: &DeviceInfo, from: f32, to: f32) {
         let Some(frame) = &self.frame else { return };
         let h = frame.canvas.h;
@@ -2698,6 +2736,7 @@ impl App {
         if bands.is_empty() {
             return;
         }
+        self.draw_cols(f, info, self.w);
         let t = self.theme();
         let screen = self.screen();
         for rows in bands {
@@ -2725,7 +2764,9 @@ impl App {
     /// out over or under the page left, the status bar, any message, and
     /// the back cue while a swipe from an edge is under way.
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
-        self.frame(f, info);
+        // A page opened is drawn from its left edge as it slides in.
+        let opening = self.turn.as_ref().is_some_and(|t| !t.back);
+        self.render(f, info, if opening { 0 } else { self.w });
         let screen = self.screen();
         let scroll = self.top().1;
         let offset = (scroll + self.overscroll(now)).round();
@@ -2762,6 +2803,16 @@ impl App {
         let slide = self.slid(now);
         if self.frame.as_ref().is_some_and(|fr| fr.hero.is_none()) {
             // What of the page is on screen, drawn if it has not been yet.
+            // While it slides in, that is its columns come in, and a
+            // quarter of the screen more each frame, so it is drawn across
+            // early in the slide; all of it once a row of it is held.
+            let wide = match (slide, &self.turn) {
+                (Some((at, _, _)), Some(turn)) if !turn.back && self.row_press.is_none() => {
+                    (self.w - at.clamp(0, self.w as i32) as u32).max(self.cols + self.w / 4)
+                }
+                _ => self.w,
+            };
+            self.draw_cols(f, info, wide);
             self.draw_rows(f, info, offset, offset + self.h as f32);
         }
         // The row a finger holds, drawn once more as held down when it
@@ -2792,20 +2843,27 @@ impl App {
                 // The page shown is drawn on its own canvas, once for as
                 // long as it shows the same, and slid from there with the
                 // page left.
+                // A page opened shows nothing of itself until its edge comes
+                // in from the right: the page left alone shows.
                 let back = self.turn.as_ref().expect("sliding").back;
-                let still = self.frame.as_ref().is_some_and(|fr| fr.hero.is_none());
-                let page = match self.layer.take() {
-                    Some((shown, c)) if still && shown == view => c,
-                    kept => {
-                        let mut c = kept.map(|(_, c)| c).unwrap_or_else(|| Canvas::new(out.w, out.h));
-                        self.paint_page(&mut c, &t, Some((f, info)), &view);
-                        c
-                    }
-                };
-                let turn = self.turn.as_ref().expect("sliding");
-                let (front, behind) = if back { (&turn.left, &page) } else { (&page, &turn.left) };
-                out.slide(front, behind, at, shift, dim, self.corners);
-                self.layer = Some((view, page));
+                if !back && at >= self.w as i32 {
+                    let left = &self.turn.as_ref().expect("sliding").left;
+                    out.slide(left, left, at, shift, dim, self.corners);
+                } else {
+                    let still = self.frame.as_ref().is_some_and(|fr| fr.hero.is_none());
+                    let page = match self.layer.take() {
+                        Some((shown, c)) if still && shown == view => c,
+                        kept => {
+                            let mut c = kept.map(|(_, c)| c).unwrap_or_else(|| Canvas::new(out.w, out.h));
+                            self.paint_page(&mut c, &t, Some((f, info)), &view);
+                            c
+                        }
+                    };
+                    let turn = self.turn.as_ref().expect("sliding");
+                    let (front, behind) = if back { (&turn.left, &page) } else { (&page, &turn.left) };
+                    out.slide(front, behind, at, shift, dim, self.corners);
+                    self.layer = Some((view, page));
+                }
             }
             None => {
                 self.layer = None;
@@ -3143,6 +3201,11 @@ impl App {
         let view = View { pressing: None, ..view };
         let t = self.theme();
         self.paint_page(&mut left, &t, None, &view);
+        // A page left within the first frames of sliding in, before it was
+        // drawn across, shows its colour where it was not drawn yet.
+        if let Some(fr) = self.frame.as_ref().filter(|_| self.cols < self.w) {
+            left.fill_rect(self.cols as f32, 0.0, (self.w - self.cols) as f32, self.h as f32, fr.bg);
+        }
         self.turn = Some(Turn { back, left, spring: None });
         self.dirty = true;
     }
