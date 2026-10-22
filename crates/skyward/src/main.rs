@@ -16,6 +16,8 @@ mod haptics;
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
+mod merge;
+#[cfg(target_os = "android")]
 mod pty;
 #[cfg(target_os = "android")]
 mod secure;
@@ -86,6 +88,14 @@ enum Cmd {
     Mount,
     /// Unmount what `mount` mounted and remove its device-mapper devices.
     Umount,
+    /// Print where an update stands: its state, the slot it came from, each
+    /// snapshot as libsnapshot keeps it and as the kernel maps it, and the
+    /// kernel's snapshot targets.
+    Update,
+    /// Merge the update into the slot the phone runs from, starting the
+    /// merge where it has not begun, and follow it to its end.
+    #[cfg(target_os = "android")]
+    Merge,
     /// Keep the configuration's services running until stopped.
     #[cfg(target_os = "android")]
     Services {
@@ -214,6 +224,15 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Mkfs { device, filesystem } => skyward_block::erase::make(&device, &filesystem, &[]),
         Cmd::Lp { super_dev, slot } => lp(&super_dev, slot),
+        Cmd::Update => update(),
+        #[cfg(target_os = "android")]
+        Cmd::Merge => {
+            let slot = booted_slot()?;
+            let start = skyward_vab::standing(slot)? == skyward_vab::Standing::Waiting;
+            let end = merge::run(slot, start, &mut |m| println!("{m:?}"))?;
+            println!("ended {end:?}");
+            Ok(())
+        }
         Cmd::Identify { file } => identify(&file),
         Cmd::Mount => {
             let mounts = skyward_vab::mount_partitions(booted_slot()?)?;
@@ -617,6 +636,46 @@ fn slot() -> Result<()> {
                 println!("update {:?}", control.merge_status()?);
             }
             Err(e) => println!("{e:#}"),
+        }
+    }
+    Ok(())
+}
+
+fn update() -> Result<()> {
+    let slot = booted_slot()?;
+    println!("standing {:?}", skyward_vab::standing(slot)?);
+    for kind in ["snapshot", "snapshot-merge", "user"] {
+        println!("target {kind} {:?}", skyward_block::dm::target_version(kind)?);
+    }
+    let Some(snaps) = skyward_vab::snapshots::Snapshots::lock(false)? else {
+        println!("no update was ever applied");
+        return Ok(());
+    };
+    let u = snaps.update()?;
+    println!("state {:?} phase {:?} failure {:?}", snaps.state()?, u.merge_phase, u.merge_failure_code);
+    println!("snapuserd {} userspace {} allocated {} total {} metadata {}", u.using_snapuserd, u.userspace_snapshots, u.sectors_allocated, u.total_sectors, u.metadata_sectors);
+    println!("from {:?}, {:?} for {}, built {:?}", snaps.source()?, snaps.side(slot)?, slot.suffix(), u.source_build_fingerprint);
+    println!("needed {}", snaps.needed(slot)?);
+    for name in snaps.list()? {
+        let s = snaps.status(&name)?;
+        println!(
+            "{name}: {:?} device {} snapshot {} cow {} + {} allocated {} metadata {} snapuserd {} old {}",
+            s.part_state()?,
+            s.device_size,
+            s.snapshot_size,
+            s.cow_partition_size,
+            s.cow_file_size,
+            s.sectors_allocated,
+            s.metadata_sectors,
+            s.using_snapuserd,
+            s.old_partition_size
+        );
+        for dev in [name.clone(), format!("{name}-base"), format!("{name}-cow"), format!("{name}-cow-img")] {
+            if skyward_block::dm::status(&dev)?.is_some() {
+                for line in skyward_block::dm::table_status(&dev)? {
+                    println!("  {dev}: {} {}+{} {}", line.kind, line.start, line.sectors, line.text);
+                }
+            }
         }
     }
     Ok(())

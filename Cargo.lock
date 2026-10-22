@@ -1412,6 +1412,7 @@ name = "skyward-vab"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "prost",
  "skyward-binder",
  "skyward-block",

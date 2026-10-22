@@ -3,7 +3,7 @@
 //! the bootloader reads it from where only the phone's own code knows to
 //! write it.
 
-use crate::{BootSlots, Slot};
+use crate::{BootSlots, MergeStatus, Slot};
 use anyhow::{bail, Context, Result};
 use skyward_binder::driver::{Binder, Handle};
 use skyward_binder::hidl::{self, Answer, Message};
@@ -25,19 +25,6 @@ const SUCCESSFUL: u32 = 7;
 const SET_MERGE_STATUS: u32 = 9;
 const MERGE_STATUS: u32 = 10;
 const ACTIVE: u32 = 11;
-
-/// Where an update stands, as the boot control keeps it for the bootloader,
-/// which will not erase or write the data partition, /metadata or super
-/// while an update's snapshots wait to be merged or are being merged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergeStatus {
-    None = 0,
-    Unknown = 1,
-    /// The new slot's partitions are snapshots, waiting to be merged.
-    Snapshotted = 2,
-    Merging = 3,
-    Cancelled = 4,
-}
 
 /// How the service answers whether something holds of a slot.
 const NO: i32 = 0;

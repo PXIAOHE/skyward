@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use prost::Message;
 use std::fs;
 use std::io::ErrorKind;
@@ -7,11 +7,13 @@ use std::path::Path;
 #[cfg(target_os = "android")]
 pub mod boot;
 mod partitions;
+pub mod snapshots;
 
 pub use partitions::{
-    map_slot, map_whole, mount_one, mount_partitions, mount_point, mounted_partitions, release_partitions, slot_bases, slot_sizes,
-    unmap_slot, unmap_whole, unmount_one, unmount_partitions, Mounted, Mounts, SlotMaps, Whole,
+    check_merge, map_slot, map_whole, mount_one, mount_partitions, mount_point, mounted_partitions, release_partitions, slot_bases,
+    slot_sizes, start_merge, unmap_slot, unmap_whole, unmount_one, unmount_partitions, Mounted, Mounts, SlotMaps, Whole,
 };
+pub use snapshots::Merge;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
@@ -103,12 +105,92 @@ const OTA_DIR: &str = "/metadata/ota";
 const STATE: &str = "state";
 const SOURCE: &str = "snapshot-boot";
 
-/// libsnapshot's `SnapshotUpdateStatus` from snapshot.proto; only the state is
-/// read, the other fields are skipped by the decoder.
+/// libsnapshot's `SnapshotUpdateStatus` from snapshot.proto, every field of
+/// it, so that the state written back keeps all it held.
 #[derive(Clone, PartialEq, Message)]
-struct SnapshotUpdateStatus {
+pub struct UpdateStatus {
     #[prost(enumeration = "UpdateState", tag = "1")]
-    state: i32,
+    pub state: i32,
+    /// What the update's kernel snapshots had allocated when the merge
+    /// began, the measure of how far it has come.
+    #[prost(uint64, tag = "2")]
+    pub sectors_allocated: u64,
+    #[prost(uint64, tag = "3")]
+    pub total_sectors: u64,
+    #[prost(uint64, tag = "4")]
+    pub metadata_sectors: u64,
+    /// Its snapshots are compressed, and served by snapuserd.
+    #[prost(bool, tag = "5")]
+    pub using_snapuserd: bool,
+    #[prost(enumeration = "MergePhase", tag = "6")]
+    pub merge_phase: i32,
+    #[prost(enumeration = "FailureCode", tag = "7")]
+    pub merge_failure_code: i32,
+    #[prost(string, tag = "8")]
+    pub source_build_fingerprint: String,
+    #[prost(bool, tag = "9")]
+    pub userspace_snapshots: bool,
+    #[prost(bool, tag = "10")]
+    pub io_uring_enabled: bool,
+    #[prost(bool, tag = "11")]
+    pub legacy_snapuserd: bool,
+    #[prost(bool, tag = "12")]
+    pub o_direct: bool,
+    #[prost(uint32, tag = "13")]
+    pub cow_op_merge_size: u32,
+    #[prost(uint32, tag = "14")]
+    pub num_worker_threads: u32,
+}
+
+/// Which of an update's snapshots are merged first: those of partitions
+/// the update shrank go before the others, which may write where they
+/// were.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum MergePhase {
+    NoMerge = 0,
+    FirstPhase = 1,
+    SecondPhase = 2,
+}
+
+/// Why a merge failed, as libsnapshot records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum FailureCode {
+    Ok = 0,
+    ReadStatus = 1,
+    GetTableInfo = 2,
+    UnknownTable = 3,
+    GetTableParams = 4,
+    ActivateNewTable = 5,
+    AcquireLock = 6,
+    ListSnapshots = 7,
+    WriteStatus = 8,
+    UnknownTargetType = 9,
+    QuerySnapshotStatus = 10,
+    ExpectedMergeTarget = 11,
+    UnmergedSectorsAfterCompletion = 12,
+    UnexpectedMergeState = 13,
+    GetCowPathConsistencyCheck = 14,
+    OpenCowConsistencyCheck = 15,
+    ParseCowConsistencyCheck = 16,
+    OpenCowDirectConsistencyCheck = 17,
+    MemAlignConsistencyCheck = 18,
+    DirectReadConsistencyCheck = 19,
+    WrongMergeCountConsistencyCheck = 20,
+}
+
+/// Where an update stands, as the boot control keeps it for the bootloader,
+/// which will not erase or write the data partition, /metadata or super
+/// while an update's snapshots wait to be merged or are being merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeStatus {
+    None = 0,
+    Unknown = 1,
+    /// The new slot's partitions are snapshots, waiting to be merged.
+    Snapshotted = 2,
+    Merging = 3,
+    Cancelled = 4,
 }
 
 /// Where an update stands, as libsnapshot names it.
@@ -208,17 +290,41 @@ fn read_update(dir: &Path) -> Result<Update> {
 }
 
 fn read_state(dir: &Path) -> Result<UpdateState> {
+    state_of(&read_status(dir)?)
+}
+
+/// The update's whole status in `dir`.
+fn read_status(dir: &Path) -> Result<UpdateStatus> {
     let path = dir.join(STATE);
     match fs::read(&path) {
-        Ok(bytes) => decode_state(&bytes),
+        Ok(bytes) => decode_status(&bytes).with_context(|| format!("read {}", path.display())),
         // libsnapshot writes the file, and /metadata/ota, with the first update.
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(UpdateState::None),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(UpdateStatus::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
 }
 
-fn decode_state(bytes: &[u8]) -> Result<UpdateState> {
-    let status = SnapshotUpdateStatus::decode(bytes).context("decode SnapshotUpdateStatus")?;
+/// An update's status as libsnapshot writes it, or as it wrote it once, as
+/// the state's own name, which it still reads.
+fn decode_status(bytes: &[u8]) -> Result<UpdateStatus> {
+    if let Ok(status) = UpdateStatus::decode(bytes) {
+        return Ok(status);
+    }
+    let state = match std::str::from_utf8(bytes).map_err(|_| anyhow!("neither SnapshotUpdateStatus nor an update state's name"))? {
+        "" | "none" => UpdateState::None,
+        "initiated" => UpdateState::Initiated,
+        "unverified" => UpdateState::Unverified,
+        "merging" => UpdateState::Merging,
+        "merge-completed" => UpdateState::MergeCompleted,
+        "merge-needs-reboot" => UpdateState::MergeNeedsReboot,
+        "merge-failed" => UpdateState::MergeFailed,
+        "cancelled" => UpdateState::Cancelled,
+        other => bail!("update state {other:?}"),
+    };
+    Ok(UpdateStatus { state: state as i32, ..UpdateStatus::default() })
+}
+
+fn state_of(status: &UpdateStatus) -> Result<UpdateState> {
     UpdateState::try_from(status.state).map_err(|e| anyhow!("update state: {e}"))
 }
 
@@ -226,6 +332,63 @@ fn decode_state(bytes: &[u8]) -> Result<UpdateState> {
 /// in flight. Callers writing to dynamic partitions must honour this.
 pub fn merge_outstanding() -> Result<bool> {
     Ok(snapshot_state()? != SnapshotState::None)
+}
+
+/// Where an update stands for the phone running from a slot, as a
+/// recovery shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Standing {
+    /// None waits to be merged.
+    None,
+    /// /metadata, where the update is tracked, cannot be read.
+    Unknown,
+    /// The system was writing it to the other slot, and has not finished.
+    Writing,
+    /// Written to the other slot, which starts next; it merges once the
+    /// system there has started.
+    Installed(Slot),
+    /// Written to the slot the phone runs from, whose system has not
+    /// started all the way: it merges once it has, or here.
+    Waiting,
+    /// Its snapshots are compressed, which the system merges and a recovery
+    /// that does not run snapuserd does not.
+    Compressed,
+    /// Being merged, this share of the way, 0 to 1.
+    Merging(f64),
+    /// The merge stopped for this reason; it goes on when the snapshots are
+    /// next mapped.
+    Failed(FailureCode),
+    /// Merged, with what the update left cleaned up when the system next
+    /// starts.
+    Merged,
+}
+
+/// Where an update stands for the phone running from `current`.
+pub fn standing(current: Slot) -> Result<Standing> {
+    if !skyward_block::mount::is_mount_point(Path::new(METADATA))? {
+        return Ok(Standing::Unknown);
+    }
+    let Some(snaps) = snapshots::Snapshots::lock(false)? else { return Ok(Standing::None) };
+    let update = snaps.update()?;
+    Ok(match state_of(&update)? {
+        UpdateState::None | UpdateState::Cancelled => Standing::None,
+        UpdateState::Initiated => Standing::Writing,
+        UpdateState::Unverified => match snaps.side(current)? {
+            snapshots::Side::Target if update.using_snapuserd => Standing::Compressed,
+            snapshots::Side::Target => Standing::Waiting,
+            snapshots::Side::Source => Standing::Installed(current.other()),
+            snapshots::Side::Unknown => Standing::Writing,
+        },
+        UpdateState::Merging if update.using_snapuserd => Standing::Compressed,
+        UpdateState::Merging => Standing::Merging(snaps.progress()?),
+        UpdateState::MergeFailed => Standing::Failed(FailureCode::try_from(update.merge_failure_code).unwrap_or(FailureCode::Ok)),
+        UpdateState::MergeNeedsReboot | UpdateState::MergeCompleted => Standing::Merged,
+    })
+}
+
+/// Mount /metadata writable, to merge an update, or read-only again.
+pub fn metadata_writable(writable: bool) -> Result<()> {
+    skyward_block::mount::remount_writable(Path::new(METADATA), writable)
 }
 
 #[cfg(test)]
@@ -243,7 +406,11 @@ mod tests {
     }
 
     fn encoded(state: UpdateState) -> Vec<u8> {
-        SnapshotUpdateStatus { state: state as i32 }.encode_to_vec()
+        UpdateStatus { state: state as i32, ..UpdateStatus::default() }.encode_to_vec()
+    }
+
+    fn decode_state(bytes: &[u8]) -> Result<UpdateState> {
+        state_of(&decode_status(bytes)?)
     }
 
     fn phase(bytes: &[u8]) -> SnapshotState {
@@ -268,8 +435,31 @@ mod tests {
 
     #[test]
     fn unknown_state_value_is_an_error() {
-        let bytes = SnapshotUpdateStatus { state: 42 }.encode_to_vec();
+        let bytes = UpdateStatus { state: 42, ..UpdateStatus::default() }.encode_to_vec();
         assert!(decode_state(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_state_written_by_name_as_libsnapshot_once_wrote_it_is_read() {
+        assert_eq!(decode_state(b"merging").unwrap(), UpdateState::Merging);
+        assert_eq!(decode_state(b"merge-needs-reboot").unwrap(), UpdateState::MergeNeedsReboot);
+        assert_eq!(decode_state(b"initiated").unwrap(), UpdateState::Initiated);
+        assert_eq!(decode_state(b"none").unwrap(), UpdateState::None);
+        assert!(decode_state(b"half-merged").is_err());
+    }
+
+    #[test]
+    fn a_status_keeps_every_field_it_is_written_with() {
+        let status = UpdateStatus {
+            state: UpdateState::Merging as i32,
+            sectors_allocated: 4_210_688,
+            total_sectors: 4_225_024,
+            metadata_sectors: 33_024,
+            merge_phase: MergePhase::SecondPhase as i32,
+            source_build_fingerprint: "Xiaomi/ishtar/ishtar:13/TKQ1.221114.001/OS3.0.305.0.WMACNXM:user/release-keys".into(),
+            ..UpdateStatus::default()
+        };
+        assert_eq!(decode_status(&status.encode_to_vec()).unwrap(), status);
     }
 
     fn scratch(test: &str) -> std::path::PathBuf {
