@@ -6,7 +6,12 @@ use anyhow::Result;
 /// what lets the whole UI be built and reviewed without the phone.
 pub trait Surface {
     fn size(&self) -> (u32, u32);
+    /// Hand `canvas` to the display. It returns once the frame before it is
+    /// on the panel and this one is on its way, so the next frame is drawn
+    /// while this one goes out.
     fn present(&mut self, canvas: &Canvas) -> Result<()>;
+    /// Wait until the frame presented last is on the panel.
+    fn settle(&mut self) -> Result<()>;
 }
 
 /// How Qualcomm's display driver drives a mode, from the text of the
@@ -201,6 +206,12 @@ pub mod kms {
     /// wait.
     fn commit(card: &Card, req: atomic::AtomicModeReq, flags: AtomicCommitFlags) -> Result<()> {
         card.atomic_commit(flags | AtomicCommitFlags::NONBLOCK | AtomicCommitFlags::PAGE_FLIP_EVENT, req).context("atomic commit")?;
+        flipped(card)
+    }
+
+    /// Wait for the flip event of the commit made last, or fail once the
+    /// display has kept it waiting too long.
+    fn flipped(card: &Card) -> Result<()> {
         let deadline = Instant::now() + COMMIT_TIMEOUT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -324,12 +335,15 @@ pub mod kms {
     }
 
     /// Direct scanout on the built-in panel: its fastest mode on the CRTC
-    /// driving it, two dumb buffers swapped on one primary plane, and every
-    /// other connector and plane taken off that CRTC.
+    /// driving it, three dumb buffers taken in turn on its primary planes,
+    /// and every other connector and plane taken off that CRTC.
     pub struct KmsSurface {
         card: Card,
-        bufs: [Buf; 2],
+        bufs: [Buf; 3],
+        /// The buffer the next frame goes into.
         back: usize,
+        /// A frame was committed whose flip has not come yet.
+        flipping: bool,
         /// The planes showing the buffer, one per layer mixer, with their
         /// FB_ID properties.
         planes: Vec<(plane::Handle, property::Handle)>,
@@ -457,7 +471,7 @@ pub mod kms {
                 }
                 Ok(Buf { db, fb, map: map.cast(), len })
             };
-            let bufs = [make()?, make()?];
+            let bufs = [make()?, make()?, make()?];
 
             let crtc_id = u64::from(u32::from(crtc));
             let mut req = atomic::AtomicModeReq::new();
@@ -530,7 +544,7 @@ pub mod kms {
                 u32::from(crtc),
                 fourcc
             );
-            Ok(KmsSurface { card, bufs, back: 1, planes, w, h, order, summary })
+            Ok(KmsSurface { card, bufs, back: 1, flipping: false, planes, w, h, order, summary })
         }
 
         pub fn describe(&self) -> &str {
@@ -551,6 +565,13 @@ pub mod kms {
             (self.w, self.h)
         }
 
+        /// A command-mode panel is sent a frame from one of its TE signals
+        /// through most of the time to the next (6.8 of 8.3 ms on the 13
+        /// Ultra at 120 Hz), and the frame's flip comes as the sending
+        /// starts. A frame is committed the moment the flip of the one
+        /// before comes, to be sent from the next TE, and drawn while that
+        /// one is sent: into the buffer of the frame before both, which the
+        /// panel finished reading before the frame now being sent started.
         fn present(&mut self, canvas: &Canvas) -> Result<()> {
             if (canvas.w, canvas.h) != (self.w, self.h) {
                 return Err(anyhow!("canvas {}x{} does not match the display {}x{}", canvas.w, canvas.h, self.w, self.h));
@@ -576,8 +597,19 @@ pub mod kms {
             for &(plane, fb_prop) in &self.planes {
                 req.add_property(plane, fb_prop, property::Value::Framebuffer(Some(buf.fb)));
             }
-            commit(&self.card, req, AtomicCommitFlags::empty()).context("flip")?;
-            self.back = 1 - self.back;
+            self.settle()?;
+            let flags = AtomicCommitFlags::NONBLOCK | AtomicCommitFlags::PAGE_FLIP_EVENT;
+            self.card.atomic_commit(flags, req).context("flip")?;
+            self.flipping = true;
+            self.back = (self.back + 1) % self.bufs.len();
+            Ok(())
+        }
+
+        fn settle(&mut self) -> Result<()> {
+            if self.flipping {
+                flipped(&self.card).context("flip")?;
+                self.flipping = false;
+            }
             Ok(())
         }
     }

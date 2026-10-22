@@ -973,13 +973,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             // than cutting it shows nothing and cannot burn in.
             screen.data.fill(0);
             surface.present(&screen)?;
+            surface.settle()?;
             blanked = true;
         }
-        // After the frame, so a panel coming back on lights with what it
-        // should show now, never with what it showed when it went off.
+        // After the frame is on the panel, so a panel coming back on lights
+        // with what it should show now, never with what it showed when it
+        // went off.
+        if backlight.level == 0 && panel.is_some() {
+            surface.settle()?;
+        }
         backlight.show(panel)?;
-        // A frame shown has waited for the panel, which keeps the loop to
-        // its pace; otherwise the CPU gets at least a millisecond.
+        // A frame shown has waited for the one before it to reach the
+        // panel, which keeps the loop to the panel's pace; otherwise the CPU
+        // gets at least a millisecond.
         let floor = if shown { 0 } else { 1 };
         let until_due = app.deadline(now).map(|d| d.saturating_sub(now) as i32);
         let timeout = until_due.map_or(1000, |t| t.clamp(floor, 1000));
