@@ -715,6 +715,25 @@ fn draw_cross(c: &mut Canvas, t: &Theme, r: Rect, color: Rgba) {
     c.line(cx - arm, cy + arm, cx + arm, cy - arm, stroke, color);
 }
 
+/// The button that leaves the search, where the search page puts it, as
+/// ink that fades and blurs in and out: its disc and its cross, to lay in
+/// their colours.
+pub fn cancel_art(t: &Theme) -> (Sprite, Sprite) {
+    let (_, r) = search_layout(t);
+    let pad = blur_room(t);
+    let (x, y, side) = (r.x - pad, r.y - pad, (r.w + pad * 2.0).ceil() as u32);
+    let ink = Rgba::rgb(0, 0, 0);
+    let disc = Sprite::capture(x, y, side, side, |c, dx, dy| draw_disc(c, Rect::new(r.x + dx, r.y + dy, r.w, r.h), ink));
+    let cross = Sprite::capture(x, y, side, side, |c, dx, dy| draw_cross(c, t, Rect::new(r.x + dx, r.y + dy, r.w, r.h), ink));
+    (disc, cross)
+}
+
+/// The search field with nothing typed in it, filling `r`: the home page's
+/// bar as it moves to where the search page has its field.
+pub fn search_capsule(c: &mut Canvas, t: &Theme, f: &Fonts, r: Rect, placeholder: &str) {
+    draw_search_field(c, t, f, r.x, r.w, r.y + r.h / 2.0, "", placeholder, false);
+}
+
 /// The search bar opened for typing, from `x` across `w` and centred on
 /// `cy`: the text typed so far, or the placeholder, a button that clears
 /// the text, and the cursor where the typing goes.

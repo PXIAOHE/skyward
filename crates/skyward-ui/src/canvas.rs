@@ -136,6 +136,27 @@ impl Canvas {
         self.data[dst..dst + n].copy_from_slice(&strip.data[first as usize * row..first as usize * row + n]);
     }
 
+    /// Copy rows `from..to` of the opaque `src`, as wide as this canvas,
+    /// over it with the first of them at `y`; rows past either edge, of
+    /// either canvas, are left out.
+    pub fn put_rows(&mut self, src: &Canvas, from: i32, to: i32, y: i32) {
+        assert_eq!(src.w, self.w, "the rows span the canvas");
+        // Rows asked for above `src`'s top are left out, the rest landing
+        // where they would have.
+        let skip = (-from).max(0);
+        let (from, to, y) = (from + skip, to.min(src.h as i32), y + skip);
+        let n = (to - from).max(0);
+        let first = (-y).clamp(0, n);
+        let last = (self.h as i32 - y).clamp(first, n);
+        if first == last {
+            return;
+        }
+        let row = self.w as usize * 4;
+        let (dst, at) = ((y + first) as usize * row, (from + first) as usize * row);
+        let len = (last - first) as usize * row;
+        self.data[dst..dst + len].copy_from_slice(&src.data[at..at + len]);
+    }
+
     /// Each row as runs of clear, solid and partly covered pixels, for
     /// laying the canvas over something that keeps changing.
     pub fn runs(&self) -> Vec<Vec<Run>> {
@@ -494,5 +515,39 @@ fn rr_sdf(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
     let ox = dx.max(0.0);
     let oy = dy.max(0.0);
     (ox * ox + oy * oy).sqrt() + dx.max(dy).min(0.0) - r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A canvas two pixels wide whose row k is grey k.
+    fn graded(h: u32) -> Canvas {
+        let mut c = Canvas::new(2, h);
+        for (k, row) in c.data.chunks_mut(8).enumerate() {
+            let g = k as u8;
+            row.copy_from_slice(&[g, g, g, 255, g, g, g, 255]);
+        }
+        c
+    }
+
+    /// The grey of each row of `c`.
+    fn greys(c: &Canvas) -> Vec<u8> {
+        c.data.chunks(8).map(|row| row[0]).collect()
+    }
+
+    #[test]
+    fn rows_land_where_asked_and_are_cut_at_either_canvas_edge() {
+        let src = graded(10);
+        let mut c = Canvas::new(2, 4);
+        c.put_rows(&src, 2, 5, 1);
+        assert_eq!(greys(&c), [0, 2, 3, 4]);
+        let mut c = Canvas::new(2, 4);
+        c.put_rows(&src, -2, 3, 0);
+        assert_eq!(greys(&c), [0, 0, 0, 1], "rows above the source's top are not there to copy");
+        let mut c = Canvas::new(2, 4);
+        c.put_rows(&src, 6, 10, -1);
+        assert_eq!(greys(&c), [7, 8, 9, 0], "rows above this canvas's top are left out");
+    }
 }
 

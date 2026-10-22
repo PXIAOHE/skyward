@@ -1349,6 +1349,20 @@ const TOAST_MS: u64 = 2000;
 /// How long a text field's cursor shows and then hides, as the stock
 /// fields blink it.
 const BLINK_MS: u64 = 500;
+/// The spring the home page's search bar moves to the search page's field
+/// on, and back: critically damped, fitted to frames of the stock settings
+/// on a Xiaomi 17 Ultra.
+const MORPH_PERIOD: f32 = 0.292;
+/// Along the move, from 0 at the home page to 1 at the search page: where
+/// the large title has faded away, and the stretch over which the button
+/// leaving the search comes in.
+const MORPH_TITLE_GONE: f32 = 0.6;
+const MORPH_CANCEL: (f32, f32) = (0.45, 0.95);
+/// How blurred that button is as it starts to show, in dp.
+const MORPH_CANCEL_BLUR_DP: f32 = 8.0;
+/// When what the search page shows under its field comes in after the move
+/// starts, and how long it takes, in ms.
+const MORPH_BODY_MS: (u64, u64) = (380, 120);
 /// The most lines of what an install script shows that its page keeps,
 /// the latest; the log keeps them all.
 const SCRIPT_LINES: usize = 500;
@@ -1538,6 +1552,48 @@ fn draw_faded(out: &mut Canvas, blurs: &mut Blurs, dx: f32, dy: f32, color: Rgba
     }
 }
 
+/// The home page's search bar moving up to become the search page's
+/// field, or back down, as the stock settings move it: the home page's
+/// content goes at once on the way up and comes along under the bar on
+/// the way down; the large title fades and blurs as it goes up with the
+/// bar; the button leaving the search fades and sharpens in; the keyboard
+/// rises with the bar; and what the search page shows under its field
+/// comes in last.
+struct Morph {
+    /// Up to the search page.
+    into: bool,
+    /// How far along it is, from 0 at the home page to 1 at the search
+    /// page, as a spring in thousandths settling on the end it goes to.
+    spring: Spring,
+    start: u64,
+    /// How far the home page was scrolled, where its bar stood.
+    scroll: f32,
+    /// The search page's keyboard, and where it rests.
+    keyboard: Option<(Canvas, i32)>,
+    /// What the search page shows between its field and the keyboard, and
+    /// where.
+    body: Option<(Canvas, i32)>,
+    /// The home page's large title, and the button's disc and cross.
+    title: Option<Blurs>,
+    cancel: Option<(Blurs, Blurs)>,
+}
+
+impl Morph {
+    /// How far along it is at `now`, and whether it has settled.
+    fn at(&self, now: u64) -> (f32, bool) {
+        let (x, done) = self.spring.at(now);
+        (if self.into { 1.0 } else { 0.0 } + x / 1000.0, done)
+    }
+}
+
+/// The keyboard at the foot of a typing page's `frame`, and where it rests.
+fn keyboard_strip(t: &Theme, frame: &Frame) -> (Canvas, i32) {
+    let top = (t.m.h as f32 - widgets::keyboard_height(t)).floor() as i32;
+    let mut strip = Canvas::new(frame.canvas.w, (frame.canvas.h as i32 - top).max(0) as u32);
+    strip.put_rows(&frame.canvas, top, frame.canvas.h as i32, 0);
+    (strip, top)
+}
+
 pub struct App {
     pub state: State,
     /// The pages open, the one shown last: each with how far it is
@@ -1620,6 +1676,9 @@ pub struct App {
     edits: u64,
     /// Whether the frame last composed showed the cursor.
     caret_shown: bool,
+    /// The home page's search bar on its way to the search page's field,
+    /// or back.
+    morph: Option<Morph>,
     dirty: bool,
     w: u32,
     h: u32,
@@ -1665,6 +1724,7 @@ impl App {
             blink: None,
             edits: 0,
             caret_shown: false,
+            morph: None,
             dirty: true,
             w,
             h,
@@ -1711,6 +1771,7 @@ impl App {
                 || self.cue.is_some()
                 || self.title.moving(now)
                 || self.bar.moving(now)
+                || self.morph.is_some()
                 || self.glowing());
         if moving {
             return Some(0);
@@ -1795,7 +1856,7 @@ impl App {
             self.toast = None;
             self.dirty = true;
         }
-        if self.blink_at(now).is_some_and(|(on, _)| on != self.caret_shown) {
+        if self.blink_at(now).is_some_and(|(on, _)| on != self.caret_shown) || self.morph.is_some() {
             self.dirty = true;
         }
         if let Some(fling) = self.fling {
@@ -1974,6 +2035,7 @@ impl App {
         self.seek = None;
         self.pull = 0.0;
         self.cue = None;
+        self.morph = None;
     }
 
     /// Something laid over the page changed (the clock): compose again.
@@ -2454,6 +2516,12 @@ impl App {
                 false
             }
         };
+        if let Some(m) = &self.morph {
+            if !m.at(now).1 {
+                return self.compose_morph(out, f, info, clock, now, caret_on);
+            }
+            self.morph = None;
+        }
         let t = self.theme();
         let m = t.m;
         if let Some((which, track)) = self.knob.take() {
@@ -2614,6 +2682,65 @@ impl App {
         self.caret_shown
     }
 
+    /// Draw the search bar on its way between the home page and the search
+    /// page; see [`Morph`].
+    fn compose_morph(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64, caret_on: bool) {
+        let t = self.theme();
+        let m = t.m;
+        let frame = self.frame.as_ref().expect("rendered above");
+        let mut morph = self.morph.take().expect("composing it");
+        let (q, _) = morph.at(now);
+        let (field, _) = widgets::search_layout(&t);
+        let home = Rect::new(m.margin, m.content_top - morph.scroll, m.w as f32 - m.margin * 2.0, m.search_h);
+        let along = |a: f32, b: f32| a + (b - a) * q;
+        let bar = Rect::new(m.margin, along(home.y, field.y), along(home.w, field.w), m.search_h);
+        let rise = bar.y - home.y;
+        out.fill_rect(0.0, 0.0, out.w as f32, out.h as f32, frame.bg);
+        if morph.into {
+            // The search page's keyboard and what it shows under its
+            // field, from its frame; that comes in once the bar is nearly
+            // there.
+            let (_, keys_top) = *morph.keyboard.get_or_insert_with(|| keyboard_strip(&t, frame));
+            let (body, top) = morph.body.get_or_insert_with(|| {
+                let top = (field.y + field.h).ceil() as i32;
+                let mut body = Canvas::new(frame.canvas.w, (keys_top - top).max(0) as u32);
+                body.put_rows(&frame.canvas, top, keys_top, 0);
+                (body, top)
+            });
+            let (delay, span) = MORPH_BODY_MS;
+            out.lay(body, 0, *top, (now.saturating_sub(morph.start + delay) as f32 / span as f32).min(1.0));
+        } else {
+            // The home page under its bar comes down with it.
+            let below = m.content_top + m.search_h;
+            out.put_rows(&frame.canvas, below.floor() as i32, frame.canvas.h as i32, (below - morph.scroll + rise).floor() as i32);
+        }
+        let title = morph.title.get_or_insert_with(|| Blurs::new(widgets::big_title(&t, f, pages::HOME_TITLE)));
+        let level = (1.0 - q / MORPH_TITLE_GONE).clamp(0.0, 1.0);
+        draw_faded(out, title, 0.0, rise - morph.scroll, t.pal.text, level, (1.0 - level) * m.dp(TITLE_BLUR_DP));
+        if let Some((keys, top)) = &morph.keyboard {
+            out.put(keys, (*top as f32 + (1.0 - q) * keys.h as f32).round() as i32);
+        }
+        widgets::search_capsule(out, &t, f, bar, pages::SEARCH_HINT);
+        // The cursor shows from the start, going up with the field.
+        if let Some(caret) = frame.caret.as_ref().filter(|_| morph.into && caret_on) {
+            out.lay(&caret.art, caret.x, caret.y + (bar.y - field.y).round() as i32, 1.0);
+        }
+        let (disc, cross) = morph.cancel.get_or_insert_with(|| {
+            let (disc, cross) = widgets::cancel_art(&t);
+            (Blurs::new(disc), Blurs::new(cross))
+        });
+        let shown = ((q - MORPH_CANCEL.0) / (MORPH_CANCEL.1 - MORPH_CANCEL.0)).clamp(0.0, 1.0);
+        let blur = (1.0 - shown) * m.dp(MORPH_CANCEL_BLUR_DP);
+        draw_faded(out, disc, 0.0, 0.0, t.pal.search, shown, blur);
+        draw_faded(out, cross, 0.0, 0.0, t.pal.text, shown, blur);
+        self.morph = Some(morph);
+        let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
+        widgets::status_bar(out, &t, f, &Bar { clock, battery }, t.pal.status);
+        if let Some((text, _)) = &self.toast {
+            widgets::toast(out, &t, f, text);
+        }
+    }
+
     /// Put the page back where it rests, for a page just opened or returned
     /// to; its first frame shows the bar as its scroll has it.
     fn settle_page(&mut self) {
@@ -2656,6 +2783,36 @@ impl App {
         self.refresh();
     }
 
+    /// Set the home page's search bar moving up to the search page's field,
+    /// or back down, before the page changes: from where a move not yet
+    /// done has it, at the speed it has.
+    fn start_morph(&mut self, into: bool, now: u64) {
+        let (q, speed, title, cancel) = match self.morph.take() {
+            Some(m) => {
+                let (q, _) = m.at(now);
+                let speed = (q - m.at(now.saturating_sub(8)).0) / 0.008;
+                (q, speed, m.title, m.cancel)
+            }
+            None => (if into { 0.0 } else { 1.0 }, 0.0, None, None),
+        };
+        let target = if into { 1.0 } else { 0.0 };
+        // The home page is the page shown, or the one under the search.
+        let home = self.stack.len() - if into { 1 } else { 2 };
+        // On the way down the keyboard goes with the search page's frame.
+        let keyboard = if into { None } else { self.frame.as_ref().map(|fr| keyboard_strip(&self.theme(), fr)) };
+        self.morph = Some(Morph {
+            into,
+            spring: Spring::new(now, (q - target) * 1000.0, speed * 1000.0, MORPH_PERIOD),
+            start: now,
+            scroll: self.stack[home].1,
+            keyboard,
+            body: None,
+            title,
+            cancel,
+        });
+        self.dirty = true;
+    }
+
     /// Go back a page. Leaving the installing page stops what can be
     /// stopped; while a package is being read or written, the page stays.
     /// In the file manager, back climbs a folder until it reaches the root,
@@ -2664,6 +2821,9 @@ impl App {
         let mut fx = Vec::new();
         if self.stack.len() <= 1 {
             return fx;
+        }
+        if self.screen() == Screen::Search && self.stack[self.stack.len() - 2].0 == Screen::Home {
+            self.start_morph(false, now);
         }
         match self.screen() {
             Screen::Mount => self.state.mount_failure = None,
@@ -2866,6 +3026,9 @@ impl App {
     fn act(&mut self, action: Action, now: u64) -> Vec<Effect> {
         match action {
             Action::Open(s) => {
+                if s == Screen::Search && self.screen() == Screen::Home {
+                    self.start_morph(true, now);
+                }
                 self.open(s);
                 return self.arrive_at(s);
             }
@@ -4262,6 +4425,51 @@ mod tests {
         assert_eq!(app.screen(), Screen::Home, "the round button leaves the search");
         assert!(!shows(&mut app, 3300), "no cursor off the page");
         assert!(app.deadline(3300).is_none_or(|d| d > 10_000), "nor a wake for it, only for the screen going off");
+    }
+
+    #[test]
+    fn the_search_bar_moves_up_into_the_search_page_and_back_down() {
+        let (f, i) = (fonts(), info());
+        let t = Theme::light(W, H, PPD);
+        let m = t.m;
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut screen = Canvas::new(W, H);
+        // The bar's top along a column through it, clear of the title and
+        // the placeholder: the first row in the field's grey.
+        let x = m.dp(300.0) as u32;
+        let top = |screen: &Canvas| {
+            (m.dp(40.0) as u32..H).find(|&y| screen.data[((y * W + x) * 4) as usize] == t.pal.search.r).map(|y| y as f32)
+        };
+        let grey = |screen: &Canvas, y: f32| screen.data[((y as u32 * W + W / 2) * 4) as usize];
+        let (home, field) = (m.content_top, widgets::search_layout(&t).0.y);
+        // The device card under the home page's bar.
+        let card = m.content_top + m.search_h + m.after_search + m.dp(20.0);
+        app.compose(&mut screen, &f, &i, "12:00", 0);
+        assert_eq!(grey(&screen, card), t.pal.card.r);
+
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Search), 1000);
+        assert_eq!(app.screen(), Screen::Search);
+        assert_eq!(app.deadline(1000), Some(0), "it moves frame by frame");
+        app.compose(&mut screen, &f, &i, "12:00", 1067);
+        let along = crate::motion::settle(67, MORPH_PERIOD);
+        let expected = home + (field - home) * along;
+        let at = top(&screen).expect("the bar is on screen");
+        assert!((at - expected).abs() <= 2.0, "up {along} of the way after 67 ms: at {at}, not {expected}");
+        assert_eq!(grey(&screen, card), t.pal.bg.r, "the home page's cards go at once");
+        app.compose(&mut screen, &f, &i, "12:00", 2500);
+        assert!(app.morph.is_none(), "settled, the search page shows as itself");
+        assert_eq!(top(&screen), Some(field.ceil()));
+
+        tap_at(&mut app, &f, &i, Action::CloseSearch, 3000);
+        assert_eq!(app.screen(), Screen::Home);
+        app.compose(&mut screen, &f, &i, "12:00", 3067);
+        let expected = field + (home - field) * along;
+        let at = top(&screen).expect("the bar is on screen");
+        assert!((at - expected).abs() <= 2.0, "down {along} of the way after 67 ms: at {at}, not {expected}");
+        assert_eq!(grey(&screen, card + (at - home)), t.pal.card.r, "the cards come down under the bar");
+        app.compose(&mut screen, &f, &i, "12:00", 4500);
+        assert!(app.morph.is_none());
+        assert_eq!(top(&screen), Some(home.ceil()));
     }
 
     #[test]

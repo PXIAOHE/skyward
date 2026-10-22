@@ -97,6 +97,11 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
     }
 }
 
+/// The home page's large title, and what its search bar and the search
+/// page's field say while nothing is typed.
+pub const HOME_TITLE: &str = "Skyward";
+pub const SEARCH_HINT: &str = "搜索功能与分区";
+
 const REBOOT_TARGETS: [(&str, Option<&str>); 6] = [
     ("系统", None),
     ("恢复模式", None),
@@ -138,7 +143,7 @@ pub fn home(cx: &Ctx) -> Frame {
     let mut out = Vec::new();
     let mut y = t.m.content_top;
     let search_top = y;
-    y = widgets::search_bar(&mut c, t, f, y, "搜索功能与分区");
+    y = widgets::search_bar(&mut c, t, f, y, SEARCH_HINT);
     out.push(Hit { rect: Rect::new(t.m.margin, search_top, t.m.w as f32 - t.m.margin * 2.0, t.m.search_h), action: Action::Open(Screen::Search) });
 
     let sub = match &i.os_version {
@@ -201,7 +206,7 @@ pub fn home(cx: &Ctx) -> Frame {
         Action::Open(Screen::Settings),
         Action::Open(Screen::Reboot),
     ]));
-    Frame { back: false, ..Frame::new(t, fit(c, t, system.bottom), out, "Skyward", search_top) }
+    Frame { back: false, ..Frame::new(t, fit(c, t, system.bottom), out, HOME_TITLE, search_top) }
 }
 
 /// Preferences, opening with the stock「显示与亮度」theme previews.
@@ -1077,7 +1082,7 @@ pub fn search(cx: &Ctx) -> Frame {
     let mut c = page(t);
     let mut out = Vec::new();
     let (at, cancel) = widgets::search_layout(t);
-    let field = widgets::search_field(&mut c, t, f, at.x, at.w, at.y + at.h / 2.0, &s.search, "搜索功能与分区");
+    let field = widgets::search_field(&mut c, t, f, at.x, at.w, at.y + at.h / 2.0, &s.search, SEARCH_HINT);
     widgets::cancel_button(&mut c, t, cancel);
     out.push(Hit { rect: cancel, action: Action::CloseSearch });
     let top = field.field.y + field.field.h + m.dp(12.0);
