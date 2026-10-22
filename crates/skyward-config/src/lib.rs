@@ -118,6 +118,10 @@ pub struct Display {
     /// Marketed screen diagonal in inches.
     #[serde(default)]
     pub diagonal: Option<f32>,
+    /// How round the screen's corners are, as a radius in pixels; a page
+    /// sliding over another rounds its leading corners to it.
+    #[serde(default)]
+    pub corner_radius: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

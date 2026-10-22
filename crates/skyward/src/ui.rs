@@ -775,6 +775,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         Work::Menu | Work::Exit | Work::WipeData | Work::WipeCache | Work::Sideload { .. } => start,
     };
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
+    app.set_screen_corners(cfg.display.corner_radius as f32);
     app.set_asked(asked(&request));
     // Keep the level the boot splash had, so the panel does not jump, or
     // the slider's top when it was brighter; a dark panel gets the

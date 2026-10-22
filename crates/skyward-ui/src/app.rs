@@ -1374,6 +1374,17 @@ const ROW_PRESS_PERIOD: f32 = 0.18;
 /// A row let go before it showed pressed shows pressed from the lift this
 /// long, as Android shows a quick tap.
 const QUICK_TAP_MS: u64 = 64;
+/// A page opening slides in on a critically damped spring of this period,
+/// set off already moving this fast, in screen widths a second; a page
+/// going back slides off on a spring of this period, from rest. Both fitted
+/// to frames of the stock settings on a Xiaomi 17 Ultra.
+const OPEN_PERIOD: f32 = 0.37;
+const OPEN_SPEED: f32 = 2.94;
+const BACK_PERIOD: f32 = 0.393;
+/// While a page in front covers it wholly, the page behind stands this far
+/// left, in screen widths, darkened this much.
+const BEHIND_SHIFT: f32 = 0.25;
+const BEHIND_DIM: f32 = 0.47;
 /// The most lines of what an install script shows that its page keeps,
 /// the latest; the log keeps them all.
 const SCRIPT_LINES: usize = 500;
@@ -1643,6 +1654,40 @@ impl RowPress {
     }
 }
 
+/// How a page showed on a frame: how far scrolled, and how far past an end
+/// with that; how far its bar and the bar's title had come in; where the
+/// keys' light was; whether the cursor showed; how dark the row a finger
+/// held was; and the button a finger held.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct View {
+    scroll: f32,
+    offset: f32,
+    bar: f32,
+    title: f32,
+    light: Option<(Group, Rect, f32, Rgba)>,
+    caret: bool,
+    row: f32,
+    pressing: Option<Action>,
+}
+
+/// A page sliding over another as it opens or goes back, as the stock
+/// settings slide them. A page opened comes in from the right edge over
+/// the page it opens from, which shifts a quarter of the way left and
+/// darkens; going back, the page left slides off to the right over the
+/// page gone back to, which comes back from the left and brightens. The
+/// page in front has its left corners rounded as the screen's are.
+struct Turn {
+    /// Going back: the page in front is the page left; else the page
+    /// opened.
+    back: bool,
+    /// The page left, as it last showed.
+    left: Canvas,
+    /// How far from the left edge the page in front stands, in thousandths
+    /// of the screen's width, as a spring settling where it goes; set off
+    /// on the first frame of the slide.
+    spring: Option<Spring>,
+}
+
 /// Whether a control is a row: as wide as the cards it lies on.
 fn row_wide(t: &Theme, r: Rect) -> bool {
     let m = &t.m;
@@ -1754,6 +1799,16 @@ pub struct App {
     /// the part of the page it lies on as drawn and as drawn held down.
     row_press: Option<RowPress>,
     row_art: Option<(Canvas, Canvas)>,
+    /// How the page showed on the last frame, while it can be drawn so
+    /// again: until it is rendered anew.
+    shown: Option<View>,
+    /// A page sliding in over the page left, or off over the page gone
+    /// back to.
+    turn: Option<Turn>,
+    /// The canvas the last page left was drawn on, to draw the next on.
+    backdrop: Option<Canvas>,
+    /// How round the screen's corners are, in pixels.
+    corners: f32,
     dirty: bool,
     w: u32,
     h: u32,
@@ -1802,11 +1857,21 @@ impl App {
             morph: None,
             row_press: None,
             row_art: None,
+            shown: None,
+            turn: None,
+            backdrop: None,
+            corners: 0.0,
             dirty: true,
             w,
             h,
             px_per_dp,
         }
+    }
+
+    /// The screen's corners are rounded to `radius` pixels: so are the
+    /// leading corners of a page sliding over another.
+    pub fn set_screen_corners(&mut self, radius: f32) {
+        self.corners = radius;
     }
 
     pub fn theme(&self) -> Theme {
@@ -1849,6 +1914,7 @@ impl App {
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
+                || self.turn.is_some()
                 || self.row_press.is_some_and(|p| p.changing(now) || p.gone(now))
                 || self.glowing());
         if moving {
@@ -1935,7 +2001,7 @@ impl App {
             self.toast = None;
             self.dirty = true;
         }
-        if self.blink_at(now).is_some_and(|(on, _)| on != self.caret_shown) || self.morph.is_some() {
+        if self.blink_at(now).is_some_and(|(on, _)| on != self.caret_shown) || self.morph.is_some() || self.turn.is_some() {
             self.dirty = true;
         }
         if let Some(p) = self.row_press {
@@ -2126,6 +2192,15 @@ impl App {
         self.morph = None;
         self.row_press = None;
         self.row_art = None;
+        self.end_turn();
+    }
+
+    /// A page sliding over another comes to rest at once.
+    fn end_turn(&mut self) {
+        if let Some(turn) = self.turn.take() {
+            self.backdrop = Some(turn.left);
+            self.dirty = true;
+        }
     }
 
     /// Something laid over the page changed (the clock): compose again.
@@ -2139,6 +2214,7 @@ impl App {
         self.spots = None;
         self.knob = None;
         self.row_art = None;
+        self.shown = None;
         self.spare.extend(self.drawn.drain(..).map(|(_, c)| c));
         self.dirty = true;
     }
@@ -2246,7 +2322,10 @@ impl App {
             self.state.clip = None;
         }
         self.state.job = Some(FileJob { task, progress: None, outcome: None, stopping: false });
+        // The work's page takes the place of the entry's page, sliding in
+        // over it.
         if self.screen() == Screen::FileInfo {
+            self.leave(false);
             self.state.file = None;
             self.state.asking_delete = false;
             self.stack.pop();
@@ -2279,6 +2358,7 @@ impl App {
             Some(said) => {
                 self.state.job = None;
                 if self.screen() == Screen::FileJob {
+                    self.leave(true);
                     self.stack.pop();
                     self.settle_page();
                 }
@@ -2297,6 +2377,7 @@ impl App {
     pub fn renamed(&mut self, outcome: Result<(), RenameRefused>, now: u64) {
         match outcome {
             Ok(()) => {
+                self.leave(true);
                 while matches!(self.screen(), Screen::Rename | Screen::FileInfo) {
                     self.stack.pop();
                 }
@@ -2460,6 +2541,7 @@ impl App {
                 self.state.restore = None;
                 self.state.asking_delete = false;
                 if self.screen() == Screen::RestoreBackup {
+                    self.leave(true);
                     self.stack.pop();
                     self.settle_page();
                 }
@@ -2513,6 +2595,7 @@ impl App {
                 self.state.restore = None;
                 self.state.asking_delete = false;
                 self.state.confirm = 0.0;
+                self.leave(true);
                 self.stack.pop();
                 self.settle_page();
                 return vec![self.find_backups()];
@@ -2594,8 +2677,9 @@ impl App {
 
     /// Draw what the panel shows now: the visible part of the page, pulled
     /// past an end if it is, its large title fading as it scrolls, the bar
-    /// and its title over a scrolled page, the `<`, the status bar, any
-    /// message, and the back cue while a swipe from an edge is under way.
+    /// and its title over a scrolled page, the `<`, the page sliding in or
+    /// out over or under the page left, the status bar, any message, and
+    /// the back cue while a swipe from an edge is under way.
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
         self.frame(f, info);
         let screen = self.screen();
@@ -2614,7 +2698,6 @@ impl App {
             self.morph = None;
         }
         let t = self.theme();
-        let m = t.m;
         if let Some((which, track)) = self.knob.take() {
             self.paint_knob(&t, f, which, track);
         }
@@ -2642,27 +2725,65 @@ impl App {
             let (x, y, w, h) = row_part(press.rect, page);
             self.row_art = Some((page.crop(x, y, w, h), down.crop(x, y, w, h)));
         }
-        let pressing = self.pressing();
         let scroll = self.top().1;
         let offset = (scroll + self.overscroll(now)).round();
-        let light = self.light(offset);
+        let view = View {
+            scroll,
+            offset,
+            bar: self.bar.level(now),
+            title: self.title.level(now),
+            light: self.light(offset),
+            caret: caret_on,
+            row: self.row_press.map_or(0.0, |p| p.level(now)),
+            pressing: self.pressing(),
+        };
+        self.paint_page(out, &t, Some((f, info)), &view);
+        self.shown = Some(view);
+        self.slide(out, now);
+
+        let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
+        widgets::status_bar(out, &t, f, &Bar { clock, battery }, t.pal.status);
+        if let Some((text, _)) = &self.toast {
+            widgets::toast(out, &t, f, text);
+        }
+        match self.drag {
+            Drag::Edge { start, from_left, armed, x, cy } => {
+                let travel = if from_left { x - start } else { start - x };
+                widgets::back_cue(out, &t, from_left, cy, widgets::back_cue_depth(&t, travel), armed);
+            }
+            _ => {
+                if let Some((from_left, cy, s)) = self.cue {
+                    widgets::back_cue(out, &t, from_left, cy, s.at(now).0.max(0.0), false);
+                }
+            }
+        }
+    }
+
+    /// Draw the page shown as `view` has it: all of it but the status bar,
+    /// any message and the back cue, which lie over every page. Rows of its
+    /// long list come into view are drawn with `fresh`; a page drawn again
+    /// as it last showed has them drawn already.
+    fn paint_page(&mut self, out: &mut Canvas, t: &Theme, fresh: Option<(&Fonts, &DeviceInfo)>, view: &View) {
+        let m = t.m;
+        let screen = self.screen();
+        let (scroll, offset, pressing) = (view.scroll, view.offset, view.pressing);
         // The light goes over its control, in the part of the screen the
         // control is drawn in, under whatever is laid over that part.
         let shine = |out: &mut Canvas, part: Group| {
-            if let Some((g, r, radius, tint)) = light {
+            if let Some((g, r, radius, tint)) = view.light {
                 if g == part {
                     out.fill_round_rect(r.x, r.y, r.w, r.h, radius, tint);
                 }
             }
         };
-        let frame = self.frame.as_ref().expect("rendered above");
-        let (_, big, small) = self.titles.as_mut().expect("drawn above");
+        let frame = self.frame.as_ref().expect("a page is drawn from its frame");
+        let (_, big, small) = self.titles.as_mut().expect("a page's titles are drawn with it");
         // The row a finger holds darkens as part of the page, under what is
         // laid over the page.
         let press_row = |out: &mut Canvas| {
             if let (Some(press), Some((was, is))) = (self.row_press, &self.row_art) {
                 let (x, y, _, _) = row_part(press.rect, &frame.canvas);
-                out.relay(was, is, x as i32, y as i32 - offset as i32, press.level(now));
+                out.relay(was, is, x as i32, y as i32 - offset as i32, view.row);
             }
         };
 
@@ -2672,12 +2793,12 @@ impl App {
             // first, then the wordmark.
             let glow = self.glow.as_ref().expect("the About page keeps its field");
             let fade = (1.0 - scroll / m.dp(ABOUT_FIELD_DP)).clamp(0.0, 1.0);
-            let top = (widgets::bar_bottom(&t) + m.dp(ABOUT_FIELD_DP)) / m.h as f32;
+            let top = (widgets::bar_bottom(t) + m.dp(ABOUT_FIELD_DP)) / m.h as f32;
             let field = glow::sample(glow, out.w as usize, out.h as usize, FIELD_CELL, top, t.pal.bg, fade);
             let dither = self.dither.get_or_insert_with(|| glow::Dither::new(out.w as usize, out.h as usize));
             glow::paint(out, &field, fade, &glow::Layer { canvas: &frame.canvas, runs: &art.runs, offset: offset as isize }, dither);
             press_row(out);
-            let range = m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(&t);
+            let range = m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(t);
             let v = (scroll / range).clamp(0.0, 1.0);
             art.version.draw_scaled(out, 0.0, 0.0, 1.0 - 0.1 * v, t.hero.version, 1.0 - v);
             let l = ((scroll - range) / m.dp(ABOUT_LOGO_FADE_DP)).clamp(0.0, 1.0);
@@ -2710,10 +2831,11 @@ impl App {
                     let k = match self.drawn.iter().position(|(j, _)| *j == i) {
                         Some(k) => k,
                         None => {
+                            let (f, info) = fresh.expect("a page drawn again as it last showed has its rows in view drawn");
                             let mut c = self.spare.pop().unwrap_or_else(|| Canvas::new(out.w, 0));
                             c.h = (rows.edges[i + 1] - rows.edges[i]) as u32;
                             c.data.resize((c.w * c.h * 4) as usize, 0);
-                            let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref() };
+                            let cx = Ctx { t, f, info, state: &self.state, term: self.term.as_ref() };
                             pages::row(screen, &cx, i, &mut c);
                             self.drawn.push((i, c));
                             self.drawn.len() - 1
@@ -2737,25 +2859,25 @@ impl App {
             let r = frame.hits.iter().find(|h| h.action == a).expect("a button held down is on its page").rect;
             let r = Rect { y: r.y - offset, ..r };
             if a == Action::CloseSearch {
-                widgets::cancel_held(out, &t, r);
+                widgets::cancel_held(out, t, r);
             } else {
-                widgets::search_bar_held(out, &t, r);
+                widgets::search_bar_held(out, t, r);
             }
         }
-        if let Some(caret) = frame.caret.as_ref().filter(|_| caret_on) {
+        if let Some(caret) = frame.caret.as_ref().filter(|_| view.caret) {
             out.lay(&caret.art, caret.x, caret.y - offset as i32, 1.0);
         }
-        let bar = self.bar.level(now);
-        let strip = frame.pinned.as_ref().map(|p| (p, pinned_top(&t, p, offset)));
+        let bar = view.bar;
+        let strip = frame.pinned.as_ref().map(|p| (p, pinned_top(t, p, offset)));
         shine(out, Group::Page);
         if bar > 0.0 {
             match strip {
                 // The strip under the bar is veiled with it, and the list
                 // thins out below the strip.
-                Some((p, top)) => widgets::strip_mask(out, &t, frame.bg, bar, top.round(), top.round() + p.canvas.h as f32),
+                Some((p, top)) => widgets::strip_mask(out, t, frame.bg, bar, top.round(), top.round() + p.canvas.h as f32),
                 None => {
                     let stops = if frame.hero.is_some() { &widgets::ABOUT_BAR_MASK[..] } else { &widgets::BAR_MASK[..] };
-                    widgets::bar_mask(out, &t, stops, frame.bg, bar);
+                    widgets::bar_mask(out, t, stops, frame.bg, bar);
                 }
             }
         }
@@ -2768,35 +2890,42 @@ impl App {
             shine(out, Group::Dock);
         }
         if frame.back {
-            let (_, chip, x, y) = self.chip.as_ref().expect("drawn above");
+            let (_, chip, x, y) = self.chip.as_ref().expect("a page's `<` is drawn with it");
             out.lay(chip, *x, *y, bar);
             if pressing == Some(Action::Back) {
-                widgets::back_held(out, &t);
+                widgets::back_held(out, t);
             } else {
-                widgets::back_arrow(out, &t, t.pal.text);
+                widgets::back_arrow(out, t, t.pal.text);
             }
             shine(out, Group::Fixed);
         }
-        let level = self.title.level(now);
+        let level = view.title;
         let blur = if frame.hero.is_some() { 0.0 } else { (1.0 - level) * m.dp(TITLE_BLUR_DP) };
         draw_faded(out, small, 0.0, 0.0, t.pal.text, level, blur);
+    }
 
-        let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
-        widgets::status_bar(out, &t, f, &Bar { clock, battery }, t.pal.status);
-        if let Some((text, _)) = &self.toast {
-            widgets::toast(out, &t, f, text);
-        }
-        match self.drag {
-            Drag::Edge { start, from_left, armed, x, cy } => {
-                let travel = if from_left { x - start } else { start - x };
-                widgets::back_cue(out, &t, from_left, cy, widgets::back_cue_depth(&t, travel), armed);
+    /// Slide the page drawn in `out` in over the page left, or the page
+    /// left off over it; see [`Turn`].
+    fn slide(&mut self, out: &mut Canvas, now: u64) {
+        let Some(turn) = &mut self.turn else { return };
+        let spring = *turn.spring.get_or_insert_with(|| {
+            if turn.back {
+                Spring::new(now, -1000.0, 0.0, BACK_PERIOD)
+            } else {
+                Spring::new(now, 1000.0, -OPEN_SPEED * 1000.0, OPEN_PERIOD)
             }
-            _ => {
-                if let Some((from_left, cy, s)) = self.cue {
-                    widgets::back_cue(out, &t, from_left, cy, s.at(now).0.max(0.0), false);
-                }
-            }
+        });
+        let (x, done) = spring.at(now);
+        if done {
+            self.backdrop = self.turn.take().map(|t| t.left);
+            return;
         }
+        // Where the page in front stands, in screen widths from the left
+        // edge.
+        let along = if turn.back { 1.0 + x / 1000.0 } else { x / 1000.0 };
+        let w = out.w as f32;
+        let (front, behind) = ((along * w).round() as i32, (BEHIND_SHIFT * w * (1.0 - along)).round() as i32);
+        out.slide(&turn.left, !turn.back, front, behind, BEHIND_DIM * (1.0 - along), self.corners);
     }
 
     /// Whether the cursor of the text field on `screen` shows at `now`: it
@@ -2908,10 +3037,36 @@ impl App {
         self.dirty = true;
     }
 
+    /// Open `screen` over the page shown, sliding in over it.
     fn open(&mut self, screen: Screen) {
+        self.leave(false);
+        self.push(screen);
+    }
+
+    fn push(&mut self, screen: Screen) {
         self.stack.push((screen, 0.0, Focus::Unset));
         self.settle_page();
         self.refresh();
+    }
+
+    /// The page shown gives way to another, opened over it or, `back`, gone
+    /// back to under it: draw it as it last showed, to slide away. Changes
+    /// made before the slide's first frame keep the page that showed; a
+    /// page rendered anew since it last showed gives way at once.
+    fn leave(&mut self, back: bool) {
+        if let Some(turn) = self.turn.as_mut().filter(|t| t.spring.is_none()) {
+            turn.back = back;
+            return;
+        }
+        self.end_turn();
+        let Some(view) = self.shown.take() else { return };
+        let mut left = self.backdrop.take().unwrap_or_else(|| Canvas::new(self.w, self.h));
+        // The `<` comes up with the finger, before its page goes.
+        let view = View { pressing: None, ..view };
+        let t = self.theme();
+        self.paint_page(&mut left, &t, None, &view);
+        self.turn = Some(Turn { back, left, spring: None });
+        self.dirty = true;
     }
 
     /// Set the home page's search bar moving up to the search page's field,
@@ -2953,7 +3108,8 @@ impl App {
         if self.stack.len() <= 1 {
             return fx;
         }
-        if self.screen() == Screen::Search && self.stack[self.stack.len() - 2].0 == Screen::Home {
+        let morph = self.screen() == Screen::Search && self.stack[self.stack.len() - 2].0 == Screen::Home;
+        if morph {
             self.start_morph(false, now);
         }
         match self.screen() {
@@ -3027,6 +3183,9 @@ impl App {
                 Install::Finished { .. } => self.state.install = Install::Idle,
                 Install::Idle | Install::Ending => {}
             }
+        }
+        if !morph {
+            self.leave(true);
         }
         self.stack.pop();
         self.state.confirm = 0.0;
@@ -3159,12 +3318,15 @@ impl App {
             Action::Open(s) => {
                 if s == Screen::Search && self.screen() == Screen::Home {
                     self.start_morph(true, now);
+                    self.push(s);
+                } else {
+                    self.open(s);
                 }
-                self.open(s);
                 return self.arrive_at(s);
             }
             Action::OpenData => return self.open_data(),
             Action::Skip => {
+                self.leave(true);
                 if self.stack.len() > 1 {
                     self.stack.pop();
                 } else {
@@ -3295,6 +3457,7 @@ impl App {
             }
             Action::Resolve(choice) => {
                 let (clip, into, _) = self.state.clash.take().expect("a choice answers a clash");
+                self.leave(true);
                 self.stack.pop();
                 self.settle_page();
                 self.refresh();
@@ -3588,8 +3751,9 @@ impl App {
             self.drag = Drag::Waking;
             return Vec::new();
         }
-        // A finger on the glass puts the keys' light out, and whatever a
-        // key held down was doing comes to nothing.
+        // A finger on the glass puts the keys' light out, whatever a key
+        // held down was doing comes to nothing, and a page sliding comes to
+        // rest.
         if matches!(ev, Touch::Down(..)) {
             if self.keys {
                 self.keys = false;
@@ -3597,6 +3761,7 @@ impl App {
                 self.dirty = true;
             }
             self.drop_button();
+            self.end_turn();
         }
         self.stir(now);
         let t = self.theme();
@@ -3836,8 +4001,9 @@ impl App {
     /// one lit as it comes back up; otherwise the first volume press lights
     /// a control, and the power key turns the panel off.
     pub fn key(&mut self, key: Key, now: u64) -> Vec<Effect> {
-        // Any button stops a gliding page.
+        // Any button stops a gliding page, and brings a sliding one to rest.
         self.fling = None;
+        self.end_turn();
         if !self.display_on {
             // Any button lights the dark panel, and does only that.
             self.wake(now);
@@ -4659,6 +4825,119 @@ mod tests {
     fn darkest(c: &Canvas, r: Rect) -> u8 {
         let (x0, y0, x1, y1) = (r.x as u32, r.y as u32, (r.x + r.w) as u32, (r.y + r.h) as u32);
         (y0..y1).flat_map(|y| (x0..x1).map(move |x| c.data[((y * c.w + x) * 4) as usize])).min().expect("a part of the screen")
+    }
+
+    /// A copy of the screen.
+    fn shot(c: &Canvas) -> Canvas {
+        Canvas { w: c.w, h: c.h, data: c.data.clone() }
+    }
+
+    /// How a slide opening a page, or going `back`, stands `ms` into it:
+    /// where the page in front stands, how far left the page behind is, and
+    /// how much of its light the page behind keeps, in 256ths.
+    fn slid(back: bool, ms: u64) -> (u32, u32, u32) {
+        let (x, _) = if back { Spring::new(0, -1000.0, 0.0, BACK_PERIOD) } else { Spring::new(0, 1000.0, -OPEN_SPEED * 1000.0, OPEN_PERIOD) }.at(ms);
+        let along = if back { 1.0 + x / 1000.0 } else { x / 1000.0 };
+        let front = (along * W as f32).round() as u32;
+        let behind = (BEHIND_SHIFT * W as f32 * (1.0 - along)).round() as u32;
+        let keep = ((1.0 - BEHIND_DIM * (1.0 - along)) * 256.0).round() as u32;
+        (front, behind, keep)
+    }
+
+    /// Check row `y` of `mid`: the page `ahead` from `front` on, and left of
+    /// it the page `under`, `behind` pixels left of rest and keeping `keep`
+    /// 256ths of its light.
+    fn check_slide(mid: &Canvas, ahead: &Canvas, under: &Canvas, y: u32, (front, behind, keep): (u32, u32, u32)) {
+        for x in 0..W {
+            let at = |c: &Canvas, x: u32| c.data[((y * W + x) * 4) as usize] as u32;
+            let want = if x >= front { at(ahead, x - front) } else { (at(under, x + behind) * keep) >> 8 };
+            let got = at(mid, x);
+            assert!(got.abs_diff(want) <= 1, "column {x} of row {y}: {got}, not {want} (front {front}, behind {behind})");
+        }
+    }
+
+    #[test]
+    fn a_page_opened_slides_in_over_the_page_it_opens_from_and_back_off_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        let home = shot(&c);
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Mount), 1000);
+        assert_eq!(app.screen(), Screen::Mount);
+        assert_eq!(app.deadline(1000), Some(0), "it slides frame by frame");
+        // The slide sets off with its first frame, the page opened still
+        // past the right edge.
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        let first = shot(&c);
+        app.compose(&mut c, &f, &i, "12:00", 1050);
+        let mid = shot(&c);
+        app.compose(&mut c, &f, &i, "12:00", 3000);
+        assert!(app.turn.is_none(), "come to rest, the page left is let go");
+        assert_ne!(app.deadline(3000), Some(0));
+        let mount = shot(&c);
+        for y in [H / 3, H / 2, H - 200] {
+            check_slide(&first, &mount, &home, y, (W, 0, 256));
+            check_slide(&mid, &mount, &home, y, slid(false, 50));
+        }
+        let (front, _, _) = slid(false, 50);
+        assert!((front as f32 / W as f32 - 0.728).abs() < 0.01, "about three quarters of the way in after 50 ms: {front}");
+
+        tap_back(&mut app, &f, &i, 4000);
+        assert_eq!(app.screen(), Screen::Home);
+        app.compose(&mut c, &f, &i, "12:00", 4000);
+        let first = shot(&c);
+        app.compose(&mut c, &f, &i, "12:00", 4060);
+        let mid = shot(&c);
+        app.compose(&mut c, &f, &i, "12:00", 6000);
+        assert!(app.turn.is_none());
+        let home = shot(&c);
+        for y in [H / 3, H / 2, H - 200] {
+            check_slide(&first, &mount, &home, y, (0, W / 4, ((1.0 - BEHIND_DIM) * 256.0).round() as u32));
+            check_slide(&mid, &mount, &home, y, slid(true, 60));
+        }
+    }
+
+    #[test]
+    fn a_page_sliding_has_its_leading_corners_rounded_as_the_screens_are() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.set_screen_corners(140.0);
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        let home = shot(&c);
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Mount), 1000);
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        app.compose(&mut c, &f, &i, "12:00", 1050);
+        let mid = shot(&c);
+        app.compose(&mut c, &f, &i, "12:00", 3000);
+        let mount = shot(&c);
+        let (front, behind, keep) = slid(false, 50);
+        let at = |c: &Canvas, x: u32, y: u32| c.data[((y * W + x) * 4) as usize] as u32;
+        let y = H - 3;
+        assert_eq!(at(&mid, front + 5, y), (at(&home, front + 5 + behind, y) * keep) >> 8, "the corner's tip shows the page behind");
+        assert_eq!(at(&mid, front + 140, y), at(&mount, 140, y), "past the corner's curve the page in front is whole");
+        assert_eq!(at(&mid, front + 5, H / 2), at(&mount, 5, H / 2), "between the corners its edge is straight");
+    }
+
+    #[test]
+    fn a_finger_brings_a_sliding_page_to_rest_and_a_page_never_shown_gives_way_at_once() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Mount), 1000);
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        app.touch(Touch::Down(W as f32 / 2.0, H as f32 / 2.0), &f, 1030);
+        assert!(app.turn.is_none(), "a finger brings it to rest");
+        app.touch(Touch::Up, &f, 1060);
+
+        // A page rendered anew since it last showed is not drawn as it
+        // stands: what replaces it shows at once.
+        app.refresh();
+        tap_back(&mut app, &f, &i, 2000);
+        assert_eq!(app.screen(), Screen::Home);
+        assert!(app.turn.is_none());
     }
 
     #[test]

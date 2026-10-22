@@ -11,6 +11,8 @@ width = 1200
 height = 2608
 density = 480
 diagonal = 6.9
+# The radius the stock settings round a page's corners to as it slides in.
+corner_radius = 170
 
 [modules]
 sources = ["vendor_boot", "vendor_dlkm", "vendor"]

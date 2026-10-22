@@ -570,7 +570,7 @@ fn main() -> Result<()> {
     }
 
     // The panel mid-gesture, to set beside recordings of the same moves.
-    let moments: [Moment; 18] = [
+    let moments: [Moment; 22] = [
         ("08-about-light", Screen::About, false, &|_, _| 2000),
         ("08-about-dark", Screen::About, true, &|_, _| 2000),
         ("08-about-light-later", Screen::About, false, &|_, _| 9000),
@@ -604,9 +604,44 @@ fn main() -> Result<()> {
         }),
         ("111-home-keys-light", Screen::Home, false, &|app, f| keys_down(app, f, &info, 3)),
         ("112-home-keys-dark", Screen::Home, true, &|app, f| keys_down(app, f, &info, 9)),
+        // A row held down until dark, then let go: the page it opens slides
+        // in over it.
+        ("119-home-row-held-light", Screen::Home, false, &|app, f| {
+            finger_on(app, f, &info, Action::Open(Screen::Settings), 1000);
+            frames(app, f, &info, 1000, 1400);
+            1400
+        }),
+        ("120-home-row-opens-light", Screen::Home, false, &|app, f| {
+            finger_on(app, f, &info, Action::Open(Screen::Settings), 1000);
+            frames(app, f, &info, 1000, 1400);
+            app.touch(Touch::Up, f, 1400);
+            frames(app, f, &info, 1400, 1440);
+            1450
+        }),
+        // `<` held down, then let go: the page slides off over the one gone
+        // back to.
+        ("121-settings-back-held-dark", Screen::Home, true, &|app, f| {
+            finger_on(app, f, &info, Action::Open(Screen::Settings), 1000);
+            app.touch(Touch::Up, f, 1050);
+            frames(app, f, &info, 1050, 2000);
+            finger_on(app, f, &info, Action::Back, 2000);
+            frames(app, f, &info, 2000, 2100);
+            2100
+        }),
+        ("122-settings-goes-back-dark", Screen::Home, true, &|app, f| {
+            finger_on(app, f, &info, Action::Open(Screen::Settings), 1000);
+            app.touch(Touch::Up, f, 1050);
+            frames(app, f, &info, 1050, 2000);
+            finger_on(app, f, &info, Action::Back, 2000);
+            frames(app, f, &info, 2000, 2100);
+            app.touch(Touch::Up, f, 2100);
+            frames(app, f, &info, 2100, 2160);
+            2170
+        }),
     ];
     for (name, screen, dark, act) in moments {
         let mut app = opened(screen, w, h, ppd);
+        app.set_screen_corners(cfg.display.corner_radius as f32);
         app.state.dark = dark;
         app.frame(&fonts, &info);
         app.tick(0);
@@ -664,6 +699,28 @@ fn drag(app: &mut App, f: &Fonts, y0: f32, y1: f32) -> u64 {
         app.tick(ms);
     }
     2000
+}
+
+/// Put a finger down at `at` on the control doing `action`, on the page
+/// drawn: `<`, or one of the page's own.
+fn finger_on(app: &mut App, f: &Fonts, info: &DeviceInfo, action: Action, at: u64) {
+    let t = app.theme();
+    let rect = match action {
+        Action::Back => widgets::back_rect(&t),
+        _ => app.frame(f, info).hits.iter().find(|h| h.action == action).expect("the control is on the page").rect,
+    };
+    let (x, y) = rect.centre();
+    app.touch(Touch::Down(x, y), f, at);
+}
+
+/// Draw a frame every 8 ms from `from` to `to`, as the panel does.
+fn frames(app: &mut App, f: &Fonts, info: &DeviceInfo, from: u64, to: u64) {
+    let t = app.theme();
+    let mut c = Canvas::new(t.m.w, t.m.h);
+    for ms in (from..=to).step_by(8) {
+        app.tick(ms);
+        app.compose(&mut c, f, info, CLOCK, ms);
+    }
 }
 
 /// Press the volume key that moves the light down the page `times` times,
