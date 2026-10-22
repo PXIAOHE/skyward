@@ -1805,6 +1805,9 @@ pub struct App {
     /// A page sliding in over the page left, or off over the page gone
     /// back to.
     turn: Option<Turn>,
+    /// While a page slides: the page shown drawn on its own, and how it
+    /// showed, to slide it again as it was while it shows the same.
+    layer: Option<(View, Canvas)>,
     /// The canvas the last page left was drawn on, to draw the next on.
     backdrop: Option<Canvas>,
     /// How round the screen's corners are, in pixels.
@@ -1859,6 +1862,7 @@ impl App {
             row_art: None,
             shown: None,
             turn: None,
+            layer: None,
             backdrop: None,
             corners: 0.0,
             dirty: true,
@@ -2215,6 +2219,7 @@ impl App {
         self.knob = None;
         self.row_art = None;
         self.shown = None;
+        self.layer = None;
         self.spare.extend(self.drawn.drain(..).map(|(_, c)| c));
         self.dirty = true;
     }
@@ -2713,6 +2718,7 @@ impl App {
             let (art, x, y) = widgets::back_chip(&t);
             self.chip = Some((t.dark, art, x, y));
         }
+        let slide = self.slid(now);
         // The row a finger holds, drawn once more as held down when it
         // starts darkening: a finger that moves on before then never waits
         // for it.
@@ -2737,9 +2743,32 @@ impl App {
             row: self.row_press.map_or(0.0, |p| p.level(now)),
             pressing: self.pressing(),
         };
-        self.paint_page(out, &t, Some((f, info)), &view);
+        match slide {
+            Some((at, shift, dim)) => {
+                // The page shown is drawn on its own canvas, once for as
+                // long as it shows the same, and slid from there with the
+                // page left.
+                let back = self.turn.as_ref().expect("sliding").back;
+                let still = self.frame.as_ref().is_some_and(|fr| fr.hero.is_none());
+                let page = match self.layer.take() {
+                    Some((shown, c)) if still && shown == view => c,
+                    kept => {
+                        let mut c = kept.map(|(_, c)| c).unwrap_or_else(|| Canvas::new(out.w, out.h));
+                        self.paint_page(&mut c, &t, Some((f, info)), &view);
+                        c
+                    }
+                };
+                let turn = self.turn.as_ref().expect("sliding");
+                let (front, behind) = if back { (&turn.left, &page) } else { (&page, &turn.left) };
+                out.slide(front, behind, at, shift, dim, self.corners);
+                self.layer = Some((view, page));
+            }
+            None => {
+                self.layer = None;
+                self.paint_page(out, &t, Some((f, info)), &view);
+            }
+        }
         self.shown = Some(view);
-        self.slide(out, now);
 
         let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
         widgets::status_bar(out, &t, f, &Bar { clock, battery }, t.pal.status);
@@ -2904,10 +2933,13 @@ impl App {
         draw_faded(out, small, 0.0, 0.0, t.pal.text, level, blur);
     }
 
-    /// Slide the page drawn in `out` in over the page left, or the page
-    /// left off over it; see [`Turn`].
-    fn slide(&mut self, out: &mut Canvas, now: u64) {
-        let Some(turn) = &mut self.turn else { return };
+    /// Where a page sliding in over the page left, or the page left
+    /// sliding off, stands at `now`: how many pixels from the left edge the
+    /// page in front stands, how many left of where it rests the page
+    /// behind, and how dark that is; nothing once the slide is over. See
+    /// [`Turn`].
+    fn slid(&mut self, now: u64) -> Option<(i32, i32, f32)> {
+        let turn = self.turn.as_mut()?;
         let spring = *turn.spring.get_or_insert_with(|| {
             if turn.back {
                 Spring::new(now, -1000.0, 0.0, BACK_PERIOD)
@@ -2918,14 +2950,13 @@ impl App {
         let (x, done) = spring.at(now);
         if done {
             self.backdrop = self.turn.take().map(|t| t.left);
-            return;
+            return None;
         }
         // Where the page in front stands, in screen widths from the left
         // edge.
         let along = if turn.back { 1.0 + x / 1000.0 } else { x / 1000.0 };
-        let w = out.w as f32;
-        let (front, behind) = ((along * w).round() as i32, (BEHIND_SHIFT * w * (1.0 - along)).round() as i32);
-        out.slide(&turn.left, !turn.back, front, behind, BEHIND_DIM * (1.0 - along), self.corners);
+        let w = self.w as f32;
+        Some(((along * w).round() as i32, (BEHIND_SHIFT * w * (1.0 - along)).round() as i32, BEHIND_DIM * (1.0 - along)))
     }
 
     /// Whether the cursor of the text field on `screen` shows at `now`: it
@@ -4532,6 +4563,7 @@ impl App {
             fr.canvas.fill_rect(track.x, track.y, track.w, track.h, t.pal.card);
             widgets::slider(&mut fr.canvas, t, track.x, track.y, track.w, self.state.brightness);
         }
+        self.layer = None;
         self.dirty = true;
     }
 
@@ -4548,6 +4580,7 @@ impl App {
             fr.canvas.fill_rect(track.x, track.y, track.w, track.h, t.pal.bg);
             widgets::confirm(&mut fr.canvas, t, f, track.y, label, danger, self.state.confirm);
         }
+        self.layer = None;
     }
 
     /// Add the dot under the finger to the pattern being drawn.
@@ -4589,6 +4622,7 @@ impl App {
         let r = span / 2.0 + t.m.dp(16.0);
         fr.canvas.fill_rect(cx - r, cy - r, r * 2.0, r * 2.0, t.pal.bg);
         widgets::pattern_lock(&mut fr.canvas, t, cx, cy, span, &self.state.pattern);
+        self.layer = None;
         self.dirty = true;
     }
 }

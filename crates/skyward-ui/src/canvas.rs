@@ -166,71 +166,56 @@ impl Canvas {
         }
     }
 
-    /// Show a page sliding over another, as pages open and go back. This
-    /// canvas holds one of the two pages at rest and `other`, as big, the
-    /// other: the page in front if `in_front` is false, else the page
-    /// behind. The page in front stands `front` pixels from the left edge,
-    /// its left corners rounded to `radius`; the page behind stands
-    /// `behind` pixels left of where it rests, darkened by `dim` (black
-    /// laid over it, 0 to 1), and black past its right edge.
-    pub fn slide(&mut self, other: &Canvas, in_front: bool, front: i32, behind: i32, dim: f32, radius: f32) {
-        assert_eq!((self.w, self.h), (other.w, other.h), "the pages are one size");
+    /// Show a page sliding over another, as pages open and go back: the
+    /// page `front` in front, standing `at` pixels from the left edge with
+    /// its left corners rounded to `radius`, over the page `behind`,
+    /// standing `shift` pixels left of where it rests, darkened by `dim`
+    /// (black laid over it, 0 to 1), and black past its right edge. Both
+    /// pages are as big as this canvas, and each of its pixels is written
+    /// once.
+    pub fn slide(&mut self, front: &Canvas, behind: &Canvas, at: i32, shift: i32, dim: f32, radius: f32) {
+        assert!((front.w, front.h) == (self.w, self.h) && (behind.w, behind.h) == (self.w, self.h), "the pages are one size");
         let (w, h) = (self.w as i32, self.h as i32);
-        let (front, behind) = (front.clamp(0, w), behind.clamp(0, w));
+        let (at, shift) = (at.clamp(0, w), shift.clamp(0, w));
         let keep = ((1.0 - dim.clamp(0.0, 1.0)) * 256.0).round() as u32;
         let row = w as usize * 4;
         // Left of the front page's edge only the page behind shows; at the
         // edge, where the front page's corners round off, both do. The page
         // behind reaches the first `reach` columns, black past them.
-        let plain = (front - 1).max(0) as usize;
-        let reach = (w - behind) as usize;
+        let plain = (at - 1).max(0) as usize;
+        let reach = (w - shift) as usize;
+        let lit = plain.min(reach);
         for y in 0..h {
-            let line = &mut self.data[y as usize * row..(y as usize + 1) * row];
-            let theirs = &other.data[y as usize * row..(y as usize + 1) * row];
-            if in_front {
-                line.copy_within(..(w - front) as usize * 4, front as usize * 4);
-            } else {
-                line.copy_within(behind as usize * 4.., 0);
-            }
-            let line = line.as_chunks_mut::<4>().0;
-            let theirs = theirs.as_chunks::<4>().0;
-            let lit = plain.min(reach);
-            if in_front {
-                for (d, s) in line[..lit].iter_mut().zip(&theirs[behind as usize..]) {
-                    *d = darken(*s, keep);
-                }
-            } else {
-                for p in &mut line[..lit] {
-                    *p = darken(*p, keep);
-                }
+            let rows = y as usize * row..(y as usize + 1) * row;
+            let line = self.data[rows.clone()].as_chunks_mut::<4>().0;
+            let ahead = front.data[rows.clone()].as_chunks::<4>().0;
+            let back = behind.data[rows].as_chunks::<4>().0;
+            for (d, s) in line[..lit].iter_mut().zip(&back[shift as usize..]) {
+                *d = darken(*s, keep);
             }
             line[lit..plain].fill([0, 0, 0, 255]);
             let mut x = plain as i32;
             while x < w {
-                let cover = front_cover(x, y, front, h, radius);
+                let cover = front_cover(x, y, at, h, radius);
                 if cover >= 1.0 {
                     break;
                 }
                 let k = x as usize;
-                let back = if k >= reach {
-                    [0, 0, 0, 255]
-                } else if in_front {
-                    darken(theirs[k + behind as usize], keep)
-                } else {
-                    darken(line[k], keep)
-                };
+                let under = if k >= reach { [0, 0, 0, 255] } else { darken(back[k + shift as usize], keep) };
+                // A pixel the front page covers at all lies right of its
+                // edge.
                 line[k] = if cover <= 0.0 {
-                    back
+                    under
                 } else {
-                    let ahead = if in_front { line[k] } else { theirs[(x - front) as usize] };
+                    let over = ahead[(x - at) as usize];
                     let a = (cover * 256.0).round() as u32;
                     let mix = |f: u8, b: u8| ((f as u32 * a + b as u32 * (256 - a) + 128) >> 8) as u8;
-                    [mix(ahead[0], back[0]), mix(ahead[1], back[1]), mix(ahead[2], back[2]), 255]
+                    [mix(over[0], under[0]), mix(over[1], under[1]), mix(over[2], under[2]), 255]
                 };
                 x += 1;
             }
-            if !in_front && x < w {
-                line[x as usize..].copy_from_slice(&theirs[(x - front) as usize..(w - front) as usize]);
+            if x < w {
+                line[x as usize..].copy_from_slice(&ahead[(x - at) as usize..(w - at) as usize]);
             }
         }
     }
@@ -747,26 +732,21 @@ mod tests {
     #[test]
     fn a_page_slid_over_another_shows_the_one_behind_shifted_and_darkened() {
         let (front, behind) = (columns(10, 4, 100), columns(10, 4, 0));
-        // This canvas holds the page in front, moving in from the right.
-        let mut c = columns(10, 4, 100);
-        c.slide(&behind, true, 4, 2, 0.5, 0.0);
+        let mut c = Canvas::new(10, 4);
+        c.slide(&front, &behind, 4, 2, 0.5, 0.0);
         assert_eq!(row_greys(&c, 1), [10, 15, 20, 25, 100, 110, 120, 130, 140, 150]);
-        // This canvas holds the page behind; the one in front leaves to the
-        // right.
-        let mut c = columns(10, 4, 0);
-        c.slide(&front, false, 6, 1, 0.5, 0.0);
+        c.slide(&front, &behind, 6, 1, 0.5, 0.0);
         assert_eq!(row_greys(&c, 2), [5, 10, 15, 20, 25, 30, 100, 110, 120, 130]);
         // The page behind, shifted far left, is black past its right edge.
-        let mut c = columns(10, 4, 0);
-        c.slide(&front, false, 8, 3, 0.0, 0.0);
+        c.slide(&front, &behind, 8, 3, 0.0, 0.0);
         assert_eq!(row_greys(&c, 0), [30, 40, 50, 60, 70, 80, 90, 0, 100, 110]);
     }
 
     #[test]
     fn a_page_sliding_rounds_its_leading_corners() {
         let behind = Canvas::new(20, 20);
-        let mut c = columns(20, 20, 50);
-        c.slide(&behind, true, 5, 0, 0.0, 6.0);
+        let mut c = Canvas::new(20, 20);
+        c.slide(&columns(20, 20, 50), &behind, 5, 0, 0.0, 6.0);
         let at = |x: u32, y: u32| c.data[((y * 20 + x) * 4) as usize];
         assert_eq!(at(5, 10), 50, "the edge is straight between the corners");
         assert_eq!(at(4, 10), 0);
