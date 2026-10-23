@@ -133,8 +133,8 @@ fn real(path: &Path) -> Result<PathBuf> {
     Ok(folder.join(name(path)?))
 }
 
-/// Whether a folder is where a filesystem is mounted: it sits on another
-/// device than the folder it is in.
+/// Whether an entry is where a filesystem, or a file, is mounted: it sits
+/// on another device than the folder it is in.
 fn mounted_at(path: &Path, meta: &fs::Metadata) -> Result<bool> {
     let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else { return Ok(true) };
     let up = fs::metadata(parent).with_context(|| format!("look at {}", parent.display()))?;
@@ -445,6 +445,65 @@ pub fn set_mode(path: &Path, mode: u32) -> Result<u32> {
     Ok(fs::metadata(path).with_context(|| format!("look at {}", path.display()))?.mode() & 0o7777)
 }
 
+/// What the file at `path` holds, if that is no more than `most` bytes.
+pub fn read_up_to(path: &Path, most: u64) -> Result<Option<Vec<u8>>> {
+    // Opened without waiting, as a pipe waits for a writer, to be turned
+    // down for what it is.
+    let file = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path).with_context(|| format!("open {}", path.display()))?;
+    ensure!(file.metadata().with_context(|| format!("look at {}", path.display()))?.is_file(), "{} is not a file", path.display());
+    let mut bytes = Vec::new();
+    file.take(most + 1).read_to_end(&mut bytes).with_context(|| format!("read {}", path.display()))?;
+    Ok((bytes.len() as u64 <= most).then_some(bytes))
+}
+
+/// Write `bytes` as the contents of the file at `path`, which keeps its
+/// owner, permissions and extended attributes, the SELinux label among
+/// them, as far as its filesystem keeps them. The new contents are written
+/// whole beside the file and then take its place at once, so that a write
+/// cut short leaves it as it was; a file with other names sharing its
+/// contents, or one mounted over, is written where it is.
+pub fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let meta = fs::symlink_metadata(path).with_context(|| format!("look at {}", path.display()))?;
+    ensure!(meta.is_file(), "{} is not a file", path.display());
+    if meta.nlink() > 1 || mounted_at(path, &meta)? {
+        let mut file = OpenOptions::new().write(true).truncate(true).open(path).with_context(|| format!("open {}", path.display()))?;
+        file.write_all(bytes).with_context(|| format!("write {}", path.display()))?;
+        return file.sync_all().with_context(|| format!("write {}", path.display()));
+    }
+    let folder = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let (temp, mut file) = beside(path)?;
+    let written = (|| -> Result<()> {
+        file.write_all(bytes).with_context(|| format!("write {}", temp.display()))?;
+        file.sync_all().with_context(|| format!("write {}", temp.display()))?;
+        attributes(path, &temp, &meta, &Give::Original(keeps(folder)?))?;
+        fs::rename(&temp, path).with_context(|| format!("put {} in place of {}", temp.display(), path.display()))
+    })();
+    if written.is_err() {
+        drop(file);
+        fs::remove_file(&temp).with_context(|| format!("take away {}", temp.display()))?;
+        return written;
+    }
+    File::open(folder).and_then(|f| f.sync_all()).with_context(|| format!("write {}", folder.display()))
+}
+
+/// A new file beside the file at `path`, hidden and named after it, to be
+/// written and then put in its place.
+fn beside(path: &Path) -> Result<(PathBuf, File)> {
+    let folder = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    for n in 0.. {
+        let mut temp = std::ffi::OsString::from(".");
+        temp.push(name(path)?);
+        temp.push(format!(".{n}.saving"));
+        let temp = folder.join(temp);
+        match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp) {
+            Ok(file) => return Ok((temp, file)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("make {}", temp.display())),
+        }
+    }
+    unreachable!("some number gives a name that is not taken")
+}
+
 /// Delete each of `paths`, folders with all they hold. A folder that has a
 /// filesystem mounted on or inside it is refused before anything goes.
 pub fn delete(paths: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
@@ -593,10 +652,25 @@ fn make_node(to: &Path, mode: u32, rdev: u64) -> Result<()> {
 }
 
 /// Give a copy what `give` says beyond its contents, and the original's
-/// times, which go last, as writing the rest would change them. The owner
-/// goes before the permissions, as changing it clears the set-ID bits.
+/// times, which go last, as writing the rest would change them.
 fn keep(from: &Path, to: &Path, meta: &fs::Metadata, give: &Give) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
+    attributes(from, to, meta, give)?;
+    let c = std::ffi::CString::new(to.as_os_str().as_bytes()).with_context(|| format!("{} holds a NUL", to.display()))?;
+    let times = [
+        libc::timespec { tv_sec: meta.atime() as _, tv_nsec: meta.atime_nsec() as _ },
+        libc::timespec { tv_sec: meta.mtime() as _, tv_nsec: meta.mtime_nsec() as _ },
+    ];
+    if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("give {} its times", to.display()));
+    }
+    Ok(())
+}
+
+/// Give a copy what `give` says beyond its contents and times: its owner,
+/// its permissions and its extended attributes or label. The owner goes
+/// before the permissions, as changing it clears the set-ID bits.
+fn attributes(from: &Path, to: &Path, meta: &fs::Metadata, give: &Give) -> Result<()> {
     let link = meta.file_type().is_symlink();
     let (owner, mode) = match give {
         Give::Original(keeps) => {
@@ -622,14 +696,6 @@ fn keep(from: &Path, to: &Path, meta: &fs::Metadata, give: &Give) -> Result<()> 
     }
     if let Some(mode) = mode.filter(|_| !link) {
         fs::set_permissions(to, fs::Permissions::from_mode(mode)).with_context(|| format!("give {} its permissions", to.display()))?;
-    }
-    let c = std::ffi::CString::new(to.as_os_str().as_bytes()).with_context(|| format!("{} holds a NUL", to.display()))?;
-    let times = [
-        libc::timespec { tv_sec: meta.atime() as _, tv_nsec: meta.atime_nsec() as _ },
-        libc::timespec { tv_sec: meta.mtime() as _, tv_nsec: meta.mtime_nsec() as _ },
-    ];
-    if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
-        return Err(std::io::Error::last_os_error()).with_context(|| format!("give {} its times", to.display()));
     }
     Ok(())
 }
@@ -851,6 +917,49 @@ mod tests {
         assert_eq!(set_mode(&at.join("link"), 0o700).unwrap(), 0o700, "a link's target is changed");
         assert_eq!(fs::metadata(at.join("run.sh")).unwrap().mode() & 0o7777, 0o700);
         assert!(set_mode(&at.join("gone"), 0o644).is_err());
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_file_is_read_only_up_to_the_bytes_asked_for() {
+        let at = scratch("read");
+        fs::write(at.join("a.txt"), b"12345").unwrap();
+        assert_eq!(read_up_to(&at.join("a.txt"), 5).unwrap(), Some(b"12345".to_vec()));
+        assert_eq!(read_up_to(&at.join("a.txt"), 4).unwrap(), None, "a byte more than asked for");
+        assert!(read_up_to(&at, 5).is_err(), "a folder is no file");
+        let pipe = std::ffi::CString::new(at.join("pipe").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0, "make a pipe");
+        assert!(read_up_to(&at.join("pipe"), 5).is_err(), "a pipe is turned down rather than waited on");
+        assert!(read_up_to(&at.join("gone"), 5).is_err());
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_file_written_anew_takes_its_own_place_keeping_its_permissions() {
+        let at = scratch("replace");
+        let path = at.join("run.sh");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        replace(&path, b"#!/system/bin/sh\necho new\n").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"#!/system/bin/sh\necho new\n");
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(after.mode() & 0o7777, 0o750, "permissions are kept");
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+        assert_ne!(after.ino(), before.ino(), "a new file took its place");
+        let names: Vec<_> = fs::read_dir(&at).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["run.sh"], "nothing is left beside it");
+        fs::write(at.join(".run.sh.0.saving"), b"left by a save cut short").unwrap();
+        replace(&path, b"again").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"again", "a name taken beside it is passed over");
+        fs::remove_file(at.join(".run.sh.0.saving")).unwrap();
+        fs::hard_link(&path, at.join("same.sh")).unwrap();
+        let shared = fs::metadata(&path).unwrap().ino();
+        replace(&path, b"both").unwrap();
+        assert_eq!(fs::read(at.join("same.sh")).unwrap(), b"both", "a file with another name is written where it is");
+        assert_eq!(fs::metadata(&path).unwrap().ino(), shared);
+        assert!(replace(&at, b"x").is_err(), "a folder is no file");
+        assert!(replace(&at.join("gone"), b"x").is_err());
         fs::remove_dir_all(&at).unwrap();
     }
 
