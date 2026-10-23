@@ -139,11 +139,16 @@ fn long_page(cx: &Ctx) -> Canvas {
     sheet(cx, cx.t.m.h * 3, cx.t.pal.bg)
 }
 
+/// How tall a long page whose content ends at `bottom` is: to the bottom
+/// margin after it, and never shorter than one screen.
+fn fitted(t: &Theme, bottom: f32) -> u32 {
+    ((bottom + t.m.margin * 2.0).ceil() as u32).max(t.m.h)
+}
+
 /// Trim a long page to its content plus the bottom margin, and never shorter
 /// than one screen.
 fn fit(c: Canvas, t: &Theme, bottom: f32) -> Canvas {
-    let h = ((bottom + t.m.margin * 2.0).ceil() as u32).max(t.m.h);
-    c.crop_height(h)
+    c.crop_height(fitted(t, bottom))
 }
 
 fn hits(rects: &[Rect], actions: &[Action]) -> Vec<Hit> {
@@ -334,10 +339,28 @@ pub fn mount(cx: &Ctx) -> Frame {
 /// cards scrolling over it. Only the cards are drawn here; the canvas is
 /// clear wherever the field shows.
 pub fn about(cx: &Ctx) -> Frame {
+    let (t, f) = (cx.t, cx.f);
+    let m = &t.m;
+    // The page is drawn whole, under the field: laid out first to learn
+    // how tall it comes to, then drawn that tall.
+    let (_, _, bottom) = about_cards(cx, &mut Canvas::band(m.w, m.h * 3, 0..0, 0..0, Rgba { r: 0, g: 0, b: 0, a: 0 }));
+    let mut c = Canvas::new(m.w, fitted(t, bottom));
+    let (out, summary_top, bottom) = about_cards(cx, &mut c);
+    let canvas = fit(c, t, bottom);
+    let art = HeroArt {
+        wordmark: widgets::wordmark(t, f, "Skyward", m.dp(233.7), m.dp(37.8)),
+        version: widgets::version_line(t, f, VERSION),
+        runs: canvas.runs(),
+    };
+    Frame { header: false, hero: Some(art), ..Frame::new(t, canvas, out, "关于本机", summary_top) }
+}
+
+/// The About page's cards on `c`: what touching them does, where the
+/// first starts, and where the last ends.
+fn about_cards(cx: &Ctx, c: &mut Canvas) -> (Vec<Hit>, f32, f32) {
     let (t, f, i) = (cx.t, cx.f, cx.info);
     let m = &t.m;
     let tone = Tone::hero(t);
-    let mut c = Canvas::new(m.w, m.h * 3);
     let mut out = Vec::new();
 
     let storage = fmt::storage_used(&i.storage).unwrap_or_else(|| fmt::capacity(i.storage.total));
@@ -351,7 +374,7 @@ pub fn about(cx: &Ctx) -> Frame {
     if let Some(r) = &i.android {
         facts.push(Fact { title: "Android 版本", value: r.clone(), link: false });
     }
-    let summary = widgets::facts(&mut c, t, f, m.dp(490.7), &facts, &tone);
+    let summary = widgets::facts(c, t, f, m.dp(490.7), &facts, &tone);
     out.push(Hit { rect: summary.rows[1], action: Action::Open(Screen::Specs) });
 
     let mut specs = vec![("处理器", i.soc.clone().unwrap_or_else(|| fmt::cpu(&i.cpu))), ("运行内存", fmt::ram(i.ram_kib))];
@@ -364,16 +387,10 @@ pub fn about(cx: &Ctx) -> Frame {
     if let Some(p) = i.panel {
         specs.push(("分辨率", fmt::panel(p)));
     }
-    let y = widgets::spec_card(&mut c, t, f, summary.bottom + m.card_gap, &fmt::model_lines(&i.model), &specs, &tone);
-    let links = widgets::list_toned(&mut c, t, f, y + m.card_gap, &[Row::new("全部参数与信息"), Row::new("导出日志")], &tone);
+    let y = widgets::spec_card(c, t, f, summary.bottom + m.card_gap, &fmt::model_lines(&i.model), &specs, &tone);
+    let links = widgets::list_toned(c, t, f, y + m.card_gap, &[Row::new("全部参数与信息"), Row::new("导出日志")], &tone);
     out.extend(hits(&links.rows, &[Action::Open(Screen::Specs), Action::Open(Screen::Logs)]));
-    let canvas = fit(c, t, links.bottom);
-    let art = HeroArt {
-        wordmark: widgets::wordmark(t, f, "Skyward", m.dp(233.7), m.dp(37.8)),
-        version: widgets::version_line(t, f, VERSION),
-        runs: canvas.runs(),
-    };
-    Frame { header: false, hero: Some(art), ..Frame::new(t, canvas, out, "关于本机", summary.rows[0].y) }
+    (out, summary.rows[0].y, links.bottom)
 }
 
 /// Every reading the recovery has, modelled on the stock「全部参数与信息」.

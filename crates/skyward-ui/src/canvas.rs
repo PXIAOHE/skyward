@@ -471,14 +471,30 @@ impl Canvas {
         self.data
             .chunks_exact(w * 4)
             .map(|row| {
+                let px = row.as_chunks::<4>().0;
                 let mut runs = Vec::new();
-                let (mut start, mut now) = (0, cover(row[3]));
-                for x in 1..w {
-                    let c = cover(row[x * 4 + 3]);
+                let (mut start, mut now) = (0, cover(px[0][3]));
+                let mut x = 1;
+                while x < w {
+                    // Sixteen pixels as clear, or as solid, as the run goes
+                    // on are passed over at once.
+                    let same = match now {
+                        Cover::Clear => Some(0),
+                        Cover::Solid => Some(255),
+                        Cover::Partial => None,
+                    };
+                    if let Some(a) = same.filter(|_| x + 16 <= w) {
+                        if px[x..x + 16].iter().all(|p| p[3] == a) {
+                            x += 16;
+                            continue;
+                        }
+                    }
+                    let c = cover(px[x][3]);
                     if c != now {
                         runs.push(Run { x0: start as u16, x1: x as u16, cover: now });
                         (start, now) = (x, c);
                     }
+                    x += 1;
                 }
                 runs.push(Run { x0: start as u16, x1: w as u16, cover: now });
                 runs
