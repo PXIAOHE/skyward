@@ -1789,6 +1789,9 @@ pub struct App {
     tracker: Tracker,
     /// The page gliding on after a flick.
     fling: Option<Fling>,
+    /// A terminal's screen gliding on after a flick: the glide, a row's
+    /// height, and how many rows it has scrolled so far.
+    glide: Option<(Fling, f32, isize)>,
     /// How far a dragging finger has pulled the page past an end:
     /// negative past the top, positive past the bottom.
     pull: f32,
@@ -1885,6 +1888,7 @@ impl App {
             drag: Drag::Idle,
             tracker: Tracker::default(),
             fling: None,
+            glide: None,
             pull: 0.0,
             bounce: None,
             cue: None,
@@ -1956,6 +1960,7 @@ impl App {
         let sliding = matches!(self.button, Some((_, Press::Slide { .. }))) && self.state.confirm < 1.0;
         let moving = self.display_on
             && (self.fling.is_some()
+                || self.glide.is_some()
                 || self.bounce.is_some()
                 || self.seek.is_some()
                 || sliding
@@ -2080,6 +2085,14 @@ impl App {
             } else if done {
                 self.fling = None;
             }
+        }
+        if let Some((glide, pitch, scrolled)) = self.glide {
+            let (y, done) = glide.at(now);
+            let rows = (y / pitch).trunc() as isize;
+            if rows != scrolled {
+                self.scroll_rows(rows - scrolled);
+            }
+            self.glide = if done { None } else { Some((glide, pitch, rows)) };
         }
         if let Some(b) = self.bounce {
             self.dirty = true;
@@ -3266,6 +3279,7 @@ impl App {
     fn settle_page(&mut self) {
         self.height = 0.0;
         self.fling = None;
+        self.glide = None;
         self.pull = 0.0;
         self.bounce = None;
         self.seek = None;
@@ -3964,12 +3978,18 @@ impl App {
         let carry = carry + (y - last);
         let rows = (carry / pitch).trunc();
         if rows != 0.0 {
-            if let Some(term) = self.term.as_mut() {
-                term.scroll(rows as isize);
-                self.refresh();
-            }
+            self.scroll_rows(rows as isize);
         }
         Drag::History { last: y, carry: carry - rows * pitch, pitch }
+    }
+
+    /// Scroll the terminal's screen as a finger going down `rows` rows'
+    /// heights does, or up for fewer than none: down shows what is older.
+    fn scroll_rows(&mut self, rows: isize) {
+        if let Some(term) = self.term.as_mut() {
+            term.scroll(rows);
+            self.refresh();
+        }
     }
 
     /// A key of the on-screen keyboard. A capital lasts one letter; return
@@ -4093,6 +4113,14 @@ impl App {
                     self.drag = Drag::Press { x, y, action: None, edge: at_edge, at: now };
                     return fx;
                 }
+                // A terminal's screen gliding stops under a finger landing
+                // on it, which holds it to scroll on.
+                let glided = self.glide.take().filter(|(glide, ..)| !glide.at(now).1);
+                let history = self.frame.as_ref().and_then(|fr| fr.scrollback).filter(|(r, _)| r.contains(x, y + scroll));
+                if let (Some(_), Some((_, pitch))) = (glided, history) {
+                    self.drag = Drag::History { last: y, carry: 0.0, pitch };
+                    return fx;
+                }
                 // Anywhere else it stops such a page and holds it; the
                 // control under the finger is not pressed.
                 if self.catch(now) {
@@ -4210,7 +4238,10 @@ impl App {
                     self.trace(&t, x, y + scroll);
                     self.drag = Drag::Pattern;
                 }
-                Drag::History { last, carry, pitch } => self.drag = self.scroll_history(last, y, carry, pitch),
+                Drag::History { last, carry, pitch } => {
+                    self.tracker.add(now, y);
+                    self.drag = self.scroll_history(last, y, carry, pitch);
+                }
                 Drag::Waking => self.drag = Drag::Waking,
                 Drag::Held => self.drag = Drag::Held,
                 Drag::Idle => {}
@@ -4221,6 +4252,15 @@ impl App {
                         p.lift(now);
                     }
                     fx.extend(self.act(a, now));
+                }
+                Drag::History { pitch, .. } => {
+                    // A finger lifted while still moving sends the rows
+                    // gliding on.
+                    let speed = self.tracker.velocity(now);
+                    if speed.abs() >= m.dp(MIN_FLING_DP) {
+                        let speed = speed.clamp(-m.dp(MAX_FLING_DP), m.dp(MAX_FLING_DP));
+                        self.glide = Some((Fling::new(now, 0.0, speed, self.px_per_dp * 160.0), pitch, 0));
+                    }
                 }
                 Drag::Scroll { .. } if self.pull != 0.0 => {
                     // A page let go past its end springs back.
@@ -7356,6 +7396,33 @@ mod tests {
         app.touch(Touch::Up, &f, 20);
         assert_eq!(app.term.as_ref().expect("the shell started").screen().scrollback(), 5, "down shows five older rows");
         assert_eq!(app.top().1, 0.0, "the page itself stays put");
+    }
+
+    #[test]
+    fn a_flick_on_the_terminal_glides_back_and_a_finger_stops_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Terminal, W, H, PPD);
+        let (rows, cols) = app.term_size(&f);
+        app.term_started(rows, cols);
+        let many: String = (0..1000).map(|n| format!("line {n}\r\n")).collect();
+        app.term_output(many.as_bytes());
+        let (card, pitch) = app.frame(&f, &i).scrollback.expect("the terminal's screen scrolls back");
+        let (x, y) = (card.x + card.w / 2.0, card.y + card.h / 3.0);
+        let back = |app: &App| app.term.as_ref().expect("the shell started").screen().scrollback();
+        app.touch(Touch::Down(x, y), &f, 0);
+        for k in 1..=5u64 {
+            app.touch(Touch::Move(x, y + pitch * k as f32), &f, k * 8);
+        }
+        app.touch(Touch::Up, &f, 45);
+        let lifted = back(&app);
+        app.tick(200);
+        let gliding = back(&app);
+        assert!(gliding > lifted + 5, "a flick glides on: {lifted} to {gliding}");
+        app.frame(&f, &i);
+        app.touch(Touch::Down(x, y), &f, 210);
+        app.touch(Touch::Up, &f, 220);
+        app.tick(1000);
+        assert_eq!(back(&app), gliding, "a finger on it stops it there");
     }
 
     fn entry(name: &str, kind: FileKind) -> FileRow {
