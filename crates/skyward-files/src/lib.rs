@@ -504,6 +504,110 @@ fn beside(path: &Path) -> Result<(PathBuf, File)> {
     unreachable!("some number gives a name that is not taken")
 }
 
+/// How far giving the data partition's entries their labels has come.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Relabeling {
+    /// Entries looked at, of how many; the total is 0 while they are still
+    /// counted.
+    pub checked: u64,
+    pub total: u64,
+    /// Entries that took a new label.
+    pub changed: u64,
+}
+
+/// What relabeling does with an entry of the data partition, by where it
+/// is, as Android's own restorecon does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Treat {
+    /// Labeled by the rules, and so is all in it.
+    Label,
+    /// An app's data, which the installer labels by the app: left as it is,
+    /// with all in it.
+    Leave,
+    /// The system's files kept encrypted for each user, which vold and the
+    /// programs writing them label, some by the user: the folder is
+    /// labeled, and nothing in it.
+    Alone,
+    /// Each user's folder of app profiles, which vold labels: what is in it
+    /// is labeled, and not the folder.
+    Within,
+}
+
+/// What relabeling does with the entry at `rel` from the top of the data
+/// partition.
+fn treat(rel: &Path) -> Treat {
+    let names: Vec<&OsStr> = rel.iter().collect();
+    match names.as_slice() {
+        [top, _, ..] if ["data", "user", "user_de", "storage_area"].iter().any(|n| top == n) => Treat::Leave,
+        [misc, _, sandbox, ..] if *misc == "misc_de" && *sandbox == "sdksandbox" => Treat::Leave,
+        [top, ..] if ["system_ce", "vendor_ce", "misc_ce"].iter().any(|n| top == n) => Treat::Alone,
+        [misc, profiles, cur, _] if *misc == "misc" && *profiles == "profiles" && *cur == "cur" => Treat::Within,
+        _ => Treat::Label,
+    }
+}
+
+/// Give each entry of the data partition mounted at `root` the label the
+/// system's rules give it, as Android's own restorecon does as the system
+/// starts, but looking at every entry: an app's data is left to the
+/// installer, which labels it by the app; of the system's files kept
+/// encrypted for each user only their folders are labeled; another
+/// filesystem mounted inside is labeled where it shows, and not gone into.
+/// `label` gives the entry at a path, by its path from the top of the
+/// partition, its label, and says whether that changed it. The entries are
+/// counted first, for how far the work has come to tell.
+pub fn relabel(
+    root: &Path,
+    label: &mut dyn FnMut(&Path, &Path, &fs::Metadata) -> Result<bool>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(Relabeling),
+) -> Result<()> {
+    let dev = fs::symlink_metadata(root).with_context(|| format!("look at {}", root.display()))?.dev();
+    let mut p = Relabeling::default();
+    progress(p);
+    walk_labeled(root, Path::new(""), dev, cancel, &mut |_, _, _| {
+        p.total += 1;
+        Ok(())
+    })?;
+    progress(p);
+    walk_labeled(root, Path::new(""), dev, cancel, &mut |path, rel, meta| {
+        p.changed += u64::from(label(path, rel, meta)?);
+        p.checked += 1;
+        progress(p);
+        Ok(())
+    })
+}
+
+/// Visit each entry relabeling labels from `path`, at `rel` from the top of
+/// the partition: the entry, then what is in it.
+fn walk_labeled(
+    path: &Path,
+    rel: &Path,
+    dev: u64,
+    cancel: &AtomicBool,
+    visit: &mut dyn FnMut(&Path, &Path, &fs::Metadata) -> Result<()>,
+) -> Result<()> {
+    going(cancel)?;
+    let meta = fs::symlink_metadata(path).with_context(|| format!("look at {}", path.display()))?;
+    let treat = match treat(rel) {
+        Treat::Alone | Treat::Within if !meta.is_dir() => Treat::Label,
+        t => t,
+    };
+    if treat == Treat::Leave {
+        return Ok(());
+    }
+    if treat != Treat::Within {
+        visit(path, rel, &meta)?;
+    }
+    if treat == Treat::Alone || !meta.is_dir() || meta.dev() != dev {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
+        let entry = entry.with_context(|| format!("read {}", path.display()))?;
+        walk_labeled(&entry.path(), &rel.join(entry.file_name()), dev, cancel, visit)?;
+    }
+    Ok(())
+}
+
 /// Delete each of `paths`, folders with all they hold. A folder that has a
 /// filesystem mounted on or inside it is refused before anything goes.
 pub fn delete(paths: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
@@ -960,6 +1064,80 @@ mod tests {
         assert_eq!(fs::metadata(&path).unwrap().ino(), shared);
         assert!(replace(&at, b"x").is_err(), "a folder is no file");
         assert!(replace(&at.join("gone"), b"x").is_err());
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    /// The top of a data partition as Android lays it out, with an entry or
+    /// two in each kind of place relabeling treats its own way.
+    fn data_tree(at: &Path) -> PathBuf {
+        let root = at.join("data");
+        let folders = [
+            "data/com.app/files",
+            "user",
+            "user_de/0/com.app",
+            "storage_area/com.app",
+            "misc_ce/0/sdksandbox/com.app",
+            "misc_ce/0/apexdata",
+            "system_ce/0/accounts",
+            "misc/profiles/cur/0/com.app",
+            "local/tmp",
+            "media/0/DCIM",
+        ];
+        for folder in folders {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let files =
+            ["data/com.app/files/a", "misc_ce/0/apexdata/f", "system_ce/0/accounts/db", "misc/profiles/cur/0/com.app/primary.prof", "local/tmp/run.sh"];
+        for file in files {
+            fs::write(root.join(file), b"x").unwrap();
+        }
+        symlink("/data/data", root.join("user/0")).unwrap();
+        fs::write(root.join("media/0/DCIM/p.jpg"), b"jpg").unwrap();
+        root
+    }
+
+    #[test]
+    fn relabeling_goes_where_androids_own_restorecon_goes() {
+        let at = scratch("relabel");
+        let root = data_tree(&at);
+        fs::create_dir_all(root.join("misc_de/0/sdksandbox/com.app")).unwrap();
+        fs::create_dir_all(root.join("misc_de/0/vold")).unwrap();
+        let mut seen = Vec::new();
+        let mut last = Relabeling::default();
+        let mut label = |_: &Path, rel: &Path, _: &fs::Metadata| {
+            seen.push(rel.to_string_lossy().into_owned());
+            Ok(rel.starts_with("local"))
+        };
+        relabel(&root, &mut label, &AtomicBool::new(false), &mut |p| last = p).unwrap();
+        seen.sort();
+        let labeled = [
+            "",
+            "data",
+            "local",
+            "local/tmp",
+            "local/tmp/run.sh",
+            "media",
+            "media/0",
+            "media/0/DCIM",
+            "media/0/DCIM/p.jpg",
+            "misc",
+            "misc/profiles",
+            "misc/profiles/cur",
+            "misc/profiles/cur/0/com.app",
+            "misc/profiles/cur/0/com.app/primary.prof",
+            "misc_ce",
+            "misc_de",
+            "misc_de/0",
+            "misc_de/0/vold",
+            "storage_area",
+            "system_ce",
+            "user",
+            "user_de",
+        ];
+        assert_eq!(seen, labeled, "apps' data is the installer's, and each user's encrypted system files are left in their folders");
+        assert_eq!(last, Relabeling { checked: 22, total: 22, changed: 3 }, "each entry under local took a new label");
+        let stopped = relabel(&root, &mut |_, _, _| Ok(false), &AtomicBool::new(true), &mut |_| {});
+        assert!(stopped.unwrap_err().is::<Cancelled>());
         fs::remove_dir_all(&at).unwrap();
     }
 
