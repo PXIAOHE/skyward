@@ -2731,6 +2731,26 @@ impl App {
         self.frame.as_ref().expect("rendered above")
     }
 
+    /// Draw a part of the current page not drawn yet: the rest of the
+    /// columns of its rows drawn, then a band of rows below those or else
+    /// above them, for a page at rest to have all of it drawn by the time
+    /// it scrolls into view; that done, make the About page field's dither,
+    /// for that page to open without making it. Whether any is left to do.
+    pub fn draw_ahead(&mut self, f: &Fonts, info: &DeviceInfo) -> bool {
+        let Some(frame) = &self.frame else { return false };
+        let (held, h) = (frame.canvas.held(), frame.canvas.h);
+        if self.cols < self.w {
+            self.draw_cols(f, info, self.w);
+        } else if held.end < h {
+            self.draw_rows(f, info, held.end as f32, (held.end + 1) as f32);
+        } else if held.start > 0 {
+            self.draw_rows(f, info, (held.start - 1) as f32, held.start as f32);
+        } else if self.dither.is_none() {
+            self.dither = Some(glow::Dither::new(self.w as usize, self.h as usize));
+        }
+        self.cols < self.w || self.frame.as_ref().is_some_and(|fr| !fr.canvas.whole()) || self.dither.is_none()
+    }
+
     /// Draw the columns of the current page's rows drawn from where they
     /// were drawn to, on to `wide`.
     fn draw_cols(&mut self, f: &Fonts, info: &DeviceInfo, wide: u32) {
@@ -4891,6 +4911,23 @@ mod tests {
                 assert_eq!(differs(&across), None, "{screen:?}: the first row drawn otherwise across");
             }
         }
+    }
+
+    #[test]
+    fn a_page_at_rest_draws_the_rows_below_the_screen_a_band_at_a_time() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.compose(&mut Canvas::new(W, H), &f, &i, "12:00", 0);
+        assert_eq!(app.frame.as_ref().unwrap().canvas.held(), 0..H, "the page shown has the rows on screen drawn");
+        let mut bands = 1;
+        while app.draw_ahead(&f, &i) {
+            bands += 1;
+        }
+        let t = app.theme();
+        let whole = pages::render(Screen::Settings, &Ctx { t: &t, f: &f, info: &i, state: &app.state, term: None, band: None }).canvas;
+        let page = &app.frame.as_ref().unwrap().canvas;
+        assert!(whole.h > H + H / 4, "a page well over a screen long, drawn in {bands} more bands");
+        assert!(page.whole() && page.data == whole.data, "the page drawn a band at a time is the page drawn whole");
     }
 
     #[test]

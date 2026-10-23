@@ -993,12 +993,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             surface.settle()?;
         }
         backlight.show(panel)?;
+        // A page at rest draws the rows it has yet to while nothing else
+        // is to be done, a band at a time, looking for input between bands.
+        let ahead = panel.is_some() && !shown && app.draw_ahead(&fonts, &info);
         // A frame shown has waited for the one before it to reach the
         // panel, which keeps the loop to the panel's pace; otherwise the CPU
         // gets at least a millisecond.
         let floor = if shown { 0 } else { 1 };
         let until_due = app.deadline(now).map(|d| d.saturating_sub(now) as i32);
-        let timeout = until_due.map_or(1000, |t| t.clamp(floor, 1000));
+        let timeout = if ahead { 0 } else { until_due.map_or(1000, |t| t.clamp(floor, 1000)) };
         let mut fds = inputs.fds();
         if let Some(i) = &installer {
             fds.push(i.fd());
