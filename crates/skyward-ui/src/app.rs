@@ -1,5 +1,7 @@
 use crate::canvas::{Canvas, Run};
 use crate::color::Rgba;
+use crate::editor::{self, Editor};
+use crate::files::{self, FileType};
 use crate::fling::{Fling, Tracker};
 use crate::focus::{self, Group, Spot, Stop};
 use crate::font::Fonts;
@@ -54,6 +56,8 @@ pub enum Screen {
     FileInfo,
     /// The permission bits of the entry the file page shows, a switch each.
     Permissions,
+    /// A text file, changed on the screen's keyboard and then saved.
+    Editor,
     Terminal,
     Language,
     TimeZone,
@@ -794,13 +798,14 @@ pub enum Action {
     PickSlot(Slot),
     /// A key of the on-screen keyboard.
     Type(Cap),
-    /// A key of the terminal's own row, above the keyboard.
+    /// A key of the row above the keyboard, the terminal's or the editor's.
     TermKey(TermKey),
     /// Empty the search field.
     ClearSearch,
     /// Leave the search, by the round button beside its field.
     CloseSearch,
-    /// Open the file manager's entry at this place in the folder.
+    /// Open the file manager's entry at this place in the folder: a folder
+    /// to look in, a text file to edit, or what can be done with any other.
     OpenEntry(usize),
     /// Open the terminal in the folder the file manager shows.
     TerminalHere,
@@ -819,6 +824,10 @@ pub enum Action {
     Unpick,
     /// Give the entry the file page shows a new name.
     RenameEntry,
+    /// Open the file the file page shows to edit it.
+    EditEntry,
+    /// Write the file the editor page shows as it now stands.
+    SaveText,
     /// Open the page of the permissions of the entry the file page shows.
     OpenPermissions,
     /// Turn this permission bit of the entry the file page shows on or off.
@@ -865,8 +874,9 @@ pub struct Frame {
     /// A strip that scrolls with the page until it reaches the bar, then
     /// stays under it.
     pub pinned: Option<Pinned>,
-    /// A terminal's screen and the height of its rows: a drag on it scrolls
-    /// back through what the shell wrote, rather than moving the page.
+    /// A terminal's screen, or the editor's card, and the height of its
+    /// rows: a drag on it scrolls through what it holds, rather than moving
+    /// the page.
     pub scrollback: Option<(Rect, f32)>,
     /// A strip held at the bottom of the screen over the page; the page
     /// scrolls far enough for nothing to stay under it.
@@ -1088,6 +1098,8 @@ pub struct State {
     pub clip: Option<Clip>,
     /// What is typed as an entry's new name.
     pub new_name: String,
+    /// The text file the editor page shows, as typed so far.
+    pub editor: Option<Editor>,
     /// Deleting the entry the file page shows, or the backup the restore
     /// page shows, was asked for; a swipe confirms it.
     pub asking_delete: bool,
@@ -1153,6 +1165,7 @@ impl Default for State {
             asked: Asked::default(),
             clip: None,
             new_name: String::new(),
+            editor: None,
             asking_delete: false,
             clash: None,
             job: None,
@@ -1287,6 +1300,14 @@ pub enum Effect {
     /// Give an entry these permission bits; how it went comes back with
     /// [`App::mode_set`].
     SetMode { path: String, mode: u32 },
+    /// Read the file at this path to edit it, as much as
+    /// [`editor::MAX_BYTES`] and one byte more, telling what it holds with
+    /// [`App::text_opened`].
+    OpenText(String),
+    /// Write `text` as the contents of the file at `path`, which keeps what
+    /// it has beside them; how it went comes back with
+    /// [`App::text_saved`].
+    SaveText { path: String, text: String },
     /// Delete an entry, folders whole.
     Delete(String),
     /// Stop the work on files under way.
@@ -1335,8 +1356,8 @@ enum Drag {
     Edge { start: f32, from_left: bool, armed: bool, x: f32, cy: f32 },
     Slider(Rect),
     Confirm { which: Confirm, track: Rect, grab: f32 },
-    /// Scrolling a terminal's screen back through what the shell wrote,
-    /// `carry` being the part of a row not yet scrolled.
+    /// Scrolling a terminal's screen back through what the shell wrote, or
+    /// the editor's text, `carry` being the part of a row not yet scrolled.
     History { last: f32, carry: f32, pitch: f32 },
     Pattern,
     /// The finger that lit the dark panel; nothing it does counts until it
@@ -1782,6 +1803,9 @@ pub struct App {
     /// The folder the terminal page's shell last started in, where Enter
     /// starts it again once it has ended.
     shell_folder: String,
+    /// When leaving the editor with its changes unsaved was last warned
+    /// of: going back again while the warning shows leaves without them.
+    unsaved_warned: Option<u64>,
     /// The About page field's dither, made for the screen once.
     dither: Option<glow::Dither>,
     toast: Option<(String, u64)>,
@@ -1789,8 +1813,8 @@ pub struct App {
     tracker: Tracker,
     /// The page gliding on after a flick.
     fling: Option<Fling>,
-    /// A terminal's screen gliding on after a flick: the glide, a row's
-    /// height, and how many rows it has scrolled so far.
+    /// A terminal's screen or the editor's text gliding on after a flick:
+    /// the glide, a row's height, and how many rows it has scrolled so far.
     glide: Option<(Fling, f32, isize)>,
     /// How far a dragging finger has pulled the page past an end:
     /// negative past the top, positive past the bottom.
@@ -1883,6 +1907,7 @@ impl App {
             chip: None,
             button_chip: None,
             shell_folder: "/".into(),
+            unsaved_warned: None,
             dither: None,
             toast: None,
             drag: Drag::Idle,
@@ -2489,6 +2514,39 @@ impl App {
         self.refresh();
     }
 
+    /// What the file at `path` holds, read to edit it: none if it holds
+    /// more than [`editor::MAX_BYTES`]; or why it could not be read. Text
+    /// opens on the editor page, wrapped to its card; anything else is
+    /// turned down, saying why.
+    pub fn text_opened(&mut self, f: &Fonts, path: String, read: Result<Option<Vec<u8>>, String>, now: u64) {
+        let bytes = match read {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return self.say("暂不支持编辑超过 2 MB 的文件", now),
+            Err(why) => return self.report(&format!("读取失败：{why}"), now),
+        };
+        let Some(text) = String::from_utf8(bytes).ok().filter(|text| !text.contains('\0')) else {
+            return self.say("仅支持编辑 UTF-8 编码的文本文件", now);
+        };
+        let l = editor::layout(&self.theme(), f);
+        self.state.editor = Some(Editor::new(path, &text, l.cols as usize, l.rows as usize));
+        self.state.layer = Layer::Letters;
+        self.unsaved_warned = None;
+        self.open(Screen::Editor);
+    }
+
+    /// How writing the file the editor page shows went: done, it stands as
+    /// saved; or why not.
+    pub fn text_saved(&mut self, outcome: Result<(), String>, now: u64) {
+        match outcome {
+            Ok(()) => {
+                self.state.editor.as_mut().expect("the editor page shows a file").saved();
+                self.refresh();
+                self.say("已保存", now);
+            }
+            Err(why) => self.report(&format!("保存失败：{why}"), now),
+        }
+    }
+
     /// The name typed for an entry is another entry's in the folder.
     fn say_taken(&mut self, now: u64) {
         let said = format!("该文件夹中已有\"{}\"", self.state.new_name);
@@ -2736,6 +2794,15 @@ impl App {
             self.seek = None;
             self.pull = 0.0;
             self.snap = true;
+        }
+        // The entry the file page describes stands as the folder it is in
+        // lists it again, as after its file is saved.
+        if screen == Screen::Files && folder == self.state.files.path {
+            if let (Some(file), Ok(entries)) = (self.state.file.as_mut(), &files) {
+                if let Some(listed) = entries.iter().find(|e| e.name == file.name) {
+                    *file = listed.clone();
+                }
+            }
         }
         let shown = self.state.folder_mut(screen);
         shown.path = folder;
@@ -3413,6 +3480,18 @@ impl App {
                 self.state.file = None;
                 self.state.asking_delete = false;
             }
+            // Changes not saved are given up only by going back again while
+            // the warning shows.
+            Screen::Editor => {
+                let changed = self.state.editor.as_ref().expect("the editor page shows a file").changed;
+                if changed && self.unsaved_warned.is_none_or(|at| now >= at + TOAST_MS) {
+                    self.unsaved_warned = Some(now);
+                    self.say("修改尚未保存，再次返回将放弃修改", now);
+                    return fx;
+                }
+                self.state.editor = None;
+                self.unsaved_warned = None;
+            }
             // Turning the choice down leaves the entry picked, for another
             // folder.
             Screen::Clash => self.state.clash = None,
@@ -3740,6 +3819,11 @@ impl App {
                 self.state.layer = Layer::Letters;
                 self.open(Screen::Rename);
             }
+            Action::EditEntry => return vec![Effect::OpenText(self.entry_path())],
+            Action::SaveText => {
+                let ed = self.state.editor.as_ref().expect("the editor page shows a file");
+                return vec![Effect::SaveText { path: ed.path.clone(), text: ed.text() }];
+            }
             Action::OpenPermissions => self.open(Screen::Permissions),
             Action::ModeBit(bit) => {
                 let mode = self.state.file.as_ref().expect("the permissions page shows an entry").mode;
@@ -3831,7 +3915,21 @@ impl App {
                 self.refresh();
             }
             Action::Type(cap) if self.screen() == Screen::Terminal => return self.term_typed(cap),
+            Action::Type(cap) if self.screen() == Screen::Editor => self.edit_typed(cap),
             Action::Type(cap) => return self.type_key(cap, now),
+            Action::TermKey(key) if self.screen() == Screen::Editor => {
+                let ed = self.state.editor.as_mut().expect("the editor page shows a file");
+                match key {
+                    TermKey::Tab => ed.insert('\t'),
+                    TermKey::Left => ed.left(),
+                    TermKey::Up => ed.up(),
+                    TermKey::Down => ed.down(),
+                    TermKey::Right => ed.right(),
+                    TermKey::Esc | TermKey::Ctrl => unreachable!("the editor's row has no {key:?}"),
+                }
+                self.edits += 1;
+                self.refresh_text();
+            }
             Action::TermKey(key) => {
                 let Some(term) = self.term.as_mut() else { return Vec::new() };
                 let bytes = term.key(key);
@@ -3853,6 +3951,9 @@ impl App {
                         let scroll = self.top().1;
                         self.state.files.leave(scroll);
                         return vec![Effect::ReadDir(self.state.files.inside(&entry.name))];
+                    }
+                    FileKind::File if matches!(files::file_type(&entry.name), FileType::Text | FileType::Code) => {
+                        return vec![Effect::OpenText(self.state.files.inside(&entry.name))];
                     }
                     FileKind::File | FileKind::Link { folder: false, .. } | FileKind::Special => {
                         self.state.file = Some(entry);
@@ -3972,8 +4073,56 @@ impl App {
         vec![Effect::Unlock { user, code }]
     }
 
-    /// Scroll the terminal's screen as a finger goes from `last` to `y`: a
-    /// row for each row's height, and down shows what is older.
+    /// A key of the keyboard on the editor page: a character or a space
+    /// goes in at the cursor, Enter breaks the line there and backspace
+    /// takes away what is before it; the layer keys change the keyboard.
+    fn edit_typed(&mut self, cap: Cap) {
+        let layer = self.state.layer;
+        let ed = self.state.editor.as_mut().expect("the editor page shows a file");
+        match cap {
+            Cap::Char(ch) if layer == Layer::Shifted => {
+                ed.insert(ch.to_ascii_uppercase());
+                self.state.layer = Layer::Letters;
+            }
+            Cap::Char(ch) => ed.insert(ch),
+            Cap::Space => ed.insert(' '),
+            Cap::Backspace => ed.backspace(),
+            Cap::Enter => ed.newline(),
+            Cap::Shift => self.state.layer = if layer == Layer::Shifted { Layer::Letters } else { Layer::Shifted },
+            Cap::Show(shown) => self.state.layer = shown,
+        }
+        self.edits += 1;
+        // The keyboard stays as it was while its keys do.
+        if self.state.layer == layer {
+            self.refresh_text();
+        } else {
+            self.refresh();
+        }
+    }
+
+    /// The editor's text or cursor changed: draw again what lies above the
+    /// keyboard, which stays as it was.
+    fn refresh_text(&mut self) {
+        let t = self.theme();
+        self.refresh_rows(0, (t.m.h as f32 - widgets::keyboard_height(&t)).floor() as u32);
+    }
+
+    /// A tap at page `x`, `y` on the editor's card puts the cursor between
+    /// the characters nearest it.
+    fn place_caret(&mut self, f: &Fonts, x: f32, y: f32) {
+        let l = editor::layout(&self.theme(), f);
+        if !l.card.contains(x, y) {
+            return;
+        }
+        let ed = self.state.editor.as_mut().expect("the editor page shows a file");
+        let row = (((y - l.y0) / l.pitch).floor().max(0.0) as usize).min(l.rows as usize - 1);
+        ed.place(ed.top() + row, (x - l.x0) / l.cell);
+        self.edits += 1;
+        self.refresh_text();
+    }
+
+    /// Scroll the terminal's screen or the editor's text as a finger goes
+    /// from `last` to `y`: a row for each row's height.
     fn scroll_history(&mut self, last: f32, y: f32, carry: f32, pitch: f32) -> Drag {
         let carry = carry + (y - last);
         let rows = (carry / pitch).trunc();
@@ -3983,10 +4132,14 @@ impl App {
         Drag::History { last: y, carry: carry - rows * pitch, pitch }
     }
 
-    /// Scroll the terminal's screen as a finger going down `rows` rows'
-    /// heights does, or up for fewer than none: down shows what is older.
+    /// Scroll as a finger going down `rows` rows' heights does, or up for
+    /// fewer than none: the terminal's screen back to what the shell wrote
+    /// before, the editor's text to the lines before.
     fn scroll_rows(&mut self, rows: isize) {
-        if let Some(term) = self.term.as_mut() {
+        if self.screen() == Screen::Editor {
+            self.state.editor.as_mut().expect("the editor page shows a file").scroll(-rows);
+            self.refresh_text();
+        } else if let Some(term) = self.term.as_mut() {
             term.scroll(rows);
             self.refresh();
         }
@@ -4113,8 +4266,8 @@ impl App {
                     self.drag = Drag::Press { x, y, action: None, edge: at_edge, at: now };
                     return fx;
                 }
-                // A terminal's screen gliding stops under a finger landing
-                // on it, which holds it to scroll on.
+                // A terminal's screen or the editor's text gliding stops
+                // under a finger landing on it, which holds it to scroll on.
                 let glided = self.glide.take().filter(|(glide, ..)| !glide.at(now).1);
                 let history = self.frame.as_ref().and_then(|fr| fr.scrollback).filter(|(r, _)| r.contains(x, y + scroll));
                 if let (Some(_), Some((_, pitch))) = (glided, history) {
@@ -4253,6 +4406,7 @@ impl App {
                     }
                     fx.extend(self.act(a, now));
                 }
+                Drag::Press { x, y, action: None, .. } if self.screen() == Screen::Editor => self.place_caret(f, x, y + scroll),
                 Drag::History { pitch, .. } => {
                     // A finger lifted while still moving sends the rows
                     // gliding on.
@@ -7398,33 +7552,6 @@ mod tests {
         assert_eq!(app.top().1, 0.0, "the page itself stays put");
     }
 
-    #[test]
-    fn a_flick_on_the_terminal_glides_back_and_a_finger_stops_it() {
-        let (f, i) = (fonts(), info());
-        let mut app = App::new(Screen::Terminal, W, H, PPD);
-        let (rows, cols) = app.term_size(&f);
-        app.term_started(rows, cols);
-        let many: String = (0..1000).map(|n| format!("line {n}\r\n")).collect();
-        app.term_output(many.as_bytes());
-        let (card, pitch) = app.frame(&f, &i).scrollback.expect("the terminal's screen scrolls back");
-        let (x, y) = (card.x + card.w / 2.0, card.y + card.h / 3.0);
-        let back = |app: &App| app.term.as_ref().expect("the shell started").screen().scrollback();
-        app.touch(Touch::Down(x, y), &f, 0);
-        for k in 1..=5u64 {
-            app.touch(Touch::Move(x, y + pitch * k as f32), &f, k * 8);
-        }
-        app.touch(Touch::Up, &f, 45);
-        let lifted = back(&app);
-        app.tick(200);
-        let gliding = back(&app);
-        assert!(gliding > lifted + 5, "a flick glides on: {lifted} to {gliding}");
-        app.frame(&f, &i);
-        app.touch(Touch::Down(x, y), &f, 210);
-        app.touch(Touch::Up, &f, 220);
-        app.tick(1000);
-        assert_eq!(back(&app), gliding, "a finger on it stops it there");
-    }
-
     fn entry(name: &str, kind: FileKind) -> FileRow {
         FileRow { name: name.into(), kind, size: 4096, modified: 1_792_348_260, mode: 0o040_755, uid: 0, gid: 0 }
     }
@@ -7448,10 +7575,12 @@ mod tests {
         app.set_files("/vendor".into(), Ok(vec![entry("etc", folder(3))]), LISTED);
         assert_eq!(app.key(Key::Back, 0), vec![Effect::ReadDir("/".into())], "back climbs a folder");
         assert_eq!(app.screen(), Screen::Files);
-        app.set_files("/".into(), Ok(vec![entry("init.rc", FileKind::File)]), LISTED);
+        app.set_files("/".into(), Ok(vec![entry("boot.img", FileKind::File), entry("init.rc", FileKind::File)]), LISTED);
+        assert_eq!(tap(&mut app, &f, &i, Action::OpenEntry(1)), vec![Effect::OpenText("/init.rc".into())], "a text file opens to edit");
+        assert_eq!(app.screen(), Screen::Files);
         tap(&mut app, &f, &i, Action::OpenEntry(0));
         assert_eq!(app.screen(), Screen::FileInfo);
-        assert_eq!(app.state.file.as_ref().map(|e| e.name.as_str()), Some("init.rc"));
+        assert_eq!(app.state.file.as_ref().map(|e| e.name.as_str()), Some("boot.img"));
         app.key(Key::Back, 0);
         assert_eq!(app.state.file, None);
         assert!(app.key(Key::Back, 0).is_empty(), "at the root, back leaves");
@@ -7681,6 +7810,144 @@ mod tests {
         app.state.file = Some(entry("a.zip", FileKind::File));
         app.refresh();
         assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::OpenPermissions));
+    }
+
+    fn toast(app: &App) -> Option<&str> {
+        app.toast.as_ref().map(|t| t.0.as_str())
+    }
+
+    #[test]
+    fn a_text_file_opens_to_edit_and_saves_what_was_typed() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Files));
+        app.set_files("/data/adb".into(), Ok(vec![entry("run.sh", FileKind::File)]), LISTED);
+        assert_eq!(tap(&mut app, &f, &i, Action::OpenEntry(0)), vec![Effect::OpenText("/data/adb/run.sh".into())]);
+        app.text_opened(&f, "/data/adb/run.sh".into(), Ok(Some(b"echo hi\n".to_vec())), 0);
+        assert_eq!(app.screen(), Screen::Editor);
+        let frame = app.frame(&f, &i);
+        assert_eq!(frame.button, None, "nothing waits to be saved");
+        assert!(frame.caret.is_some());
+        let keys: Vec<Action> = frame.hits.iter().map(|h| h.action).filter(|a| matches!(a, Action::TermKey(_))).collect();
+        assert_eq!(keys, editor::EDITOR_KEYS.map(Action::TermKey));
+        tap(&mut app, &f, &i, Action::Type(Cap::Shift));
+        tap(&mut app, &f, &i, Action::Type(Cap::Char('x')));
+        assert_eq!(app.state.layer, Layer::Letters, "a capital lasts one letter");
+        tap(&mut app, &f, &i, Action::Type(Cap::Space));
+        tap(&mut app, &f, &i, Action::TermKey(TermKey::Tab));
+        tap(&mut app, &f, &i, Action::Type(Cap::Enter));
+        assert_eq!(app.frame(&f, &i).button, Some((widgets::Glyph::Done, Action::SaveText)));
+        let save = vec![Effect::SaveText { path: "/data/adb/run.sh".into(), text: "X \t\necho hi\n".into() }];
+        assert_eq!(tap_button(&mut app, &f, &i, 0), save);
+        app.text_saved(Err("rename /data/adb/.run.sh.0.saving to /data/adb/run.sh: Read-only file system (os error 30)".into()), 0);
+        assert!(toast(&app).is_some_and(|t| t.starts_with("保存失败：rename")), "{:?}", app.toast);
+        assert_eq!(app.frame(&f, &i).button, Some((widgets::Glyph::Done, Action::SaveText)), "still to save");
+        assert_eq!(tap_button(&mut app, &f, &i, 0), save);
+        app.text_saved(Ok(()), 0);
+        assert_eq!(toast(&app), Some("已保存"));
+        assert_eq!(app.frame(&f, &i).button, None);
+        tap_back(&mut app, &f, &i, 0);
+        assert_eq!(app.screen(), Screen::Files, "a file saved leaves at once");
+        assert_eq!(app.state.editor, None);
+    }
+
+    #[test]
+    fn leaving_the_editor_with_changes_unsaved_takes_going_back_again() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Files, W, H, PPD);
+        app.set_files("/tmp".into(), Ok(vec![entry("a.txt", FileKind::File)]), LISTED);
+        app.text_opened(&f, "/tmp/a.txt".into(), Ok(Some(b"a".to_vec())), 0);
+        tap(&mut app, &f, &i, Action::Type(Cap::Char('b')));
+        tap_back(&mut app, &f, &i, 1000);
+        assert_eq!(app.screen(), Screen::Editor, "the first back only warns");
+        assert_eq!(toast(&app), Some("修改尚未保存，再次返回将放弃修改"));
+        tap_back(&mut app, &f, &i, 1000 + TOAST_MS);
+        assert_eq!(app.screen(), Screen::Editor, "once the warning is gone, back warns again");
+        tap_back(&mut app, &f, &i, 1000 + TOAST_MS + 500);
+        assert_eq!(app.screen(), Screen::Files, "back again while it shows leaves");
+        assert_eq!(app.state.editor, None, "without the changes");
+    }
+
+    #[test]
+    fn files_the_editor_does_not_take_are_turned_down_saying_why() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        let refused = [
+            (Ok(None), "暂不支持编辑超过 2 MB 的文件"),
+            (Ok(Some(vec![0xff, 0xfe, b'a'])), "仅支持编辑 UTF-8 编码的文本文件"),
+            (Ok(Some(b"\x7fELF\x02\x01\x01\0".to_vec())), "仅支持编辑 UTF-8 编码的文本文件"),
+        ];
+        for (read, said) in refused {
+            app.toast = None;
+            app.text_opened(&f, "/sdcard/a.bin".into(), read, 0);
+            assert_eq!(app.screen(), Screen::Files);
+            assert_eq!(toast(&app), Some(said));
+        }
+        app.text_opened(&f, "/sdcard/a.bin".into(), Err("open /sdcard/a.bin: Permission denied (os error 13)".into()), 0);
+        assert_eq!(toast(&app), Some("读取失败：open /sdcard/a.bin: Permission denied (os error 13)"));
+        assert_eq!(app.state.editor, None);
+    }
+
+    #[test]
+    fn the_file_page_edits_a_file_and_nothing_else() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        assert_eq!(app.screen(), Screen::FileInfo, "an archive opens what can be done with it");
+        assert_eq!(tap(&mut app, &f, &i, Action::EditEntry), vec![Effect::OpenText("/sdcard/a.zip".into())]);
+        for kind in [folder(2), FileKind::Link { target: "a.zip".into(), folder: false }, FileKind::Special] {
+            app.state.file = Some(entry("other", kind));
+            app.refresh();
+            assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::EditEntry), "{:?}", app.state.file);
+        }
+    }
+
+    #[test]
+    fn the_file_page_shows_a_file_as_saved() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        app.text_opened(&f, "/sdcard/a.zip".into(), Ok(Some(b"x".to_vec())), 0);
+        let saved = FileRow { size: 9, modified: LISTED, ..entry("a.zip", FileKind::File) };
+        app.set_files("/sdcard".into(), Ok(vec![entry("DCIM", folder(2)), saved.clone()]), LISTED);
+        assert_eq!(app.state.file, Some(saved));
+    }
+
+    #[test]
+    fn a_tap_on_the_text_moves_the_cursor_and_a_drag_or_a_flick_scrolls_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Files, W, H, PPD);
+        let text: String = (0..200).map(|n| format!("line {n}\n")).collect();
+        app.text_opened(&f, "/tmp/long.txt".into(), Ok(Some(text.into_bytes())), 0);
+        let (card, pitch) = app.frame(&f, &i).scrollback.expect("the editor's text scrolls");
+        let l = editor::layout(&app.theme(), &f);
+        let ed = |app: &App| app.state.editor.clone().expect("the editor page shows a file");
+        app.touch(Touch::Down(l.x0 + 4.2 * l.cell, l.y0 + 2.5 * l.pitch), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        assert_eq!(ed(&app).cursor(), (2, 4), "after \"line\" on the third row");
+        let (x, y) = (card.x + card.w / 2.0, card.y + card.h / 2.0);
+        app.touch(Touch::Down(x, y), &f, 100);
+        app.touch(Touch::Move(x, y - pitch * 5.5), &f, 110);
+        app.touch(Touch::Up, &f, 400);
+        assert_eq!(ed(&app).top(), 5, "up shows the lines after");
+        assert_eq!(ed(&app).cursor(), (2, 4), "a drag leaves the cursor where it was");
+        assert_eq!(app.top().1, 0.0, "the page itself stays put");
+        tap(&mut app, &f, &i, Action::TermKey(TermKey::Down));
+        assert_eq!((ed(&app).cursor(), ed(&app).top()), ((3, 4), 3), "moving the cursor brings it into view");
+        app.touch(Touch::Down(x, y), &f, 1000);
+        for k in 1..=5 {
+            app.touch(Touch::Move(x, y - pitch * k as f32), &f, 1000 + k * 8);
+        }
+        app.touch(Touch::Up, &f, 1045);
+        let lifted = ed(&app).top();
+        app.tick(1200);
+        let gliding = ed(&app).top();
+        assert!(gliding > lifted + 5, "a flick glides on: {lifted} to {gliding}");
+        app.touch(Touch::Down(x, y), &f, 1210);
+        app.touch(Touch::Up, &f, 1220);
+        app.tick(2000);
+        assert_eq!(ed(&app).top(), gliding, "a finger on it stops it there");
+        assert_eq!(ed(&app).cursor(), (3, 4), "and puts no cursor down");
     }
 
     #[test]

@@ -737,6 +737,8 @@ pub fn back_held(c: &mut Canvas, t: &Theme) {
 pub enum Glyph {
     /// A prompt and a cursor: a terminal.
     Terminal,
+    /// A tick: keep what was done.
+    Done,
 }
 
 /// The centre and radius of the round button at the right end of the bar,
@@ -775,6 +777,10 @@ fn glyph_at(c: &mut Canvas, t: &Theme, glyph: Glyph, dx: f32, dy: f32, color: Rg
             stroke(at(-8.0, -6.0), at(-2.0, 0.0));
             stroke(at(-2.0, 0.0), at(-8.0, 6.0));
             stroke(at(1.0, 6.0), at(8.0, 6.0));
+        }
+        Glyph::Done => {
+            stroke(at(-8.0, 0.0), at(-2.5, 5.5));
+            stroke(at(-2.5, 5.5), at(8.0, -5.5));
         }
     }
 }
@@ -2050,12 +2056,14 @@ mod tests {
         assert_eq!((button.x + button.w, button.y, button.w, button.h), (1440.0 - back.x, back.y, back.w, back.h));
         let (cx, cy, r) = button_disc(&t);
         let disc = Rect::new(cx - r, cy - r, r * 2.0, r * 2.0);
-        let mut c = Canvas::new(1440, 400);
-        button_glyph(&mut c, &t, Glyph::Terminal, Rgba::rgb(0, 0, 0));
-        let (l, top, right, bottom) = ink_box(&c, disc, |p| p[3] > 0);
-        let ((x, y), size) = (((l + right) / 2.0, (top + bottom) / 2.0), (right - l, bottom - top));
-        assert!((x - cx).abs() <= 1.0 && (y - cy).abs() <= 1.0, "centred on the disc: ({x}, {y}) for ({cx}, {cy})");
-        assert!(size.0 < r * 1.2 && size.1 < r, "well inside it: {size:?}");
+        for glyph in [Glyph::Terminal, Glyph::Done] {
+            let mut c = Canvas::new(1440, 400);
+            button_glyph(&mut c, &t, glyph, Rgba::rgb(0, 0, 0));
+            let (l, top, right, bottom) = ink_box(&c, disc, |p| p[3] > 0);
+            let ((x, y), size) = (((l + right) / 2.0, (top + bottom) / 2.0), (right - l, bottom - top));
+            assert!((x - cx).abs() <= 1.0 && (y - cy).abs() <= 1.0, "{glyph:?} centred on the disc: ({x}, {y}) for ({cx}, {cy})");
+            assert!(size.0 < r * 1.2 && size.1 < r, "{glyph:?} well inside it: {size:?}");
+        }
     }
 
     #[test]

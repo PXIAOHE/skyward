@@ -7,8 +7,8 @@ use skyward_ui::app::{
     FileOp, FileRow, FileTask, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch,
     UsbDrive, UsbLink, SCREEN_OFF,
 };
-use skyward_ui::widgets::{self, Bar, Layer};
-use skyward_ui::{fmt, pages, Canvas, Ctx, Fonts, Theme};
+use skyward_ui::widgets::{self, Bar, Cap, Layer};
+use skyward_ui::{editor, fmt, pages, Canvas, Ctx, Fonts, Theme};
 use skyward_vab::{BootSlots, FailureCode, Hold, Slot, SnapshotState, Standing};
 use std::fs::File;
 use std::io::BufWriter;
@@ -28,6 +28,16 @@ ishtar:/ # df -h /metadata\r\n\
 Filesystem      Size Used Avail Use% Mounted on\r\n\
 /dev/block/sda9  59M 7.0M   52M  12% /metadata\r\n\
 ishtar:/ # ";
+
+/// A script as the editor shows it: an indented line, a comment in
+/// Chinese, and lines long enough to wrap.
+const EDITOR_SAMPLE: &str = "#!/system/bin/sh\n\
+# 开机完成后调整调度器与刷新率\n\
+for cpu in /sys/devices/system/cpu/cpu[0-7]; do\n\
+\techo schedutil > $cpu/cpufreq/scaling_governor\n\
+done\n\
+setprop persist.vendor.display.enable_optimize_refresh 1\n\
+echo \"调度器已调整，刷新率设置写入 /data/local/tmp/refresh.log\" >> /data/local/tmp/refresh.log\n";
 
 /// File name, page, dark theme, readings, where the data partition stands,
 /// pattern drawn.
@@ -285,7 +295,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 101] = [
+    let pages: [PageShot; 103] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -455,6 +465,14 @@ fn main() -> Result<()> {
             app.term_output(SHELL_SAMPLE);
             app.state.layer = Layer::Symbols;
         }),
+        ("124-editor-light", Screen::Files, false, &|app| {
+            app.text_opened(&fonts, "/data/adb/service.d/tune.sh".into(), Ok(Some(EDITOR_SAMPLE.into())), 0);
+        }),
+        ("125-editor-dark-symbols", Screen::Files, true, &|app| {
+            let path = "/vendor/etc/init/hw/init.target.performance.rc";
+            app.text_opened(&fonts, path.into(), Ok(Some(EDITOR_SAMPLE.into())), 0);
+            app.state.layer = Layer::Symbols;
+        }),
         ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
             let (rows, cols) = app.term_size(&fonts);
             app.term_started(rows, cols);
@@ -595,7 +613,7 @@ fn main() -> Result<()> {
     }
 
     // The panel mid-gesture, to set beside recordings of the same moves.
-    let moments: [Moment; 22] = [
+    let moments: [Moment; 23] = [
         ("08-about-light", Screen::About, false, &|_, _| 2000),
         ("08-about-dark", Screen::About, true, &|_, _| 2000),
         ("08-about-light-later", Screen::About, false, &|_, _| 9000),
@@ -662,6 +680,16 @@ fn main() -> Result<()> {
             app.touch(Touch::Up, f, 2100);
             frames(app, f, &info, 2100, 2160);
             2170
+        }),
+        // A tap past the end of the first line, then " -x" typed there: the
+        // round button to save comes up, and the cursor stands after it.
+        ("126-editor-changed-light", Screen::Files, false, &|app, f| {
+            app.text_opened(f, "/data/adb/service.d/tune.sh".into(), Ok(Some(EDITOR_SAMPLE.into())), 0);
+            let l = editor::layout(&app.theme(), f);
+            app.touch(Touch::Down(l.x0 + 30.0 * l.cell, l.y0 + l.pitch / 2.0), f, 100);
+            app.touch(Touch::Up, f, 150);
+            let keys = [Cap::Space, Cap::Show(Layer::Digits), Cap::Char('-'), Cap::Show(Layer::Letters), Cap::Char('x')];
+            type_keys(app, f, &info, &keys, 300)
         }),
     ];
     for (name, screen, dark, act) in moments {
@@ -736,6 +764,18 @@ fn finger_on(app: &mut App, f: &Fonts, info: &DeviceInfo, action: Action, at: u6
     };
     let (x, y) = rect.centre();
     app.touch(Touch::Down(x, y), f, at);
+}
+
+/// Tap each of `keys` on the page's keyboard, 120 ms apart from `from`;
+/// returns a time just after the last.
+fn type_keys(app: &mut App, f: &Fonts, info: &DeviceInfo, keys: &[Cap], from: u64) -> u64 {
+    let mut at = from;
+    for &cap in keys {
+        finger_on(app, f, info, Action::Type(cap), at);
+        app.touch(Touch::Up, f, at + 60);
+        at += 120;
+    }
+    at
 }
 
 /// Draw a frame every 8 ms from `from` to `to`, as the panel does.

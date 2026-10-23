@@ -5,6 +5,7 @@ use crate::app::{
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
+use crate::editor;
 use crate::files;
 use crate::fmt;
 use crate::font::Fonts;
@@ -73,6 +74,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Files => files(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
+        Screen::Editor => editor(cx),
         Screen::Terminal => terminal(cx),
         Screen::Language => language(cx),
         Screen::TimeZone => time_zone(cx),
@@ -1621,8 +1623,14 @@ pub fn file_info(cx: &Ctx) -> Frame {
     facts.push(("修改时间", fmt::datetime(e.modified, s.time_zone)));
     facts.push(("权限", format!("{}，所有者 {}，用户组 {}", fmt::mode(e.mode), e.uid, e.gid)));
     let y = widgets::info_card(&mut c, t, f, top, &facts);
-    let mut rows = vec![Row::new("复制"), Row::new("移动"), Row::new("重命名")];
-    let mut acts = vec![Action::PickEntry(FileOp::Copy), Action::PickEntry(FileOp::Move), Action::RenameEntry];
+    let mut rows = Vec::new();
+    let mut acts = Vec::new();
+    if e.kind == FileKind::File {
+        rows.push(Row::new("编辑"));
+        acts.push(Action::EditEntry);
+    }
+    rows.extend([Row::new("复制"), Row::new("移动"), Row::new("重命名")]);
+    acts.extend([Action::PickEntry(FileOp::Copy), Action::PickEntry(FileOp::Move), Action::RenameEntry]);
     // A link's own permissions mean nothing; its target is changed where
     // it is.
     if !matches!(e.kind, FileKind::Link { .. }) {
@@ -1774,6 +1782,24 @@ pub fn terminal(cx: &Ctx) -> Frame {
     let keys = term::keys(&mut c, t, f, &l, &term::TERM_KEYS, held);
     out.extend(keys.into_iter().map(|(rect, key)| Hit { rect, action: Action::TermKey(key) }));
     Frame { scrollback: Some((l.card, l.pitch)), ..Frame::new(t, c, out, "终端", top) }
+}
+
+/// A text file being edited: where it is, its lines wrapped on a card, the
+/// keys a phone keyboard lacks for moving the cursor, and the keyboard.
+/// Once it is changed, the round button saves it.
+pub fn editor(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let ed = s.editor.as_ref().expect("the editor page shows a file");
+    let mut c = page(cx);
+    let mut out = Vec::new();
+    keyboard_hits(&mut c, t, f, s, "换行", &mut out);
+    editor::caption(&mut c, t, f, &ed.path);
+    let l = editor::layout(t, f);
+    let caret = editor::draw(&mut c, t, f, &l, ed);
+    let keys = term::keys(&mut c, t, f, &l, &editor::EDITOR_KEYS, false);
+    out.extend(keys.into_iter().map(|(rect, key)| Hit { rect, action: Action::TermKey(key) }));
+    let button = ed.changed.then_some((widgets::Glyph::Done, Action::SaveText));
+    Frame { scrollback: Some((l.card, l.pitch)), caret, button, ..Frame::new(t, c, out, "编辑", t.m.content_top) }
 }
 
 /// The interface's languages; only Simplified Chinese is written yet.

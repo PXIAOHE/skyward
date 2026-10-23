@@ -1508,6 +1508,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let outcome = skyward_files::set_mode(Path::new(&path), mode).map_err(|e| format!("{e:#}"));
                         app.mode_set(mode, outcome, now);
                     }
+                    Effect::OpenText(path) => {
+                        let read = skyward_files::read_up_to(Path::new(&path), skyward_ui::editor::MAX_BYTES).map_err(|e| format!("{e:#}"));
+                        app.text_opened(&fonts, path, read, now);
+                    }
+                    // The folder is listed again, for the file's new size
+                    // and time.
+                    Effect::SaveText { path, text } => match skyward_files::replace(Path::new(&path), text.as_bytes()) {
+                        Ok(()) => {
+                            app.text_saved(Ok(()), now);
+                            let folder = app.state.files.path.clone();
+                            list(&mut app, folder)?;
+                        }
+                        Err(e) => app.text_saved(Err(format!("{e:#}")), now),
+                    },
                     Effect::Rename { path, name } => match skyward_files::rename(Path::new(&path), &name) {
                         Ok(_) => {
                             app.renamed(Ok(()), now);
