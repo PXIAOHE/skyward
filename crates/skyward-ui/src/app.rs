@@ -3180,7 +3180,7 @@ impl App {
         }
         // The search page's round button and the home page's search bar
         // darken at once under a finger.
-        if let Some(a) = pressing.filter(|&a| a != Action::Back) {
+        if let Some(a) = pressing.filter(|a| matches!(a, Action::CloseSearch | Action::Open(Screen::Search))) {
             let r = frame.hits.iter().find(|h| h.action == a).expect("a button held down is on its page").rect;
             let r = Rect { y: r.y - offset, ..r };
             if a == Action::CloseSearch {
@@ -5312,6 +5312,7 @@ mod tests {
         fx.extend(app.touch(Touch::Up, f, now));
         fx
     }
+
 
     #[test]
     fn rows_open_pages_and_back_returns() {
@@ -7533,6 +7534,40 @@ mod tests {
         app.set_files("/data/adb".into(), Ok(Vec::new()), 0);
         assert_eq!(tap_button(&mut app, &f, &i, 0), vec![Effect::ShellTo("/data/adb".into())], "the shell running goes there");
         assert_eq!(app.screen(), Screen::Terminal);
+    }
+
+    #[test]
+    fn the_bars_round_button_darkens_under_a_finger_on_the_frames_drawn() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Files, W, H, PPD);
+        app.set_files("/data/adb".into(), Ok(vec![entry("a.txt", FileKind::File)]), LISTED);
+        let t = app.theme();
+        let (cx, cy, _) = widgets::button_disc(&t);
+        let k = (((cy - t.m.dp(5.0)) as u32 * W + (cx + t.m.dp(5.0)) as u32) * 4) as usize;
+        let mut c = Canvas::new(W, H);
+        let mut pixel = |app: &mut App, now: u64| {
+            app.tick(now);
+            app.compose(&mut c, &f, &i, "12:00", now);
+            c.data[k..k + 4].to_vec()
+        };
+        let (x, y) = widgets::button_rect(&t).centre();
+        let rest = pixel(&mut app, 0);
+        app.touch(Touch::Down(x, y), &f, 100);
+        assert_ne!(pixel(&mut app, 100), rest, "held down, its disc darkens");
+        assert_eq!(app.touch(Touch::Up, &f, 150), vec![Effect::StartShell("/data/adb".into())]);
+        for now in (150..1000).step_by(8) {
+            pixel(&mut app, now);
+        }
+        assert_eq!(app.screen(), Screen::Terminal, "the terminal slides in");
+        app.text_opened(&f, "/data/adb/a.txt".into(), Ok(Some(b"a".to_vec())), 1000);
+        app.state.editor.as_mut().expect("the editor page shows a file").insert('b');
+        app.refresh();
+        for now in (1000..1500).step_by(8) {
+            pixel(&mut app, now);
+        }
+        app.touch(Touch::Down(x, y), &f, 1500);
+        pixel(&mut app, 1500);
+        assert_eq!(app.touch(Touch::Up, &f, 1550), vec![Effect::SaveText { path: "/data/adb/a.txt".into(), text: "ba".into() }]);
     }
 
     #[test]
