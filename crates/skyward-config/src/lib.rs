@@ -47,6 +47,71 @@ pub struct DeviceConfig {
     pub wipe: Wipe,
     #[serde(default)]
     pub backup: Backup,
+    /// The phone's WLAN, on phones whose driver the recovery brings up.
+    #[serde(default)]
+    pub wlan: Option<Wlan>,
+    /// Where the phone maker answers which system is the newest, on phones
+    /// whose server the recovery knows.
+    #[serde(default)]
+    pub update: Option<Update>,
+}
+
+/// What brings the phone's WLAN up inside a recovery, which loads none of
+/// it: the driver, what it reads as it starts, and the phone's own
+/// wpa_supplicant, which joins networks.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Wlan {
+    /// The driver's kernel modules; what they depend on loads first.
+    pub modules: Vec<String>,
+    /// What is written once they are in, each value to its file, such as
+    /// what tells a platform driver it may start the chip.
+    #[serde(default)]
+    pub writes: Vec<Write>,
+    /// Files the driver asks the kernel's firmware loader for that are not
+    /// where the loader looks in a recovery.
+    #[serde(default)]
+    pub firmware: Vec<Firmware>,
+    /// The network interface the driver makes.
+    pub interface: String,
+    /// The phone's own wpa_supplicant.
+    pub supplicant: String,
+    /// Directories for its LD_LIBRARY_PATH, searched in order and before
+    /// the libraries of the vendor interface the phone was built against.
+    #[serde(default)]
+    pub libraries: Vec<String>,
+    /// The service it registers with the service directory as it starts,
+    /// which the directory takes only from a program the running system
+    /// describes.
+    pub service: String,
+}
+
+/// A value written to a file, such as a switch in sysfs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Write {
+    pub path: String,
+    pub value: String,
+}
+
+/// A file a driver asks the firmware loader for, and where it is.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Firmware {
+    /// The name the driver asks for, from the top of the loader's folders.
+    pub name: String,
+    /// Where the file is: a path in the running recovery, or from the top
+    /// of `partition`.
+    pub path: String,
+    /// A partition the recovery does not keep mounted, which is mounted
+    /// read-only while the file is read.
+    #[serde(default)]
+    pub partition: Option<String>,
+}
+
+/// The phone maker's update server, which the stock updater asks about the
+/// installed system.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Update {
+    /// Where the questions are sent.
+    pub server: String,
 }
 
 /// What a backup takes in and leaves out beyond what every Android phone
@@ -219,6 +284,25 @@ impl DeviceConfig {
             let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
+        if let Some(wlan) = &cfg.wlan {
+            for file in &wlan.firmware {
+                let name = Path::new(&file.name);
+                let plain = name.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+                ensure!(plain && !file.name.is_empty(), "[wlan] firmware: {} is not a name from the top of the loader's folders", file.name);
+                let path = Path::new(&file.path);
+                match &file.partition {
+                    Some(partition) => {
+                        let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+                        ensure!(
+                            !partition.is_empty() && !partition.contains('/'),
+                            "[wlan] firmware: {partition} is not a partition's name"
+                        );
+                        ensure!(plain && !file.path.is_empty(), "[wlan] firmware: {} is not a path from the top of {partition}", file.path);
+                    }
+                    None => ensure!(path.is_absolute(), "[wlan] firmware: {} is not an absolute path", file.path),
+                }
+            }
+        }
         Ok(cfg)
     }
 }
@@ -307,6 +391,35 @@ mod tests {
             let text = format!("[device]\ncodename = \"x\"\n[wipe]\nlogs = [\"{bad}\"]\n");
             assert!(DeviceConfig::parse(&text).is_err(), "{bad} is refused");
         }
+    }
+
+    #[test]
+    fn ishtar_brings_its_wlan_up_from_its_own_partitions() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        let wlan = cfg.wlan.expect("the 13 Ultra's WLAN is described");
+        assert_eq!(wlan.modules, ["qca_cld3_kiwi_v2"]);
+        assert_eq!(wlan.writes, [Write { path: "/sys/kernel/cnss/fs_ready".into(), value: "1".into() }]);
+        assert_eq!(wlan.firmware[0].partition, None);
+        assert_eq!(wlan.firmware[1].partition.as_deref(), Some("persist"));
+        assert_eq!(wlan.firmware[1].path, "kiwi_v2/wlan_mac.bin");
+        assert_eq!(wlan.interface, "wlan0");
+        assert_eq!(wlan.service, "android.hardware.wifi.supplicant.ISupplicant/default");
+        assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
+        let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        assert_eq!((nezha.wlan, nezha.update), (None, None), "a phone may have neither");
+    }
+
+    #[test]
+    fn firmware_is_named_from_the_loaders_folders_and_found_plainly() {
+        let base = "[device]\ncodename = \"x\"\n[wlan]\nmodules = []\ninterface = \"wlan0\"\nsupplicant = \"/s\"\nservice = \"a/b\"\n";
+        let with = |file: &str| DeviceConfig::parse(&format!("{base}firmware = [{file}]\n"));
+        assert!(with("{ name = \"wlan/a.ini\", path = \"/vendor/etc/a.ini\" }").is_ok());
+        assert!(with("{ name = \"wlan/mac.bin\", partition = \"persist\", path = \"kiwi/mac.bin\" }").is_ok());
+        assert!(with("{ name = \"/etc/firmware/a.ini\", path = \"/vendor/etc/a.ini\" }").is_err());
+        assert!(with("{ name = \"../a.ini\", path = \"/vendor/etc/a.ini\" }").is_err());
+        assert!(with("{ name = \"a.ini\", path = \"vendor/etc/a.ini\" }").is_err());
+        assert!(with("{ name = \"mac.bin\", partition = \"persist\", path = \"/kiwi/mac.bin\" }").is_err());
+        assert!(with("{ name = \"mac.bin\", partition = \"by-name/persist\", path = \"mac.bin\" }").is_err());
     }
 
     #[test]
