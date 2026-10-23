@@ -10,6 +10,7 @@ pub mod keep;
 pub mod ota;
 pub mod package;
 pub mod script;
+pub mod signature;
 
 #[cfg(target_os = "android")]
 mod ffs;
