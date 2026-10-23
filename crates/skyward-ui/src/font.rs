@@ -1,6 +1,9 @@
-use ab_glyph::{Font, FontRef, PxScale, VariableFont};
+use ab_glyph::{Font, FontRef, GlyphId, PxScale, VariableFont};
 use anyhow::{anyhow, Result};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 
 /// One weight instance of a typeface. MiSans ships as a variable font, so
 /// every UI weight is the same file with a different `wght` coordinate.
@@ -8,6 +11,40 @@ pub struct Face {
     pub(crate) font: FontRef<'static>,
     upem: f32,
     height: f32,
+    /// What drawing text in the face has worked out, kept: outlining a
+    /// glyph of a variable font, its points moved for the weight, and
+    /// rasterizing it cost more than all else a page draws.
+    known: RefCell<Known>,
+}
+
+/// A glyph's ink: coverage from 0 to 255 for each pixel of a `w` × `h`
+/// box whose top-left corner lies (`x`, `y`) from the whole pixel holding
+/// the pen position.
+pub(crate) struct Ink {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub cov: Vec<u8>,
+}
+
+/// Glyphs are drawn this many positions to a pixel each way, and their
+/// ink kept for each.
+pub(crate) const SUBPIXELS: f32 = 4.0;
+
+/// So many glyph inks at the most are kept; past that, they are drawn
+/// anew.
+const GLYPHS_KEPT: usize = 16_384;
+
+#[derive(Default)]
+struct Known {
+    /// Each character's glyph and advance, unscaled.
+    chars: HashMap<char, (GlyphId, f32)>,
+    /// The reference ideograph's ink extent at each em size.
+    inks: HashMap<u32, (f32, f32)>,
+    /// Each glyph's ink at each size and position within a pixel; nothing
+    /// for a glyph without an outline.
+    glyphs: HashMap<(u16, u32, u8, u8), Option<Rc<Ink>>>,
 }
 
 impl Face {
@@ -17,7 +54,39 @@ impl Face {
         font.set_variation(b"wght", weight);
         let upem = font.units_per_em().ok_or_else(|| anyhow!("font has no units-per-em"))?;
         let height = font.height_unscaled();
-        Ok(Face { font, upem, height })
+        Ok(Face { font, upem, height, known: RefCell::new(Known::default()) })
+    }
+
+    /// The glyph for `ch`, and how far it advances the pen at `scale`.
+    pub(crate) fn glyph(&self, ch: char, scale: PxScale) -> (GlyphId, f32) {
+        let (id, advance) = *self.known.borrow_mut().chars.entry(ch).or_insert_with(|| {
+            let id = self.font.glyph_id(ch);
+            (id, self.font.h_advance_unscaled(id))
+        });
+        (id, advance * scale.x / self.height)
+    }
+
+    /// The ink of glyph `id` at `scale`, drawn `qx` and `qy` quarters of a
+    /// pixel right of and below a whole pixel.
+    pub(crate) fn ink_of(&self, id: GlyphId, scale: PxScale, qx: u8, qy: u8) -> Option<Rc<Ink>> {
+        let key = (id.0, scale.x.to_bits(), qx, qy);
+        if let Some(ink) = self.known.borrow().glyphs.get(&key) {
+            return ink.clone();
+        }
+        let at = ab_glyph::point(qx as f32 / SUBPIXELS, qy as f32 / SUBPIXELS);
+        let ink = self.font.outline_glyph(id.with_scale_and_position(scale, at)).map(|og| {
+            let b = og.px_bounds();
+            let (w, h) = (b.width() as u32, b.height() as u32);
+            let mut cov = vec![0u8; (w * h) as usize];
+            og.draw(|gx, gy, c| cov[(gy * w + gx) as usize] = (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+            Rc::new(Ink { x: b.min.x as i32, y: b.min.y as i32, w, h, cov })
+        });
+        let mut known = self.known.borrow_mut();
+        if known.glyphs.len() >= GLYPHS_KEPT {
+            known.glyphs.clear();
+        }
+        known.glyphs.insert(key, ink.clone());
+        ink
     }
 
     /// ab_glyph scales by ascent-minus-descent; the UI sizes text by the em,
@@ -35,7 +104,12 @@ impl Face {
     /// baseline (negative is above). Rows centre text on this, as the stock
     /// settings do.
     pub fn ink(&self, em_px: f32) -> (f32, f32) {
-        self.bounds('中', em_px)
+        if let Some(&ink) = self.known.borrow().inks.get(&em_px.to_bits()) {
+            return ink;
+        }
+        let ink = self.bounds('中', em_px);
+        self.known.borrow_mut().inks.insert(em_px.to_bits(), ink);
+        ink
     }
 
     /// The line text is set on, above and below the baseline (negative is

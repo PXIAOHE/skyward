@@ -1,6 +1,6 @@
 use crate::color::{blend_over, blend_px, Rgba};
-use crate::font::Face;
-use ab_glyph::{point, Font, GlyphId, PxScale, ScaleFont};
+use crate::font::{Face, SUBPIXELS};
+use ab_glyph::{Font, GlyphId, PxScale, ScaleFont};
 
 /// A straight-alpha RGBA8 raster target. All primitives are antialiased via
 /// signed-distance coverage so the same code produces crisp output on the
@@ -803,15 +803,16 @@ impl Canvas {
     }
 
     pub fn text_width(&self, face: &Face, text: &str, px: f32) -> f32 {
-        let sf = face.font.as_scaled(face.scale(px));
+        let scale = face.scale(px);
+        let sf = face.font.as_scaled(scale);
         let mut w = 0.0;
         let mut prev: Option<GlyphId> = None;
         for ch in text.chars() {
-            let id = face.font.glyph_id(ch);
+            let (id, advance) = face.glyph(ch, scale);
             if let Some(p) = prev {
                 w += sf.kern(p, id);
             }
-            w += sf.h_advance(id);
+            w += advance;
             prev = Some(id);
         }
         w
@@ -829,7 +830,7 @@ impl Canvas {
         color: Rgba,
         max_w: Option<f32>,
     ) -> f32 {
-        self.text_paint(face, text, x, baseline, px, &|_, _| color, max_w)
+        self.text_with(face, text, x, baseline, px, Ink::Solid(color), max_w)
     }
 
     /// [`Canvas::text`] with the ink colour chosen per pixel, for gradient
@@ -844,29 +845,31 @@ impl Canvas {
         paint: &dyn Fn(f32, f32) -> Rgba,
         max_w: Option<f32>,
     ) -> f32 {
+        self.text_with(face, text, x, baseline, px, Ink::Paint(paint), max_w)
+    }
+
+    fn text_with(&mut self, face: &Face, text: &str, x: f32, baseline: f32, px: f32, ink: Ink, max_w: Option<f32>) -> f32 {
         let scale = face.scale(px);
         let sf = face.font.as_scaled(scale);
-        let ell = face.font.glyph_id('…');
-        let ell_w = sf.h_advance(ell);
+        let (ell, ell_w) = face.glyph('…', scale);
         let limit = max_w.map(|m| x + m);
         let chars: Vec<char> = text.chars().collect();
         let mut pen = x;
         let mut prev: Option<GlyphId> = None;
         for (i, &ch) in chars.iter().enumerate() {
-            let id = face.font.glyph_id(ch);
+            let (id, aw) = face.glyph(ch, scale);
             if let Some(p) = prev {
                 pen += sf.kern(p, id);
             }
-            let aw = sf.h_advance(id);
             if let Some(lim) = limit {
                 let more = i + 1 < chars.len();
                 if pen + aw + if more { ell_w } else { 0.0 } > lim {
-                    self.glyph(face, ell, scale, pen, baseline, paint);
+                    self.glyph(face, ell, scale, pen, baseline, ink);
                     pen += ell_w;
                     break;
                 }
             }
-            self.glyph(face, id, scale, pen, baseline, paint);
+            self.glyph(face, id, scale, pen, baseline, ink);
             pen += aw;
             prev = Some(id);
         }
@@ -891,19 +894,46 @@ impl Canvas {
         self.text_vc(face, text, cx - w / 2.0, cy, px, color, None);
     }
 
-    fn glyph(&mut self, face: &Face, id: GlyphId, scale: PxScale, x: f32, baseline: f32, paint: &dyn Fn(f32, f32) -> Rgba) {
-        let g = id.with_scale_and_position(scale, point(x, baseline));
-        if let Some(og) = face.font.outline_glyph(g) {
-            let b = og.px_bounds();
-            let (ox, oy) = (b.min.x as i32, b.min.y as i32);
-            og.draw(|gx, gy, cov| {
-                if cov > 0.0 {
-                    let (px, py) = (ox + gx as i32, oy + gy as i32);
-                    self.blend(px, py, paint(px as f32 + 0.5, py as f32 + 0.5), cov);
+    /// Glyph `id` with its pen position at (`x`, `baseline`), from its ink
+    /// drawn for the nearest quarter of a pixel.
+    fn glyph(&mut self, face: &Face, id: GlyphId, scale: PxScale, x: f32, baseline: f32, ink: Ink) {
+        let quarter = |v: f32| {
+            let q = (v * SUBPIXELS).round();
+            ((q / SUBPIXELS).floor() as i32, q.rem_euclid(SUBPIXELS) as u8)
+        };
+        let ((ix, qx), (iy, qy)) = (quarter(x), quarter(baseline));
+        let Some(art) = face.ink_of(id, scale, qx, qy) else { return };
+        let (ox, oy) = (ix + art.x, iy + art.y);
+        let (from, to) = self.columns(ox, ox + art.w as i32);
+        let (x0, x1) = (from - ox, to - ox);
+        if x0 >= x1 {
+            return;
+        }
+        let (first, last) = self.rows(oy, oy + art.h as i32);
+        for py in first..last {
+            let gy = py - oy;
+            let covs = &art.cov[(gy * art.w as i32 + x0) as usize..(gy * art.w as i32 + x1) as usize];
+            let start = self.at(ox + x0, py);
+            let row = self.data[start..start + covs.len() * 4].as_chunks_mut::<4>().0;
+            for (k, (&c, p)) in covs.iter().zip(row).enumerate() {
+                if c == 0 {
+                    continue;
                 }
-            });
+                let color = match ink {
+                    Ink::Solid(color) => color,
+                    Ink::Paint(paint) => paint((ox + x0 + k as i32) as f32 + 0.5, py as f32 + 0.5),
+                };
+                blend_px(p, color, (color.a as u32 * c as u32 + 127) / 255);
+            }
         }
     }
+}
+
+/// How text is inked: one colour, or one chosen per pixel.
+#[derive(Clone, Copy)]
+enum Ink<'a> {
+    Solid(Rgba),
+    Paint(&'a dyn Fn(f32, f32) -> Rgba),
 }
 
 impl Drop for Canvas {
