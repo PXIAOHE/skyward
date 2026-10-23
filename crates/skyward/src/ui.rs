@@ -2,6 +2,7 @@ use crate::backup;
 use crate::decrypt::{self, Decryptor};
 use crate::filework;
 use crate::haptics::Haptics;
+use crate::relabel;
 use crate::input::{monotonic_ms, Event, Inputs};
 use crate::merge;
 use crate::pty;
@@ -894,6 +895,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut shell: Option<pty::Shell> = None;
     // Copying, moving or deleting under way.
     let mut worker: Option<filework::Worker> = None;
+    // Giving the data partition's files their SELinux labels under way.
+    let mut relabeler: Option<filework::Worker> = None;
     // Backing up or restoring under way.
     let mut backuper: Option<backup::Worker> = None;
     // An update's merge followed: one the recovery found under way, which
@@ -1019,6 +1022,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(w) = &worker {
             fds.push(w.fd());
         }
+        if let Some(r) = &relabeler {
+            fds.push(r.fd());
+        }
         if let Some(b) = &backuper {
             fds.push(b.fd());
         }
@@ -1119,22 +1125,39 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if erased {
             eraser = None;
         }
+        let job_end = |end: filework::End| match end {
+            filework::End::Done => JobEnd::Done,
+            filework::End::Stopped => JobEnd::Stopped,
+            filework::End::Failed(why) => JobEnd::Failed(why),
+        };
         let mut worked = false;
         if let Some(w) = &worker {
             for ev in w.events() {
                 match ev {
                     filework::Event::Progress(p) => app.file_progress((p.bytes, p.total_bytes), (p.entries, p.total_entries)),
+                    filework::Event::Relabeling(_) => unreachable!("work on files gives no labels"),
                     filework::Event::Ended(end) => {
-                        let end = match end {
-                            filework::End::Done => JobEnd::Done,
-                            filework::End::Stopped => JobEnd::Stopped,
-                            filework::End::Failed(why) => JobEnd::Failed(why),
-                        };
-                        app.file_job_ended(end, now);
+                        app.file_job_ended(job_end(end), now);
                         worked = true;
                     }
                 }
             }
+        }
+        let mut relabeled = false;
+        if let Some(r) = &relabeler {
+            for ev in r.events() {
+                match ev {
+                    filework::Event::Relabeling(p) => app.relabel_progress(p.checked, p.total, p.changed),
+                    filework::Event::Progress(_) => unreachable!("relabeling moves no bytes"),
+                    filework::Event::Ended(end) => {
+                        app.relabel_ended(job_end(end), now);
+                        relabeled = true;
+                    }
+                }
+            }
+        }
+        if relabeled {
+            relabeler = None;
         }
         // The folder shown is read again for what the work changed.
         if worked {
@@ -1419,6 +1442,23 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.file_job_started(FileTask::Delete { path });
                     }
                     Effect::StopJob => worker.as_ref().context("there is no work on files to stop")?.stop(),
+                    // Rules kept on a partition that is not mounted are the
+                    // page's to report, with what to do first.
+                    Effect::Relabel => {
+                        ensure!(relabeler.is_none(), "relabeling is under way already");
+                        let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+                        match relabel::rule_files(slot) {
+                            Ok(rules) => {
+                                relabeler = Some(filework::Worker::start(filework::Task::Relabel { rules })?);
+                                app.relabel_started();
+                            }
+                            Err(e) => match e.downcast_ref::<relabel::Unmounted>() {
+                                Some(relabel::Unmounted(base)) => app.report(&format!("请先在「挂载」中挂载 {base} 分区"), now),
+                                None => app.report(&format!("未能读取系统的 SELinux 规则：{e:#}"), now),
+                            },
+                        }
+                    }
+                    Effect::StopRelabel => relabeler.as_ref().context("there is no relabeling to stop")?.stop(),
                     // An install still stopping may yet write; a backup or
                     // restore waits for it.
                     Effect::Backup { parts, place, compress, verify } => {

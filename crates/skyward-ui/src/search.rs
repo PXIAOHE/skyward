@@ -27,6 +27,12 @@ pub const ENTRIES: &[Entry] = &[
     entry("高级", "主页", Screen::Advanced, &["gaoji", "gj", "advanced"]),
     entry("文件管理", "高级", Screen::Files, &["wenjianguanli", "wjgl", "files", "file"]),
     entry("终端", "高级", Screen::Terminal, &["zhongduan", "zd", "terminal", "shell"]),
+    entry(
+        "修复 SELinux 上下文",
+        "高级",
+        Screen::Relabel,
+        &["xiufuselinuxshangxiawen", "xfsxw", "xiufu", "xf", "shangxiawen", "context", "restorecon", "label"],
+    ),
     entry("导出日志", "高级", Screen::Logs, &["daochurizhi", "dcrz", "rizhi", "rz", "logs", "dmesg"]),
     entry("系统更新", "高级", Screen::Update, &["xitonggengxin", "xtgx", "hebing", "hb", "update", "ota", "merge", "snapshot"]),
     entry("设置", "主页", Screen::Settings, &["shezhi", "sz", "settings"]),

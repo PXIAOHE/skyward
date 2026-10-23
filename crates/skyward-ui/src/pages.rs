@@ -76,6 +76,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Permissions => permissions(cx),
         Screen::Editor => editor(cx),
         Screen::Terminal => terminal(cx),
+        Screen::Relabel => relabel(cx),
         Screen::Language => language(cx),
         Screen::TimeZone => time_zone(cx),
         Screen::Logs => logs(cx),
@@ -108,6 +109,7 @@ pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
         Confirm::InstallWipe => ("滑动以安装并清除", true),
         Confirm::RunScript => ("滑动以安装", true),
         Confirm::Merge => ("滑动以合并", true),
+        Confirm::Relabel => ("滑动以修复", true),
     }
 }
 
@@ -1470,16 +1472,76 @@ pub fn advanced(cx: &Ctx) -> Frame {
     let tools = widgets::list(&mut c, t, f, top, &[
         Row::new("文件管理").icon(BLUE, Icon::Folder),
         Row::new("终端").icon(SLATE, Icon::Terminal),
+        Row::new("修复 SELinux 上下文").icon(PURPLE, Icon::Shield),
         Row::new("导出日志").icon(ORANGE, Icon::Log),
         Row::new("系统更新").icon(GREEN, Icon::Layers).trail(Trail::Value(fmt::update_value(&cx.state.update))),
     ]);
     let out = hits(&tools.rows, &[
         Action::Open(Screen::Files),
         Action::Open(Screen::Terminal),
+        Action::Open(Screen::Relabel),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Update),
     ]);
     Frame::new(t, c, out, "高级", top)
+}
+
+/// Giving the data partition's files the SELinux labels the installed
+/// system's rules give them: what it does, and a swipe to start it; then
+/// how far it has come, a way to stop it, and how it ended.
+pub fn relabel(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let title = "修复 SELinux 上下文";
+    let Some(job) = &s.relabel else {
+        let mut y = widgets::paragraph(&mut c, t, f, top, "按已安装系统的规则，重新设置 data 分区中文件的 SELinux 上下文，应用数据保持不变。");
+        let note = match s.data {
+            Data::Open | Data::Locked { .. } => None,
+            Data::Erased => Some("data 分区已清除。"),
+            Data::Closed | Data::Opening | Data::Failed(_) => Some("暂无法修复，需先在「解密」中打开 data 分区。"),
+        };
+        if let Some(note) = note {
+            y = widgets::footnote(&mut c, t, f, y, note);
+        }
+        let (label, danger) = confirm_label(Confirm::Relabel);
+        let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+        out.push(Hit { rect: track, action: Action::Confirm(Confirm::Relabel) });
+        return Frame::new(t, c, out, title, top);
+    };
+    let heading = match &job.outcome {
+        None => "正在修复",
+        Some(JobEnd::Done) => "修复完成",
+        Some(JobEnd::Stopped) => "已停止",
+        Some(JobEnd::Failed(_)) => "修复失败",
+    };
+    let detail = match job.total {
+        0 if job.outcome.is_none() => "正在准备".to_string(),
+        total => format!("已检查 {} 项，共 {total} 项", job.checked),
+    };
+    let y = widgets::progress_card(&mut c, t, f, top, heading, &detail, Some(share(job.checked, job.total)));
+    match &job.outcome {
+        None => {
+            let label = if job.stopping { "正在停止" } else { "停止" };
+            let stop = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(label).trail(Trail::None)]);
+            if !job.stopping {
+                out.extend(hits(&stop.rows, &[Action::StopRelabel]));
+            }
+        }
+        Some(end) => {
+            let note = match end {
+                JobEnd::Done if job.changed == 0 => "全部文件的 SELinux 上下文都正确，无需修复。".to_string(),
+                JobEnd::Done => format!("已按规则重新设置 {} 项的 SELinux 上下文。", job.changed),
+                JobEnd::Stopped => format!("已停止，已重新设置 {} 项。", job.changed),
+                JobEnd::Failed(why) => format!("修复失败：{why}"),
+            };
+            let y = widgets::footnote(&mut c, t, f, y, &note);
+            let finish = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new("完成").trail(Trail::None)]);
+            out.extend(hits(&finish.rows, &[Action::Back]));
+        }
+    }
+    Frame { back: job.outcome.is_some(), ..Frame::new(t, c, out, title, top) }
 }
 
 /// Where an update the system installed stands, and merging it into the

@@ -37,6 +37,8 @@ pub enum Icon {
     File,
     /// A page of text lines.
     Log,
+    /// A shield with a tick: security labels set right.
+    Shield,
 }
 
 /// White solid glyph centred on `(cx, cy)` inside a tile of size `tile`.
@@ -195,6 +197,16 @@ pub fn glyph(c: &mut Canvas, icon: Icon, cx: f32, cy: f32, tile: f32, fg: Rgba, 
                 let y = cy - 0.18 * g + k as f32 * 0.18 * g;
                 c.line(cx - 0.18 * g, y, cx - 0.18 * g + len * g, y, 0.07 * g, bg);
             }
+        }
+        Icon::Shield => {
+            let at = |x: f32, y: f32| (cx + x * g, cy + y * g);
+            c.fill_convex(
+                &[at(0.0, -0.44), at(0.36, -0.3), at(0.35, 0.02), at(0.24, 0.26), at(0.0, 0.44), at(-0.24, 0.26), at(-0.35, 0.02), at(-0.36, -0.3)],
+                fg,
+            );
+            let (a, b, d) = (at(-0.15, 0.0), at(-0.04, 0.12), at(0.17, -0.12));
+            c.line(a.0, a.1, b.0, b.1, sw, bg);
+            c.line(b.0, b.1, d.0, d.1, sw, bg);
         }
     }
 }
@@ -2047,6 +2059,20 @@ mod tests {
             }
         }
         b
+    }
+
+    #[test]
+    fn the_shield_stands_in_the_middle_of_its_tile() {
+        let (black, white) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255));
+        let mut c = Canvas::new(400, 400);
+        c.clear(black);
+        glyph(&mut c, Icon::Shield, 200.0, 200.0, 400.0, white, black);
+        let (l, top, right, bottom) = ink_box(&c, Rect::new(0.0, 0.0, 400.0, 400.0), |p| p[0] > 0);
+        let (x, y) = ((l + right) / 2.0, (top + bottom) / 2.0);
+        // Within 0.3 of the 40 units the tile is laid out in.
+        assert!((x - 200.0).abs() <= 3.0 && (y - 200.0).abs() <= 3.0, "centred: ({x}, {y})");
+        let tick = (200 * c.w + 215) * 4;
+        assert_eq!(c.data[tick as usize], 0, "the tick is cut out of it");
     }
 
     #[test]

@@ -295,7 +295,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 103] = [
+    let pages: [PageShot; 107] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -472,6 +472,17 @@ fn main() -> Result<()> {
             let path = "/vendor/etc/init/hw/init.target.performance.rc";
             app.text_opened(&fonts, path.into(), Ok(Some(EDITOR_SAMPLE.into())), 0);
             app.state.layer = Layer::Symbols;
+        }),
+        ("127-relabel-light", Screen::Relabel, false, &|_| {}),
+        ("128-relabel-dark-closed", Screen::Relabel, true, &|app| app.state.data = Data::Closed),
+        ("129-relabel-light-running", Screen::Relabel, false, &|app| {
+            app.relabel_started();
+            app.relabel_progress(48_213, 131_908, 6);
+        }),
+        ("130-relabel-dark-done", Screen::Relabel, true, &|app| {
+            app.relabel_started();
+            app.relabel_progress(131_908, 131_908, 37);
+            app.relabel_ended(JobEnd::Done, 0);
         }),
         ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
             let (rows, cols) = app.term_size(&fonts);

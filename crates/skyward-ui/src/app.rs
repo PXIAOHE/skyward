@@ -59,6 +59,10 @@ pub enum Screen {
     /// A text file, changed on the screen's keyboard and then saved.
     Editor,
     Terminal,
+    /// Giving the data partition's files the SELinux labels the installed
+    /// system's rules give them: what it does and a swipe to start, then
+    /// how far it has come and how it ended.
+    Relabel,
     Language,
     TimeZone,
     /// Saving the logs, as a bug report asks for them.
@@ -188,6 +192,20 @@ pub struct FileJob {
     /// Bytes and entries, each as done and out of how many; none while the
     /// work still measures what it covers.
     pub progress: Option<((u64, u64), (u64, u64))>,
+    pub outcome: Option<JobEnd>,
+    /// Stopping was asked for and is under way.
+    pub stopping: bool,
+}
+
+/// Giving the data partition's files their SELinux labels, as its page
+/// shows it: how far it has come and how it ended.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RelabelJob {
+    /// Entries looked at and how many there are, 0 while they are still
+    /// counted, and how many took a new label.
+    pub checked: u64,
+    pub total: u64,
+    pub changed: u64,
     pub outcome: Option<JobEnd>,
     /// Stopping was asked for and is under way.
     pub stopping: bool,
@@ -500,6 +518,9 @@ pub enum Confirm {
     RunScript,
     /// Merge the update that waits in the slot the phone runs from.
     Merge,
+    /// Give the data partition's files the SELinux labels the installed
+    /// system's rules give them.
+    Relabel,
 }
 
 /// What the wipe page erases: everything a factory reset erases, or any of
@@ -837,6 +858,8 @@ pub enum Action {
     AskDelete,
     /// How to go on when a name is taken where an entry goes.
     Resolve(ClashChoice),
+    /// Stop giving the data partition's files their labels.
+    StopRelabel,
     /// Stop copying, moving or deleting.
     StopJob,
     /// A control whose work is not wired up yet; touching it says so.
@@ -1108,6 +1131,9 @@ pub struct State {
     pub clash: Option<(Clip, String, Vec<String>)>,
     /// Work on files under way, or how it last ended.
     pub job: Option<FileJob>,
+    /// Giving the data partition's files their SELinux labels under way, or
+    /// how it last ended.
+    pub relabel: Option<RelabelJob>,
     /// Where an update the system installed stands, as the runtime last
     /// read it.
     pub update: Standing,
@@ -1169,6 +1195,7 @@ impl Default for State {
             asking_delete: false,
             clash: None,
             job: None,
+            relabel: None,
             update: Standing::None,
         }
     }
@@ -1312,6 +1339,13 @@ pub enum Effect {
     Delete(String),
     /// Stop the work on files under way.
     StopJob,
+    /// Give the data partition's files the SELinux labels the installed
+    /// system's rules give them, telling how it goes with
+    /// [`App::relabel_started`], [`App::relabel_progress`] and
+    /// [`App::relabel_ended`].
+    Relabel,
+    /// Stop giving the data partition's files their labels.
+    StopRelabel,
     /// Save the logs chosen, the recovery's own and the kernel's, into a
     /// folder of their own in internal storage or the temporary folder,
     /// saying where with [`App::report`].
@@ -2474,6 +2508,33 @@ impl App {
         }
     }
 
+    /// Giving the data partition's files their labels has started: its page
+    /// follows how far it comes.
+    pub fn relabel_started(&mut self) {
+        self.state.relabel = Some(RelabelJob::default());
+        self.refresh();
+    }
+
+    /// How far giving the data partition's files their labels has come:
+    /// entries looked at, of how many, and how many took a new label.
+    pub fn relabel_progress(&mut self, checked: u64, total: u64, changed: u64) {
+        let job = self.state.relabel.as_mut().expect("only work under way moves on");
+        (job.checked, job.total, job.changed) = (checked, total, changed);
+        if self.screen() == Screen::Relabel {
+            self.refresh();
+        }
+    }
+
+    /// Giving the data partition's files their labels has ended: its page
+    /// says how, lit for the user to read.
+    pub fn relabel_ended(&mut self, end: JobEnd, now: u64) {
+        let job = self.state.relabel.as_mut().expect("only work under way ends");
+        job.stopping = false;
+        job.outcome = Some(end);
+        self.wake(now);
+        self.refresh();
+    }
+
     /// How renaming the entry the file page shows went: done, the folder
     /// comes back with the entry under its new name; refused, why.
     pub fn renamed(&mut self, outcome: Result<(), RenameRefused>, now: u64) {
@@ -3502,6 +3563,13 @@ impl App {
                 }
                 self.state.job = None;
             }
+            Screen::Relabel => {
+                if self.state.relabel.as_ref().is_some_and(|j| j.outcome.is_none()) {
+                    self.say("请等待完成或停止后再返回", now);
+                    return fx;
+                }
+                self.state.relabel = None;
+            }
             Screen::RestoreBackup => {
                 self.state.restore = None;
                 self.state.asking_delete = false;
@@ -3853,6 +3921,14 @@ impl App {
                     job.stopping = true;
                     self.refresh();
                     return vec![Effect::StopJob];
+                }
+            }
+            Action::StopRelabel => {
+                let job = self.state.relabel.as_mut().expect("only work under way is stopped");
+                if job.outcome.is_none() && !job.stopping {
+                    job.stopping = true;
+                    self.refresh();
+                    return vec![Effect::StopRelabel];
                 }
             }
             Action::ScreenOff(k) => {
@@ -4684,6 +4760,14 @@ impl App {
                 }
             }
             Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
+            // The partition has to be open; whether its users have unlocked
+            // their own files makes no difference.
+            Confirm::Relabel => match self.state.data {
+                Data::Open | Data::Locked { .. } => fx.push(Effect::Relabel),
+                Data::Opening => self.say("正在打开 data 分区，请稍后再试", now),
+                Data::Erased => self.say("data 分区已清除", now),
+                Data::Closed | Data::Failed(_) => self.say("请先在「解密」中打开 data 分区", now),
+            },
             Confirm::Flash => {
                 if let Install::Choosing(choice) = &self.state.install {
                     let partition = choice.partitions[choice.partition];
@@ -7946,6 +8030,39 @@ mod tests {
         let saved = FileRow { size: 9, modified: LISTED, ..entry("a.zip", FileKind::File) };
         app.set_files("/sdcard".into(), Ok(vec![entry("DCIM", folder(2)), saved.clone()]), LISTED);
         assert_eq!(app.state.file, Some(saved));
+    }
+
+    #[test]
+    fn relabeling_starts_once_the_data_partition_is_open_and_its_page_follows_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Relabel));
+        assert_eq!(app.screen(), Screen::Relabel);
+        assert!(swipe(&mut app, &f, &i, Confirm::Relabel).is_empty());
+        assert_eq!(toast(&app), Some("请先在「解密」中打开 data 分区"));
+        app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
+        app.refresh();
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Relabel), vec![Effect::Relabel], "open, though a user has yet to unlock");
+        app.state.data = Data::Open;
+        app.refresh();
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Relabel), vec![Effect::Relabel]);
+        app.relabel_started();
+        assert!(!app.frame(&f, &i).back, "no going back while it works");
+        app.key(Key::Back, 0);
+        assert_eq!(app.screen(), Screen::Relabel);
+        assert_eq!(toast(&app), Some("请等待完成或停止后再返回"));
+        app.relabel_progress(0, 0, 0);
+        app.relabel_progress(10, 400, 2);
+        assert_eq!(tap(&mut app, &f, &i, Action::StopRelabel), vec![Effect::StopRelabel]);
+        assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::StopRelabel), "stopping, it is not asked again");
+        app.relabel_progress(12, 400, 3);
+        app.relabel_ended(JobEnd::Stopped, 0);
+        let job = app.state.relabel.clone().expect("the page shows how it ended");
+        assert_eq!((job.checked, job.total, job.changed, job.outcome), (12, 400, 3, Some(JobEnd::Stopped)));
+        assert!(app.frame(&f, &i).back);
+        tap_at(&mut app, &f, &i, Action::Back, 2000);
+        assert_eq!(app.screen(), Screen::Advanced);
+        assert_eq!(app.state.relabel, None);
     }
 
     #[test]

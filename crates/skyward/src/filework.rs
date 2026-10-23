@@ -1,8 +1,9 @@
-//! Copying, moving and deleting on a thread of its own, telling the screen
-//! how far it has come.
+//! Copying, moving, deleting and relabeling on a thread of its own, telling
+//! the screen how far it has come.
 
+use crate::relabel;
 use anyhow::{Context, Result};
-use skyward_files::{Cancelled, Clash, Ownership, Progress};
+use skyward_files::{Cancelled, Clash, Ownership, Progress, Relabeling};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,8 +19,12 @@ pub enum Task {
     Copy { from: PathBuf, into: PathBuf, clash: Clash, ownership: Ownership },
     Move { from: PathBuf, into: PathBuf, clash: Clash, ownership: Ownership },
     Delete { path: PathBuf },
+    /// Give the data partition's files the labels the rules in `rules`
+    /// give them.
+    Relabel { rules: Vec<PathBuf> },
 }
 
+#[derive(Clone)]
 pub enum End {
     Done,
     /// Stopped as asked.
@@ -27,8 +32,10 @@ pub enum End {
     Failed(String),
 }
 
+#[derive(Clone)]
 pub enum Event {
     Progress(Progress),
+    Relabeling(Relabeling),
     Ended(End),
 }
 
@@ -61,13 +68,14 @@ impl Worker {
                 };
                 let mut told = Instant::now() - PROGRESS_EVERY;
                 let mut last = None;
-                let mut progress = |p: Progress| {
-                    last = Some(p);
+                let mut report = |event: Event| {
                     if told.elapsed() >= PROGRESS_EVERY {
                         told = Instant::now();
-                        tell(Event::Progress(p));
+                        tell(event.clone());
                     }
+                    last = Some(event);
                 };
+                let mut progress = |p: Progress| report(Event::Progress(p));
                 let ended = match task {
                     Task::Copy { from, into, clash, ownership } => {
                         skyward_files::copy(&[from], &into, clash, ownership, &stop, &mut progress)
@@ -76,10 +84,11 @@ impl Worker {
                         skyward_files::move_into(&[from], &into, clash, ownership, &stop, &mut progress)
                     }
                     Task::Delete { path } => skyward_files::delete(&[path], &stop, &mut progress),
+                    Task::Relabel { rules } => relabel::run(&rules, &stop, &mut |r| report(Event::Relabeling(r))),
                 };
                 // Work that stops or fails shows how far it came in the end.
-                if let Some(p) = last {
-                    tell(Event::Progress(p));
+                if let Some(event) = last {
+                    tell(event);
                 }
                 tell(Event::Ended(match ended {
                     Ok(()) => End::Done,
