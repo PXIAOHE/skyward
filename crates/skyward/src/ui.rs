@@ -11,7 +11,7 @@ use crate::wipe::{self, Eraser, Step};
 use anyhow::{anyhow, ensure, Context, Result};
 use skyward_config::{DeviceConfig, Service};
 use skyward_crypto::data::{Closed, Opened};
-use skyward_install::{Detach, Installer};
+use skyward_install::{Detach, Installer, Options};
 use skyward_sys::bcb::{self, Work};
 use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
@@ -730,11 +730,12 @@ fn detach(services: Vec<Service>) -> Detach {
     })
 }
 
-/// Whether an install puts Skyward back into the recovery partitions it
-/// writes over: as the install page's switch is set, on a phone that has
-/// them.
-fn keep_recovery(app: &App) -> bool {
-    app.state.keep_recovery && app.state.recovery_partitions
+/// What an install does besides installing, as the install page's switches
+/// are set: puts Skyward back into the recovery partitions it writes over,
+/// on a phone that has them, and checks a zip's signature before its
+/// install script runs.
+fn install_options(app: &App) -> Options {
+    Options { keep: app.state.keep_recovery && app.state.recovery_partitions, signed: app.state.check_signature }
 }
 
 /// Wait until a device, the installer or the recovery socket has something,
@@ -871,7 +872,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         Work::Sideload { .. } => {
             app.start_sideload();
-            installer = Some(Installer::start(detach(cfg.services.clone()), keep_recovery(&app))?);
+            installer = Some(Installer::start(detach(cfg.services.clone()), install_options(&app))?);
             sideloading = true;
         }
         Work::Menu | Work::Exit | Work::Fastboot | Work::PromptWipeData | Work::Unsupported(_) => {}
@@ -1333,7 +1334,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         if !withhold(&mut transfer, &mut app, now)? {
                             continue;
                         }
-                        installer = Some(Installer::start(detach(cfg.services.clone()), keep_recovery(&app))?);
+                        installer = Some(Installer::start(detach(cfg.services.clone()), install_options(&app))?);
                         sideloading = true;
                     }
                     Effect::InstallFile(place, path) => {
@@ -1341,7 +1342,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         if !withhold(&mut transfer, &mut app, now)? {
                             continue;
                         }
-                        installer = Some(Installer::open(in_place(place, &path), detach(cfg.services.clone()), keep_recovery(&app))?);
+                        installer = Some(Installer::open(in_place(place, &path), detach(cfg.services.clone()), install_options(&app))?);
                     }
                     Effect::Flash { partition, pick } => {
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;

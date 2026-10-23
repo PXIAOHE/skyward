@@ -561,6 +561,8 @@ pub fn refusal(r: &Refusal, codename: &str, source: Source, zone: usize) -> Stri
         Refusal::Battery { level, charging: false } => format!("电量仅剩 {level}%，请充电至 20% 以上后重试。"),
         Refusal::Pending(state) => format!("{}。请重启到系统，完成上一次更新后重试。", snapshot(state)),
         Refusal::OldHost => "电脑上的 adb 版本过低，请更新 Android SDK Platform-Tools 后重试。".into(),
+        Refusal::Unsigned => "该刷机包未签名，请关闭「验证刷机包签名」后重试。".into(),
+        Refusal::Unverified => "该刷机包未通过签名验证，请关闭「验证刷机包签名」后重试。".into(),
     }
 }
 
@@ -816,6 +818,8 @@ mod tests {
         assert_eq!(failure(&Failure::Engine(26), pc), ("更新包签名验证失败，请发送官方更新包。".into(), Some("错误代码：26".into())));
         assert_eq!(failure(&Failure::Error("open ep0: busy".into()), pc).1.as_deref(), Some("open ep0: busy"));
         assert_eq!(failure(&Failure::Script(1), pc), ("安装脚本运行失败，退出码为 1。".into(), None));
+        assert_eq!(refusal(&Refusal::Unsigned, "ishtar", pc, 0), "该刷机包未签名，请关闭「验证刷机包签名」后重试。");
+        assert_eq!(refusal(&Refusal::Unverified, "ishtar", pc, 0), "该刷机包未通过签名验证，请关闭「验证刷机包签名」后重试。");
     }
 
     #[test]

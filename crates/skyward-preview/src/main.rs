@@ -111,9 +111,14 @@ fn main() -> Result<()> {
 
     // The sideload page through an install, as the installer tells it.
     let recovery = ImageKind::Boot { kernel: false, ramdisk: Ramdisk::Recovery };
-    let installing: [(&str, bool, Install); 13] = [
+    let installing: [(&str, bool, Install); 14] = [
         ("30-sideload-waiting", false, Install::Waiting),
-        ("31-sideload-checking", false, Install::Checking { size: 7_103_043_868 }),
+        ("31-sideload-checking", false, Install::Checking { size: 7_103_043_868, stage: None }),
+        (
+            "31-sideload-verifying-dark",
+            true,
+            Install::Checking { size: 25_166_592, stage: Some(Stage::Signature { done: 10_485_760, total: 25_164_934 }) },
+        ),
         (
             "32-sideload-choosing",
             false,
@@ -280,7 +285,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 96] = [
+    let pages: [PageShot; 100] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -300,7 +305,7 @@ fn main() -> Result<()> {
         }),
         ("20-install-usb-checking", Screen::Installing, false, &|app| {
             app.state.source = Source::File(Place::UsbDrive);
-            app.state.install = Install::Checking { size: 7_103_043_868 };
+            app.state.install = Install::Checking { size: 7_103_043_868, stage: None };
         }),
         ("19-choose-storage-light", Screen::Choose(Place::Storage), false, &|app| {
             app.set_place(Place::Storage, "Download".into(), Ok(sample_download()), LISTED)
@@ -309,7 +314,7 @@ fn main() -> Result<()> {
             app.set_place(Place::Storage, "Download/Skyward".into(), Ok(vec![file("notes.txt", 2_048, LISTED - 600)]), LISTED)
         }),
         ("20-install-storage-checking", Screen::Installing, false, &|app| {
-            from_storage(app, Install::Checking { size: 7_014_220_000 })
+            from_storage(app, Install::Checking { size: 7_014_220_000, stage: None })
         }),
         ("20-install-storage-writing-dark", Screen::Installing, true, &|app| {
             let stage = Some(Stage::Writing { done: 2_934_000_000, total: 7_014_220_000 });
@@ -348,6 +353,23 @@ fn main() -> Result<()> {
             script(app, Install::Finished { outcome: Outcome::Failed(Failure::Script(1)), damage: Some(Damage::Script) }, true);
             let why = "write /dev/block/by-name/recovery_a: Input/output error (os error 5)";
             app.state.reflash = Some(Reflash::Failed(why.into()));
+        }),
+        ("20-install-script-verifying", Screen::Installing, false, &|app| {
+            let stage = Some(Stage::Signature { done: 10_485_760, total: 25_164_934 });
+            script(app, Install::Checking { size: 25_166_592, stage }, false);
+            app.state.script_output.clear();
+        }),
+        ("20-install-script-unsigned-dark", Screen::Installing, true, &|app| {
+            script(app, Install::Finished { outcome: Outcome::Refused(Refusal::Unsigned), damage: None }, false);
+            app.state.script_output.clear();
+        }),
+        ("20-install-script-unverified", Screen::Installing, false, &|app| {
+            script(app, Install::Finished { outcome: Outcome::Refused(Refusal::Unverified), damage: None }, false);
+            app.state.script_output.clear();
+        }),
+        ("11-install-dark-signature", Screen::Install, true, &|app| {
+            app.state.recovery_partitions = true;
+            app.state.check_signature = true;
         }),
         ("20-install-storage-installed-reflashed", Screen::Installing, false, &|app| {
             from_storage(app, Install::Finished { outcome: Outcome::Installed { slot: Slot::A, wipe: false }, damage: None });

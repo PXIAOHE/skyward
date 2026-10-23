@@ -11,7 +11,8 @@ use crate::keep::Kept;
 use crate::ota::{self, Log, Status};
 use crate::package::{self, Build, Package, Phone, Update};
 use crate::script::{self, Bar, Request};
-use crate::{Command, Event, Failure, Outcome, Reflash, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
+use crate::signature::{self, Verdict};
+use crate::{Command, Event, Failure, Options, Outcome, Reflash, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
 use skyward_info::Charge;
 use skyward_sys::{kmsg, prop};
@@ -72,22 +73,21 @@ pub struct Installer {
 impl Installer {
     /// Take USB over and wait for `adb sideload`, from a thread of its own.
     /// `detach` runs before an update package or an install script writes;
-    /// with `keep`, this recovery goes back into the recovery partitions
-    /// they write over.
-    pub fn start(detach: Detach, keep: bool) -> Result<Installer> {
-        Installer::spawn(Origin::Computer, detach, keep, run)
+    /// `options` say what else the install does.
+    pub fn start(detach: Detach, options: Options) -> Result<Installer> {
+        Installer::spawn(Origin::Computer, detach, options, run)
     }
 
     /// Install the file at `path`, from a thread of its own; `detach` and
-    /// `keep` as for [`Installer::start`].
-    pub fn open(path: PathBuf, detach: Detach, keep: bool) -> Result<Installer> {
-        Installer::spawn(Origin::File, detach, keep, move |ctx| run_file(ctx, &path))
+    /// `options` as for [`Installer::start`].
+    pub fn open(path: PathBuf, detach: Detach, options: Options) -> Result<Installer> {
+        Installer::spawn(Origin::File, detach, options, move |ctx| run_file(ctx, &path))
     }
 
     fn spawn(
         origin: Origin,
         detach: Detach,
-        keep: bool,
+        options: Options,
         work: impl FnOnce(&mut Context) -> Outcome + Send + 'static,
     ) -> Result<Installer> {
         let (wake, signal) = pipe(libc::O_NONBLOCK)?;
@@ -95,7 +95,7 @@ impl Installer {
         let (commands, command_rx) = mpsc::channel();
         let shared = Arc::new(Shared::default());
         let mut ctx =
-            Context { events: event_tx, signal, commands: command_rx, shared: shared.clone(), detach: Some(detach), keep, origin };
+            Context { events: event_tx, signal, commands: command_rx, shared: shared.clone(), detach: Some(detach), options, origin };
         let thread = thread::Builder::new()
             .name("installer".into())
             .spawn(move || {
@@ -168,9 +168,7 @@ struct Context {
     commands: Receiver<Command>,
     shared: Arc<Shared>,
     detach: Option<Detach>,
-    /// This recovery goes back into the recovery partitions an install
-    /// writes over.
-    keep: bool,
+    options: Options,
     origin: Origin,
 }
 
@@ -314,7 +312,7 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
     match package {
         Package::Update(update) => update_system(ctx, mount, &update),
         Package::Image(kind) => flash_image(ctx, kind, size),
-        Package::Script => run_script(ctx),
+        Package::Script => run_script(ctx, size),
         Package::Unknown => Ok(Done::Decided(Outcome::Refused(Refusal::Unknown))),
     }
 }
@@ -387,7 +385,7 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
 /// keep it in the recovery partitions; none when it was started without
 /// being flashed.
 fn hold(ctx: &Context, current: Slot) -> Result<Option<Kept>> {
-    if !ctx.keep {
+    if !ctx.options.keep {
         return Ok(None);
     }
     let kept = Kept::hold(Path::new(skyward_block::BY_NAME), current).context("hold this recovery from its partition")?;
@@ -583,13 +581,23 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
     Ok(Done::Decided(Outcome::Flashed { partition, slots }))
 }
 
-/// Run the install script of the zip being served once the user agrees,
-/// as Android's recovery runs one, among what the recoveries such scripts
-/// are written for give them: their shell at /sbin, and the slot's
-/// partitions mapped writable and unmounted.
-fn run_script(ctx: &mut Context) -> Result<Done> {
+/// Run the install script of the zip being served, `size` bytes, once the
+/// user agrees, as Android's recovery runs one, among what the recoveries
+/// such scripts are written for give them: their shell at /sbin, and the
+/// slot's partitions mapped writable and unmounted. Where the screen asked
+/// for it, the zip is first checked to be signed with one of the phone's
+/// update keys.
+fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
     if let Some(refusal) = battery()? {
         return Ok(Done::Decided(Outcome::Refused(refusal)));
+    }
+    if ctx.options.signed {
+        match verify_signature(ctx, size)? {
+            Verdict::Signed => {}
+            Verdict::Unsigned => return Ok(Done::Decided(Outcome::Refused(Refusal::Unsigned))),
+            Verdict::Unverified => return Ok(Done::Decided(Outcome::Refused(Refusal::Unverified))),
+            Verdict::Stopped => return Ok(Done::Decided(Outcome::Cancelled)),
+        }
     }
     // The screen may have left the page before it heard the package came.
     if ctx.shared.cancelled() {
@@ -629,6 +637,25 @@ fn run_script(ctx: &mut Context) -> Result<Done> {
     }
     let (code, wipe_cache) = ran?;
     Ok(Done::Script { code, wipe_cache })
+}
+
+/// Check the zip being served, `size` bytes, was signed with one of the
+/// phone's update keys, telling the screen how much of it the check has
+/// read; the screen leaving the page stops it.
+fn verify_signature(ctx: &Context, size: u64) -> Result<Verdict> {
+    let certificates = File::open(signature::CERTIFICATES).with_context(|| format!("open {}", signature::CERTIFICATES))?;
+    let keys = signature::keys(BufReader::new(certificates)).with_context(|| format!("read {}", signature::CERTIFICATES))?;
+    let package = File::open(fuse::PACKAGE).context("open the package")?;
+    let mut told: Option<Instant> = None;
+    let verdict = signature::verify(package, size, &keys, |done, total| {
+        if done == total || told.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
+            ctx.send(Event::Progress(Stage::Signature { done, total }));
+            told = Some(Instant::now());
+        }
+        !ctx.shared.cancelled()
+    })?;
+    let _ = kmsg(&format!("install: the zip's signature: {verdict:?}"));
+    Ok(verdict)
 }
 
 /// Put the zip's install script where it runs from, for anyone to run.

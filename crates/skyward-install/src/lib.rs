@@ -30,6 +30,17 @@ pub const ENGINE_LOG: &str = "/tmp/update_engine.log";
 /// and asked for, with what it and the programs it ran wrote.
 pub const SCRIPT_LOG: &str = "/tmp/install-script.log";
 
+/// What the screen asks of an install besides the package.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Options {
+    /// This recovery goes back into the recovery partitions an install
+    /// writes over.
+    pub keep: bool,
+    /// A zip with an install script runs only if it was signed with one of
+    /// the keys the phone's updates are signed with.
+    pub signed: bool,
+}
+
 /// What the installer tells the screen, in the order it happens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -93,6 +104,9 @@ pub enum Stage {
     Flashing { done: u64, total: u64 },
     /// The install script runs, as far as it says it is, in thousandths.
     Script { thousandths: u16 },
+    /// The zip's signature is checked: bytes read so far of what it is a
+    /// signature of, and of all of that.
+    Signature { done: u64, total: u64 },
     /// This recovery is written back into the recovery partitions the
     /// install wrote over, and read back: bytes so far, of all.
     Reflashing { done: u64, total: u64 },
@@ -144,6 +158,13 @@ pub enum Refusal {
     Pending(SnapshotState),
     /// The computer's adb is too old to send a package a block at a time.
     OldHost,
+    /// A zip with an install script that has no signature of the whole of
+    /// it, where the screen asked for one.
+    Unsigned,
+    /// A zip with an install script whose signature was made with none of
+    /// the phone's update keys, or not of the zip as it is, where the
+    /// screen asked for one made with them.
+    Unverified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -663,16 +663,20 @@ pub fn install(cx: &Ctx) -> Frame {
     let methods = widgets::list(&mut c, t, f, y, &rows);
     let from_usb = Action::Open(Screen::Choose(Place::UsbDrive));
     let mut out = hits(&methods.rows[methods.rows.len() - 3..], &[from_storage, from_usb, Action::Sideload]);
-    let mut y = widgets::footnote(
+    let y = widgets::footnote(
         &mut c,
         t,
         f,
         methods.bottom,
         "支持安装 A/B 完整更新包和带安装脚本的刷机包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动。选择文件时仅列出文件夹以及 .zip、.img 文件。",
     );
+    let y = widgets::section(&mut c, t, f, y, "选项");
+    let signature = widgets::list(&mut c, t, f, y, &[Row::new("验证刷机包签名").trail(Trail::Switch(cx.state.check_signature))]);
+    out.extend(hits(&signature.rows, &[Action::Toggle(Switch::Signature)]));
+    let mut y = widgets::footnote(&mut c, t, f, signature.bottom, "开启后，仅安装带有本机官方签名的刷机包。");
     if cx.state.recovery_partitions {
-        y = widgets::section(&mut c, t, f, y, "选项");
-        let options = widgets::list(&mut c, t, f, y, &[Row::new("自动重新刷入 Skyward").trail(Trail::Switch(cx.state.keep_recovery))]);
+        let row = Row::new("自动重新刷入 Skyward").trail(Trail::Switch(cx.state.keep_recovery));
+        let options = widgets::list(&mut c, t, f, y + t.m.card_gap, &[row]);
         out.extend(hits(&options.rows, &[Action::Toggle(Switch::KeepRecovery)]));
         y = widgets::footnote(&mut c, t, f, options.bottom, "开启后，安装系统更新或刷机包时被覆盖的 recovery 分区将重新刷入 Skyward。");
     }
@@ -726,7 +730,7 @@ fn update_stage(stage: Option<&Stage>) -> (String, Option<f32>) {
         }
         Some(Stage::Finishing) => ("第 3 步，共 3 步：完成安装".into(), None),
         Some(Stage::Reflashing { done, total }) => (REFLASHING.into(), Some(*done as f32 / *total as f32)),
-        Some(Stage::Flashing { .. } | Stage::Script { .. }) | None => ("正在准备".into(), None),
+        Some(Stage::Flashing { .. } | Stage::Script { .. } | Stage::Signature { .. }) | None => ("正在准备".into(), None),
     }
 }
 
@@ -807,7 +811,17 @@ pub fn installing(cx: &Ctx) -> Frame {
             )]);
             widgets::footnote(&mut c, t, f, y, "需在电脑上安装 Android SDK Platform-Tools。返回后将停止等待，并将 USB 切换回 adb 调试。")
         }
-        Install::Checking { size } => {
+        Install::Checking { stage: Some(Stage::Signature { done, total }), .. } => {
+            let read = share(*done, *total);
+            let y = widgets::progress_card(&mut c, t, f, top, "正在验证签名", &format!("已读取 {}%", percent(read)), Some(read));
+            let note = match s.source {
+                Source::Computer => "读取完成前，请不要断开数据线。返回将取消安装，并结束电脑上的 adb sideload。",
+                Source::File(Place::Storage) => "返回将取消安装。",
+                Source::File(Place::UsbDrive) => "读取完成前，请不要拔出 U 盘。返回将取消安装。",
+            };
+            widgets::footnote(&mut c, t, f, y, note)
+        }
+        Install::Checking { size, .. } => {
             let detail = format!("文件大小 {}", fmt::bytes(*size));
             let y = widgets::list(&mut c, t, f, top, &[standing("正在读取文件", GREEN, Icon::Install, &detail)]).bottom;
             match s.source {

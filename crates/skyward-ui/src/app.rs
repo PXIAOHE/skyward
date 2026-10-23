@@ -196,6 +196,9 @@ pub enum Switch {
     Compress,
     /// Read a backup back once it is written.
     Verify,
+    /// Run a zip's install script only if the zip was signed with one of
+    /// the phone's update keys.
+    Signature,
     /// Write Skyward back into the recovery partitions an install writes
     /// over.
     KeepRecovery,
@@ -618,7 +621,9 @@ pub enum Install {
     /// USB is being set up for sideload.
     Starting,
     Waiting,
-    Checking { size: u64 },
+    /// The package of `size` bytes is looked at; a zip's signature is
+    /// checked, once the installer tells how far.
+    Checking { size: u64, stage: Option<Stage> },
     /// An image waits to be told where it goes.
     Choosing(Choice),
     /// An update waits for the user to agree: the version it brings, and
@@ -1003,6 +1008,9 @@ pub struct State {
     pub package_name: Option<String>,
     /// What the install script last run showed, its latest lines.
     pub script_output: Vec<String>,
+    /// A zip's install script runs only if the zip was signed with one of
+    /// the phone's update keys.
+    pub check_signature: bool,
     /// The phone keeps its recovery in a partition of each slot, which the
     /// install page then offers to keep Skyward in.
     pub recovery_partitions: bool,
@@ -1101,6 +1109,7 @@ impl Default for State {
             source: Source::Computer,
             package_name: None,
             script_output: Vec::new(),
+            check_signature: false,
             recovery_partitions: false,
             keep_recovery: true,
             reflash: None,
@@ -3353,6 +3362,12 @@ impl App {
         }
         if self.screen() == Screen::Installing {
             match self.state.install {
+                // Checking a signature only reads the package, and stops
+                // when the page is left.
+                Install::Checking { stage: Some(Stage::Signature { .. }), .. } => {
+                    self.state.install = Install::Ending;
+                    fx.push(Effect::Cancel);
+                }
                 Install::Checking { .. } => {
                     self.say("正在读取文件，请稍后再试", now);
                     return fx;
@@ -3409,7 +3424,7 @@ impl App {
         let install = &mut self.state.install;
         match ev {
             Event::Waiting => *install = Install::Waiting,
-            Event::Checking { size } => *install = Install::Checking { size },
+            Event::Checking { size } => *install = Install::Checking { size, stage: None },
             Event::Ready { version, wipe } => *install = Install::Confirming { version, wipe },
             Event::Installing { version } => *install = Install::Updating { version, stage: None, overwriting: false },
             Event::Overwriting => {
@@ -3433,9 +3448,10 @@ impl App {
                 shown.push(line);
             }
             Event::Progress(stage) => match install {
-                Install::Updating { stage: shown, .. } | Install::Flashing { stage: shown, .. } | Install::Scripting { stage: shown, .. } => {
-                    *shown = Some(stage)
-                }
+                Install::Checking { stage: shown, .. }
+                | Install::Updating { stage: shown, .. }
+                | Install::Flashing { stage: shown, .. }
+                | Install::Scripting { stage: shown, .. } => *shown = Some(stage),
                 _ => {}
             },
             Event::Reflashed(reflash) => self.state.reflash = Some(reflash),
@@ -3541,6 +3557,7 @@ impl App {
                     Switch::FileTransfer => &mut self.state.file_transfer,
                     Switch::Compress => &mut self.state.compress,
                     Switch::Verify => &mut self.state.verify,
+                    Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                 };
                 *on = !*on;
@@ -3810,7 +3827,7 @@ impl App {
         match self.state.install {
             Install::Idle | Install::Finished { .. } => {
                 let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
-                self.begin_install(Install::Checking { size }, Source::File(place), name);
+                self.begin_install(Install::Checking { size, stage: None }, Source::File(place), name);
                 self.open(Screen::Installing);
                 vec![Effect::InstallFile(place, path)]
             }
@@ -6684,6 +6701,33 @@ mod tests {
     }
 
     #[test]
+    fn the_install_page_offers_to_check_a_zips_signature_off_until_turned_on() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::Signature)), "on any phone");
+        assert!(!app.state.check_signature);
+        tap(&mut app, &f, &i, Action::Toggle(Switch::Signature));
+        assert!(app.state.check_signature);
+    }
+
+    #[test]
+    fn a_signature_being_checked_shows_how_far_and_leaving_stops_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = sideloading(&f, &i);
+        app.install(Event::Checking { size: 4096 }, 0);
+        app.key(Key::Back, 1000);
+        assert_eq!(app.screen(), Screen::Installing, "a package being looked at keeps the page");
+        let checking = Stage::Signature { done: 1024, total: 4000 };
+        app.install(Event::Progress(checking.clone()), 1000);
+        assert_eq!(app.state.install, Install::Checking { size: 4096, stage: Some(checking) });
+        assert!(app.frame(&f, &i).hits.is_empty(), "nothing on the page to tap while it is checked");
+        assert_eq!(app.key(Key::Back, 2000), vec![Effect::Cancel], "checking only reads, so leaving stops it");
+        assert_eq!((app.screen(), &app.state.install), (Screen::Install, &Install::Ending));
+        app.install(Event::Finished(Outcome::Cancelled), 2000);
+        assert_eq!(app.state.install, Install::Idle);
+    }
+
+    #[test]
     fn how_skyward_went_back_stays_until_the_next_install() {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
@@ -7256,7 +7300,7 @@ mod tests {
         app.set_place(Place::Storage, "Download".into(), Ok(vec![entry("ota.zip", FileKind::File)]), LISTED);
         assert_eq!(tap(&mut app, &f, &i, Action::ChooseEntry(0)), vec![Effect::InstallFile(Place::Storage, "Download/ota.zip".into())]);
         assert_eq!((app.screen(), app.state.source), (Screen::Installing, Source::File(Place::Storage)));
-        assert_eq!(app.state.install, Install::Checking { size: 4096 }, "the file is read at once");
+        assert_eq!(app.state.install, Install::Checking { size: 4096, stage: None }, "the file is read at once");
         app.key(Key::Back, 0);
         assert_eq!(app.screen(), Screen::Installing, "a file being read keeps the page");
         app.install(Event::Finished(Outcome::Refused(Refusal::Unknown)), 0);
