@@ -1304,10 +1304,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::Install => installer.as_ref().context("no installer holds an update")?.install(),
                     // A shell that will not start, or will not take keys,
                     // is the page's to report; the recovery carries on.
-                    Effect::StartShell => {
+                    Effect::StartShell(folder) => {
                         ensure!(shell.is_none(), "a shell runs already");
                         let (rows, cols) = app.term_size(&fonts);
-                        match pty::Shell::start(rows, cols, &cfg.device.codename) {
+                        match pty::Shell::start(rows, cols, &cfg.device.codename, Path::new(&folder)) {
                             Ok(sh) => {
                                 shell = Some(sh);
                                 app.term_started(rows, cols);
@@ -1321,6 +1321,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::TermInput(bytes) => {
                         let sh = shell.as_mut().context("keys went to a shell that has ended")?;
                         if let Err(e) = sh.write(&bytes) {
+                            app.report(&format!("{e:#}"), now);
+                        }
+                    }
+                    Effect::ShellTo(folder) => {
+                        let sh = shell.as_mut().context("a folder went to a shell that has ended")?;
+                        let went = match sh.waiting() {
+                            Ok(true) => sh.change_to(&folder),
+                            Ok(false) => {
+                                app.report("终端正在运行命令，请结束后重试", now);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        };
+                        if let Err(e) = went {
                             app.report(&format!("{e:#}"), now);
                         }
                     }

@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 
 /// The shell a recovery ramdisk carries.
@@ -22,12 +23,12 @@ pub struct Shell {
 }
 
 impl Shell {
-    /// Start the shell on a new pseudo-terminal of `rows` by `cols`. It
-    /// leads a session of its own with the terminal as its controlling one,
-    /// so Ctrl-C reaches whatever runs in the foreground. Its prompt names
-    /// the phone, `codename`, and the folder it is in, as the system's own
-    /// shell does over adb.
-    pub fn start(rows: u16, cols: u16, codename: &str) -> Result<Shell> {
+    /// Start the shell in `folder`, on a new pseudo-terminal of `rows` by
+    /// `cols`. It leads a session of its own with the terminal as its
+    /// controlling one, so Ctrl-C reaches whatever runs in the foreground.
+    /// Its prompt names the phone, `codename`, and the folder it is in, as
+    /// the system's own shell does over adb.
+    pub fn start(rows: u16, cols: u16, codename: &str, folder: &Path) -> Result<Shell> {
         let (mut master, mut slave) = (-1, -1);
         let size = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
         if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &size) } != 0 {
@@ -46,7 +47,7 @@ impl Shell {
         }
         let mut command = Command::new(SHELL);
         command
-            .current_dir("/")
+            .current_dir(folder)
             .env("TERM", "xterm-256color")
             .env("HOME", "/")
             .env("HOSTNAME", codename)
@@ -120,6 +121,28 @@ impl Shell {
     pub fn ended(&mut self) -> Result<Option<ExitStatus>> {
         self.child.try_wait().context("see whether the shell has ended")
     }
+
+    /// Whether the shell waits for a command: it, not a command it started,
+    /// holds the terminal.
+    pub fn waiting(&self) -> Result<bool> {
+        let holder = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
+        if holder < 0 {
+            return Err(io::Error::last_os_error()).context("ask who holds the terminal");
+        }
+        Ok(holder as u32 == self.child.id())
+    }
+
+    /// Have the shell, waiting for a command, go to `folder`: whatever was
+    /// typed on its line is cleared, and the command shows as if typed.
+    pub fn change_to(&mut self, folder: &str) -> Result<()> {
+        self.write(&cd(folder))
+    }
+}
+
+/// What clears a shell's line and takes it to `folder`, the folder's name
+/// quoted for any character it holds.
+fn cd(folder: &str) -> Vec<u8> {
+    format!("\x15cd -- '{}'\r", folder.replace('\'', r"'\''")).into_bytes()
 }
 
 /// How a shell's end reads on the terminal page.

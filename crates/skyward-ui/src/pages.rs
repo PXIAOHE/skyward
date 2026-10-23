@@ -1531,7 +1531,8 @@ pub fn files(cx: &Ctx) -> Frame {
         let (canvas, rects) = widgets::dock_bar(t, f, files::page(t), &["取消", go]);
         Dock { canvas, hits: hits(&rects, &[Action::Unpick, Action::Paste]) }
     });
-    Frame { dock, ..listing(cx, &s.files, "根目录", None, "暂无文件", Action::OpenEntry, "文件管理") }
+    let button = Some((widgets::Glyph::Terminal, Action::TerminalHere));
+    Frame { dock, button, ..listing(cx, &s.files, "根目录", None, "暂无文件", Action::OpenEntry, "文件管理") }
 }
 
 /// A place's folders and the files in them that can be installed, to

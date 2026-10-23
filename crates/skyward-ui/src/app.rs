@@ -800,6 +800,8 @@ pub enum Action {
     CloseSearch,
     /// Open the file manager's entry at this place in the folder.
     OpenEntry(usize),
+    /// Open the terminal in the folder the file manager shows.
+    TerminalHere,
     /// Open the entry at this place in a place's folder: a folder to look
     /// in, or the file to install.
     ChooseEntry(usize),
@@ -865,6 +867,9 @@ pub struct Frame {
     pub dock: Option<Dock>,
     /// A text field's blinking cursor, in page coordinates.
     pub caret: Option<widgets::Caret>,
+    /// The round button at the right end of the bar: what it shows, and
+    /// what touching it does.
+    pub button: Option<(widgets::Glyph, Action)>,
 }
 
 /// A strip held at the bottom of the screen over the page, such as the
@@ -952,6 +957,7 @@ impl Frame {
             scrollback: None,
             dock: None,
             caret: None,
+            button: None,
         }
     }
 
@@ -1256,9 +1262,14 @@ pub enum Effect {
     /// Forget what the system asked of the recovery, so that the next start
     /// goes where its reboot reason says.
     Dismiss,
-    /// Start a shell for the terminal page, on a screen of the size
-    /// [`App::term_size`] gives, telling of it with [`App::term_started`].
-    StartShell,
+    /// Start a shell for the terminal page in this folder, on a screen of
+    /// the size [`App::term_size`] gives, telling of it with
+    /// [`App::term_started`].
+    StartShell(String),
+    /// Have the terminal page's shell go to this folder if it waits for a
+    /// command; one running a command is left to it, and [`App::report`]
+    /// says so.
+    ShellTo(String),
     /// Send these bytes to the shell, as typed.
     TermInput(Vec<u8>),
     /// Copy or move an entry into a folder; with no choice made yet, a name
@@ -1756,6 +1767,12 @@ pub struct App {
     titles: Option<((&'static str, bool), Blurs, Blurs)>,
     /// The `<` chip for the theme (dark or not), and where it goes.
     chip: Option<(bool, Canvas, i32, i32)>,
+    /// The chip behind the round button at the right end of the bar, as
+    /// for `<`.
+    button_chip: Option<(bool, Canvas, i32, i32)>,
+    /// The folder the terminal page's shell last started in, where Enter
+    /// starts it again once it has ended.
+    shell_folder: String,
     /// The About page field's dither, made for the screen once.
     dither: Option<glow::Dither>,
     toast: Option<(String, u64)>,
@@ -1852,6 +1869,8 @@ impl App {
             spare: Vec::new(),
             titles: None,
             chip: None,
+            button_chip: None,
+            shell_folder: "/".into(),
             dither: None,
             toast: None,
             drag: Drag::Idle,
@@ -2861,6 +2880,11 @@ impl App {
             let (art, x, y) = widgets::back_chip(&t);
             self.chip = Some((t.dark, art, x, y));
         }
+        let button = self.frame.as_ref().is_some_and(|fr| fr.button.is_some());
+        if button && self.button_chip.as_ref().is_none_or(|c| c.0 != t.dark) {
+            let (art, x, y) = widgets::button_chip(&t);
+            self.button_chip = Some((t.dark, art, x, y));
+        }
         let slide = self.slid(now);
         if self.frame.as_ref().is_some_and(|fr| fr.hero.is_none()) {
             // What of the page is on screen, drawn if it has not been yet.
@@ -3088,6 +3112,17 @@ impl App {
             } else {
                 widgets::back_arrow(out, t, t.pal.text);
             }
+        }
+        if let Some((glyph, action)) = frame.button {
+            let (_, chip, x, y) = self.button_chip.as_ref().expect("a page's round button is drawn with its chip");
+            out.lay(chip, *x, *y, bar);
+            if pressing == Some(action) {
+                widgets::button_held(out, t, glyph);
+            } else {
+                widgets::button_glyph(out, t, glyph, t.pal.text);
+            }
+        }
+        if frame.back || frame.button.is_some() {
             shine(out, Group::Fixed);
         }
         let level = view.title;
@@ -3495,7 +3530,8 @@ impl App {
             Screen::Terminal => {
                 self.state.layer = Layer::Letters;
                 if self.term.is_none() {
-                    vec![Effect::StartShell]
+                    self.shell_folder = "/".into();
+                    vec![Effect::StartShell(self.shell_folder.clone())]
                 } else {
                     Vec::new()
                 }
@@ -3775,6 +3811,19 @@ impl App {
                     }
                 }
             }
+            // A shell already running goes to the folder; otherwise one starts
+            // there.
+            Action::TerminalHere => {
+                let folder = self.state.files.path.clone();
+                let running = self.term.as_ref().is_some_and(|term| term.running);
+                self.open(Screen::Terminal);
+                self.state.layer = Layer::Letters;
+                if running {
+                    return vec![Effect::ShellTo(folder)];
+                }
+                self.shell_folder = folder.clone();
+                return vec![Effect::StartShell(folder)];
+            }
             Action::ChooseEntry(i) => {
                 let screen = self.screen();
                 let Screen::Choose(place) = screen else { unreachable!("only a place's folder is chosen in") };
@@ -3854,7 +3903,7 @@ impl App {
         self.refresh();
         let Some(term) = self.term.as_mut() else { return Vec::new() };
         if !term.running {
-            return if cap == Cap::Enter { vec![Effect::StartShell] } else { Vec::new() };
+            return if cap == Cap::Enter { vec![Effect::StartShell(self.shell_folder.clone())] } else { Vec::new() };
         }
         let bytes = term.typed(cap, shifted);
         if bytes.is_empty() {
@@ -4023,8 +4072,11 @@ impl App {
                 let on_strip = strip.filter(|&(p, top)| y >= top && y < top + p.canvas.h as f32);
                 let dock = self.frame.as_ref().and_then(|fr| fr.dock.as_ref()).map(|d| (d, self.h as f32 - d.canvas.h as f32));
                 let on_dock = dock.filter(|&(_, top)| y >= top);
+                let button = self.frame.as_ref().and_then(|fr| fr.button).map(|(_, a)| (a, widgets::button_rect(&t)));
                 let hit = if self.frame.as_ref().is_some_and(|fr| fr.back) && back.contains(x, y) {
                     Some((Action::Back, back))
+                } else if let Some(button) = button.filter(|(_, r)| r.contains(x, y)) {
+                    Some(button)
                 } else if let Some((d, top)) = on_dock {
                     d.hits.iter().find(|h| h.rect.contains(x, y - top)).map(|h| (h.action, Rect { y: h.rect.y + top, ..h.rect }))
                 } else if let Some((p, top)) = on_strip {
@@ -4195,8 +4247,10 @@ impl App {
     /// The button a finger holds down, which shows held at once: `<`, the
     /// search page's round button, or the home page's search bar.
     fn pressing(&self) -> Option<Action> {
+        let button = self.frame.as_ref().and_then(|fr| fr.button).map(|(_, a)| a);
         match self.drag {
             Drag::Press { action: Some(a @ (Action::Back | Action::CloseSearch | Action::Open(Screen::Search))), .. } => Some(a),
+            Drag::Press { action: Some(a), .. } if Some(a) == button => Some(a),
             _ => None,
         }
     }
@@ -4420,6 +4474,7 @@ impl App {
     fn work(&mut self, spot: Spot, now: u64) -> Vec<Effect> {
         match spot.stop {
             Stop::Back => self.act(Action::Back, now),
+            Stop::Button(action) => self.act(action, now),
             Stop::Hit(Action::Brightness) => {
                 self.adjusting = !self.adjusting;
                 if self.adjusting {
@@ -5018,6 +5073,15 @@ mod tests {
         let (x, y) = widgets::back_rect(&app.theme()).centre();
         app.touch(Touch::Down(x, y), f, now);
         app.touch(Touch::Up, f, now);
+    }
+
+    /// Tap the round button at the right end of the bar.
+    fn tap_button(app: &mut App, f: &Fonts, i: &DeviceInfo, now: u64) -> Vec<Effect> {
+        app.frame(f, i);
+        let (x, y) = widgets::button_rect(&app.theme()).centre();
+        let mut fx = app.touch(Touch::Down(x, y), f, now);
+        fx.extend(app.touch(Touch::Up, f, now));
+        fx
     }
 
     #[test]
@@ -7206,7 +7270,7 @@ mod tests {
     fn the_terminal_sends_every_key_to_its_shell() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Terminal)), vec![Effect::StartShell], "the page asks for a shell the first time");
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Terminal)), vec![Effect::StartShell("/".into())], "the page asks for a shell the first time");
         let (rows, cols) = app.term_size(&f);
         assert!(rows >= 20 && cols >= 40, "a screen of {rows} rows by {cols}");
         app.term_started(rows, cols);
@@ -7220,7 +7284,26 @@ mod tests {
         assert!(tap(&mut app, &f, &i, Action::Open(Screen::Terminal)).is_empty(), "the same shell goes on");
         app.term_ended("shell 已退出，退出码 0");
         assert!(tap(&mut app, &f, &i, Action::Type(Cap::Char('l'))).is_empty(), "nothing runs to take the keys");
-        assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![Effect::StartShell]);
+        assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![Effect::StartShell("/".into())]);
+    }
+
+    #[test]
+    fn the_file_managers_button_opens_the_terminal_in_the_folder_shown() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Files, W, H, PPD);
+        app.set_files("/sdcard/Download".into(), Ok(vec![entry("a.txt", FileKind::File)]), 0);
+        assert_eq!(app.frame(&f, &i).button, Some((widgets::Glyph::Terminal, Action::TerminalHere)));
+        assert_eq!(tap_button(&mut app, &f, &i, 0), vec![Effect::StartShell("/sdcard/Download".into())], "a shell starts there");
+        assert_eq!(app.screen(), Screen::Terminal);
+        let (rows, cols) = app.term_size(&f);
+        app.term_started(rows, cols);
+        app.term_ended("shell 已退出，退出码 0");
+        assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![Effect::StartShell("/sdcard/Download".into())], "Enter starts it again there");
+        app.term_started(rows, cols);
+        tap_back(&mut app, &f, &i, 0);
+        app.set_files("/data/adb".into(), Ok(Vec::new()), 0);
+        assert_eq!(tap_button(&mut app, &f, &i, 0), vec![Effect::ShellTo("/data/adb".into())], "the shell running goes there");
+        assert_eq!(app.screen(), Screen::Terminal);
     }
 
     #[test]

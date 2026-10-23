@@ -616,8 +616,12 @@ pub fn back_disc(t: &Theme) -> (f32, f32, f32) {
 /// bright rim and a faint shadow. Drawn once per theme on its own canvas,
 /// returned with where that canvas's top-left corner goes.
 pub fn back_chip(t: &Theme) -> (Canvas, i32, i32) {
+    chip(t, back_disc(t))
+}
+
+/// Such a chip about the disc centred at (`cx`, `cy`) of radius `r`.
+fn chip(t: &Theme, (cx, cy, r): (f32, f32, f32)) -> (Canvas, i32, i32) {
     let m = &t.m;
-    let (cx, cy, r) = back_disc(t);
     let (fill, rim) = if t.dark { (Rgba::rgb(38, 38, 38), Rgba::rgb(62, 62, 62)) } else { (Rgba::rgb(248, 248, 248), Rgba::rgb(255, 255, 255)) };
     let spread = m.dp(7.0);
     let reach = r + spread;
@@ -726,6 +730,63 @@ pub fn back_held(c: &mut Canvas, t: &Theme) {
     let side = (r * 2.0).ceil() as u32 + 2;
     let arrow = Sprite::capture(cx - r - 1.0, cy - r - 1.0, side, side, |c, dx, dy| arrow_at(c, t, dx, dy, Rgba::rgb(0, 0, 0)));
     arrow.draw(c, 0.0, 0.0, t.pal.text, BACK_HELD_ALPHA as f32 / 255.0);
+}
+
+/// What the round button at the right end of the bar shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyph {
+    /// A prompt and a cursor: a terminal.
+    Terminal,
+}
+
+/// The centre and radius of the round button at the right end of the bar,
+/// the `<` chip mirrored.
+pub fn button_disc(t: &Theme) -> (f32, f32, f32) {
+    let (cx, cy, r) = back_disc(t);
+    (t.m.w as f32 - cx, cy, r)
+}
+
+/// The area that answers a tap on that button, the `<` control's mirrored.
+pub fn button_rect(t: &Theme) -> Rect {
+    let b = back_rect(t);
+    Rect::new(t.m.w as f32 - b.x - b.w, b.y, b.w, b.h)
+}
+
+/// The chip behind that button, as the one behind `<`.
+pub fn button_chip(t: &Theme) -> (Canvas, i32, i32) {
+    chip(t, button_disc(t))
+}
+
+/// The button's glyph, in strokes as heavy as the `<`'s.
+pub fn button_glyph(c: &mut Canvas, t: &Theme, glyph: Glyph, color: Rgba) {
+    glyph_at(c, t, glyph, 0.0, 0.0, color);
+}
+
+/// The glyph moved by (`dx`, `dy`), its strokes spanning the same box about
+/// the disc's centre either way.
+fn glyph_at(c: &mut Canvas, t: &Theme, glyph: Glyph, dx: f32, dy: f32, color: Rgba) {
+    let m = &t.m;
+    let (cx, cy, _) = button_disc(t);
+    let (cx, cy, sw) = (cx + dx, cy + dy, m.back_stroke);
+    let at = |x: f32, y: f32| (cx + m.dp(x), cy + m.dp(y));
+    let mut stroke = |(x0, y0): (f32, f32), (x1, y1): (f32, f32)| c.line(x0, y0, x1, y1, sw, color);
+    match glyph {
+        Glyph::Terminal => {
+            stroke(at(-8.0, -6.0), at(-2.0, 0.0));
+            stroke(at(-2.0, 0.0), at(-8.0, 6.0));
+            stroke(at(1.0, 6.0), at(8.0, 6.0));
+        }
+    }
+}
+
+/// That button held down, as `<` is: its disc darkening what is behind it,
+/// and its glyph lighter on it, inked once where its strokes meet.
+pub fn button_held(c: &mut Canvas, t: &Theme, glyph: Glyph) {
+    let (cx, cy, r) = button_disc(t);
+    c.fill_circle(cx, cy, r, t.pal.button_press);
+    let side = (r * 2.0).ceil() as u32 + 2;
+    let art = Sprite::capture(cx - r - 1.0, cy - r - 1.0, side, side, |c, dx, dy| glyph_at(c, t, glyph, dx, dy, Rgba::rgb(0, 0, 0)));
+    art.draw(c, 0.0, 0.0, t.pal.text, BACK_HELD_ALPHA as f32 / 255.0);
 }
 
 /// The round button that leaves the search held down, in `r`: its disc
@@ -1970,6 +2031,21 @@ mod tests {
             }
         }
         b
+    }
+
+    #[test]
+    fn the_bars_round_button_mirrors_the_back_control_and_centres_its_glyph() {
+        let t = Theme::light(1440, 3200, 3.5);
+        let (back, button) = (back_rect(&t), button_rect(&t));
+        assert_eq!((button.x + button.w, button.y, button.w, button.h), (1440.0 - back.x, back.y, back.w, back.h));
+        let (cx, cy, r) = button_disc(&t);
+        let disc = Rect::new(cx - r, cy - r, r * 2.0, r * 2.0);
+        let mut c = Canvas::new(1440, 400);
+        button_glyph(&mut c, &t, Glyph::Terminal, Rgba::rgb(0, 0, 0));
+        let (l, top, right, bottom) = ink_box(&c, disc, |p| p[3] > 0);
+        let ((x, y), size) = (((l + right) / 2.0, (top + bottom) / 2.0), (right - l, bottom - top));
+        assert!((x - cx).abs() <= 1.0 && (y - cy).abs() <= 1.0, "centred on the disc: ({x}, {y}) for ({cx}, {cy})");
+        assert!(size.0 < r * 1.2 && size.1 < r, "well inside it: {size:?}");
     }
 
     #[test]

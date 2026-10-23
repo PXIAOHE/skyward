@@ -8,6 +8,8 @@ use crate::widgets;
 pub enum Stop {
     /// The `<`.
     Back,
+    /// The round button at the right end of the bar, and what it does.
+    Button(Action),
     /// A control of the page, of a strip laid over it, or a row of its long
     /// list.
     Hit(Action),
@@ -19,7 +21,7 @@ pub enum Stop {
 /// Where a stop lies, which is how it moves as the page scrolls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
-    /// The `<`, held at the top of the screen.
+    /// The `<` and the bar's round button, held at the top of the screen.
     Fixed,
     /// On the strip that scrolls with the page until it reaches the bar.
     Strip,
@@ -38,13 +40,16 @@ pub struct Spot {
     pub rect: Rect,
 }
 
-/// The stops of `frame` in the order the keys go through them: the `<`,
-/// the strip's from left to right, the page's own from the top down and
-/// left to right, then the bottom strip's.
+/// The stops of `frame` in the order the keys go through them: the `<` and
+/// the bar's round button, the strip's from left to right, the page's own
+/// from the top down and left to right, then the bottom strip's.
 pub fn spots(t: &Theme, frame: &Frame) -> Vec<Spot> {
     let mut out = Vec::new();
     if frame.back {
         out.push(Spot { stop: Stop::Back, group: Group::Fixed, rect: widgets::back_rect(t) });
+    }
+    if let Some((_, action)) = frame.button {
+        out.push(Spot { stop: Stop::Button(action), group: Group::Fixed, rect: widgets::button_rect(t) });
     }
     let across = |a: &Spot, b: &Spot| a.rect.x.total_cmp(&b.rect.x);
     if let Some(p) = &frame.pinned {
@@ -103,6 +108,10 @@ pub fn lit(t: &Theme, stop: Stop, r: Rect, keypad: bool) -> (Rect, f32) {
     match stop {
         Stop::Back => {
             let (cx, cy, radius) = widgets::back_disc(t);
+            (Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0), radius)
+        }
+        Stop::Button(_) => {
+            let (cx, cy, radius) = widgets::button_disc(t);
             (Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0), radius)
         }
         Stop::Dot(_) => {
@@ -182,6 +191,14 @@ mod tests {
         ], "the pattern grid takes no key");
         frame.back = false;
         assert_eq!(spots(&t, &frame)[0].stop, Stop::Hit(Action::OpenAncestor(0)), "a page without the `<` starts at its strip");
+        frame.back = true;
+        frame.button = Some((widgets::Glyph::Terminal, Action::TerminalHere));
+        let order: Vec<(Stop, Group)> = spots(&t, &frame).iter().take(3).map(|s| (s.stop, s.group)).collect();
+        assert_eq!(order, [
+            (Stop::Back, Group::Fixed),
+            (Stop::Button(Action::TerminalHere), Group::Fixed),
+            (Stop::Hit(Action::OpenAncestor(0)), Group::Strip),
+        ], "the bar's round button comes after the `<`");
     }
 
     #[test]
@@ -213,5 +230,9 @@ mod tests {
         let (cx, cy, rr) = widgets::back_disc(&t);
         let (disc, round) = lit(&t, Stop::Back, widgets::back_rect(&t), false);
         assert_eq!((disc.centre(), round), ((cx, cy), rr), "the `<` lit as the disc it sits on");
+        let (bx, by, br) = widgets::button_disc(&t);
+        let (disc, round) = lit(&t, Stop::Button(Action::TerminalHere), widgets::button_rect(&t), false);
+        assert_eq!((disc.centre(), round), ((bx, by), br), "the bar's round button too");
+        assert_eq!((bx + cx, by), (1440.0, cy), "across the screen from the `<`");
     }
 }
