@@ -33,7 +33,9 @@ toml = "0.9.8"
 
 [profile.release]
 opt-level = "z"
-lto = true
+# Optimizing across crates at link time does it at the binary's level,
+# for size, over the UI's own.
+lto = false
 codegen-units = 1
 panic = "abort"
 strip = true
