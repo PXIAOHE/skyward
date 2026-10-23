@@ -1,7 +1,6 @@
 use crate::canvas::{Canvas, Cover, Run};
 use crate::color::Rgba;
 use crate::sprite::Sprite;
-use rayon::prelude::*;
 
 /// The moving colour field behind the About page, one per theme: four soft
 /// discs whose centres circle slowly while their colours ease between three
@@ -232,13 +231,13 @@ pub fn sample(clock: &GlowClock, w: usize, h: usize, cell: usize, top: f32, bg: 
     let (cols, rows) = (w / cell + 2, h / cell + 2);
     let bg = [bg.r as f32, bg.g as f32, bg.b as f32];
     let mut rgb = vec![[0.0; 3]; cols * rows];
-    rgb.par_chunks_mut(cols).enumerate().for_each(|(j, line)| {
+    for (j, line) in rgb.chunks_exact_mut(cols).enumerate() {
         for (i, px) in line.iter_mut().enumerate() {
             let (u, v) = (((i * cell) as f32 + 0.5) / w as f32, 1.0 - ((j * cell) as f32 + 0.5) / h as f32);
             let (c, a) = shade(g, &discs, &colors, t, u, v, top);
             *px = std::array::from_fn(|k| bg[k] + (c[k] * 255.0 * a + bg[k] * (1.0 - a) - bg[k]) * fade);
         }
-    });
+    }
     Field { cell, cols, rows, rgb }
 }
 
@@ -352,8 +351,14 @@ pub struct Dither {
 }
 
 impl Dither {
+    /// Worked out a row at a time, many pixels at once.
     pub fn new(w: usize, h: usize) -> Dither {
-        let steps = (0..h).flat_map(|y| (0..w).map(move |x| (dither(x, y) * 16.0).round() as i8)).collect();
+        let mut steps = vec![0i8; w * h];
+        for (y, row) in steps.chunks_exact_mut(w).enumerate() {
+            for (x, step) in row.iter_mut().enumerate() {
+                *step = (dither(x, y) * 16.0).round() as i8;
+            }
+        }
         Dither { w, steps }
     }
 }
@@ -367,24 +372,17 @@ pub struct Layer<'a> {
 }
 
 /// Fill `out` with the field, dithered as strongly as `fade` lets it show,
-/// and lay `layer` over it. Bands of rows go to every core.
+/// and lay `layer` over it.
 pub fn paint(out: &mut Canvas, field: &Field, fade: f32, layer: &Layer, dither: &Dither) {
-    const ROWS: usize = 32;
     let w = out.w as usize;
     assert_eq!(dither.w, w, "the dither was made for this screen");
     assert!(out.whole() && layer.canvas.whole(), "the field fills a whole screen under a whole page");
-    out.data.par_chunks_mut(ROWS * w * 4).enumerate().for_each(|(k, band)| paint_band(band, k * ROWS, w, field, fade, layer, dither));
-}
-
-/// One band of [`paint`].
-fn paint_band(band: &mut [u8], y0: usize, w: usize, field: &Field, fade: f32, layer: &Layer, dither: &Dither) {
     let clear = [Run { x0: 0, x1: w as u16, cover: Cover::Clear }];
     let mut start = vec![[0i32; 3]; field.cols - 1];
     let mut step = vec![[0i32; 3]; field.cols - 1];
     // A dither value in sixteenths times this gives 16.16 fixed point.
     let shade = (fade * 4096.0).round() as i32;
-    for (r, row) in band.chunks_exact_mut(w * 4).enumerate() {
-        let y = y0 + r;
+    for (y, row) in out.data.chunks_exact_mut(w * 4).enumerate() {
         field.row(y, &mut start, &mut step);
         let row = row.as_chunks_mut::<4>().0;
         let noise = &dither.steps[y * w..(y + 1) * w];
@@ -464,19 +462,20 @@ pub fn ink_wordmark(out: &mut Canvas, field: &Field, look: &Ink, sprite: &Sprite
     };
     let shade = (fade * 4096.0).round() as i32;
     let strength = (alpha * 256.0).round() as u32;
-    let scratch = || (vec![[0i32; 3]; inks.cols - 1], vec![[0i32; 3]; inks.cols - 1], vec![[0u8; 4]; x1 - x0], vec![0u8; x1 - x0]);
-    out.data[y0 * w * 4..y1 * w * 4].par_chunks_mut(w * 4).enumerate().for_each_init(scratch, |(start, step, colors, cov), (r, row)| {
+    let (mut start, mut step) = (vec![[0i32; 3]; inks.cols - 1], vec![[0i32; 3]; inks.cols - 1]);
+    let (mut colors, mut cov) = (vec![[0u8; 4]; x1 - x0], vec![0u8; x1 - x0]);
+    for (r, row) in out.data[y0 * w * 4..y1 * w * 4].chunks_exact_mut(w * 4).enumerate() {
         let y = y0 + r;
-        sprite.cover_row(0.0, 0.0, scale, y, x0, cov);
-        inks.row(y - j0 * cell, start, step);
-        field_span(colors, &dither.steps[y * w + x0..y * w + x1], x0 - i0 * cell, cell, start, step, shade);
+        sprite.cover_row(0.0, 0.0, scale, y, x0, &mut cov);
+        inks.row(y - j0 * cell, &mut start, &mut step);
+        field_span(&mut colors, &dither.steps[y * w + x0..y * w + x1], x0 - i0 * cell, cell, &start, &step, shade);
         for ((p, c), &v) in row.as_chunks_mut::<4>().0[x0..x1].iter_mut().zip(colors.iter()).zip(cov.iter()) {
             let k = ((v as u32 + (v as u32 >> 7)) * strength) >> 8;
             for ch in 0..3 {
                 p[ch] = ((c[ch] as u32 * k + p[ch] as u32 * (256 - k) + 128) >> 8) as u8;
             }
         }
-    });
+    }
 }
 
 /// The wordmark's colour over field colour `under` (0 to 255).
