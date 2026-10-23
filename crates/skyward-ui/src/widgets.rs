@@ -1929,15 +1929,15 @@ pub fn keyboard(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, layer: Layer, pr
 /// lines, light cards for the light theme and dark ones for the dark theme.
 fn theme_tile(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, h: f32, dark: bool) {
     let (top, bottom) = (Rgba::rgb(77, 113, 246), Rgba::rgb(115, 184, 249));
-    let grad = |_: f32, py: f32| mix(top, bottom, (py - y) / h);
-    c.fill_round_rect_paint(x, y, w, h, t.m.dp(20.0), &grad);
+    let grad = |py: f32| mix(top, bottom, (py - y) / h);
+    c.fill_round_rect_graded(x, y, w, h, t.m.dp(20.0), &grad);
     let card = if dark { Rgba::rgb(0, 0, 0).with_alpha(51) } else { Rgba::rgb(255, 255, 255).with_alpha(51) };
     let lw = h * 0.027;
     for (c0, c1) in [(0.218f32, 0.472f32), (0.523, 0.779)] {
         c.fill_round_rect(x + w * 0.069, y + h * c0, w * 0.86, h * (c1 - c0), w * 0.045, card);
         for (at, end) in [(0.37f32, 0.841f32), (0.64, 0.622)] {
             let ly = y + h * (c0 + (c1 - c0) * at);
-            let base = grad(0.0, ly);
+            let base = grad(ly);
             let ink = if dark { mix(base, Rgba::rgb(180, 190, 190), 0.45) } else { mix(base, Rgba::rgb(0, 0, 0), 0.14) };
             c.line(x + w * 0.162 + lw / 2.0, ly, x + w * end - lw / 2.0, ly, lw, ink);
         }

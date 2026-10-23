@@ -1,4 +1,4 @@
-use crate::color::{blend_over, Rgba};
+use crate::color::{blend_over, blend_px, Rgba};
 use crate::font::Face;
 use ab_glyph::{point, Font, GlyphId, PxScale, ScaleFont};
 
@@ -479,86 +479,189 @@ impl Canvas {
         self
     }
 
+    /// A rounded rectangle in one colour.
     pub fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, color: Rgba) {
-        self.fill_round_rect_paint(x, y, w, h, r, &|_, _| color);
+        self.fill_round_rect_graded(x, y, w, h, r, &|_| color);
     }
 
-    /// [`Canvas::fill_round_rect`] with the colour chosen per pixel.
-    pub fn fill_round_rect_paint(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, paint: &dyn Fn(f32, f32) -> Rgba) {
+    /// A rounded rectangle shading from top to bottom, each row in the
+    /// colour `grade` gives for the height of its centre. How far each row
+    /// reaches is worked out from the outline: the run it covers wholly is
+    /// written straight, and only the pixels the outline crosses are worked
+    /// out one by one.
+    pub fn fill_round_rect_graded(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, grade: &dyn Fn(f32) -> Rgba) {
         let (cx, cy) = (x + w / 2.0, y + h / 2.0);
         let (hx, hy) = (w / 2.0, h / 2.0);
         let r = r.min(hx).min(hy);
         let (x0, x1) = self.columns((x - 1.0).floor() as i32, (x + w + 1.0).ceil() as i32);
         let (y0, y1) = self.rows((y - 1.0).floor() as i32, (y + h + 1.0).ceil() as i32);
+        if x0 >= x1 {
+            return;
+        }
+        // A pixel centre half a pixel inside the outline is covered wholly,
+        // and one half a pixel outside not at all.
         for py in y0..y1 {
             let fy = py as f32 + 0.5;
-            // Pixels at least half a pixel inside the straight edges are fully
-            // covered: the whole width between the corners' rows, the part
-            // between the corners above and below them.
-            let dy = (fy - cy).abs();
-            let reach = if dy <= hy - r {
-                hx - 0.5
-            } else if dy <= hy - 0.5 {
-                hx - r
-            } else {
-                -1.0
+            let qy = (fy - cy).abs() - (hy - r);
+            let Some(outer) = round_reach(hx, r, qy, 0.5) else { continue };
+            let color = grade(fy);
+            let lo = ((cx - outer - 0.5).floor() as i32).max(x0);
+            let hi = (((cx + outer - 0.5).ceil() as i32) + 1).min(x1).max(lo);
+            let (a, b) = match round_reach(hx, r, qy, -0.5) {
+                Some(inner) => centred(cx, inner, lo, hi),
+                None => (hi, hi),
             };
-            for px in x0..x1 {
-                let fx = px as f32 + 0.5;
-                if (fx - cx).abs() <= reach {
-                    self.blend(px, py, paint(fx, fy), 1.0);
-                    continue;
-                }
-                let d = rr_sdf(fx, fy, cx, cy, hx, hy, r);
-                let cov = (0.5 - d).clamp(0.0, 1.0);
+            for px in (lo..a).chain(b..hi) {
+                let cov = (0.5 - rr_sdf(px as f32 + 0.5, fy, cx, cy, hx, hy, r)).clamp(0.0, 1.0);
                 if cov > 0.0 {
-                    self.blend(px, py, paint(fx, fy), cov);
+                    self.blend(px, py, color, cov);
                 }
+            }
+            self.span(py, a, b, color);
+        }
+    }
+
+    /// Lay `color` wholly over pixels `a..b` of row `y`, which lie on the
+    /// canvas in a row it holds.
+    fn span(&mut self, y: i32, a: i32, b: i32, color: Rgba) {
+        if a >= b {
+            return;
+        }
+        let (start, end) = (self.at(a, y), self.at(b, y));
+        let run = self.data[start..end].as_chunks_mut::<4>().0;
+        if color.a == 255 {
+            run.fill([color.r, color.g, color.b, 255]);
+        } else if run.iter().fold(255, |all, p| all & p[3]) == 255 {
+            // Over opaque pixels each colour byte is the same mix, divided
+            // by 255 with a shift and an add, exactly for the sums a mix
+            // makes; red and blue together, then green.
+            let a = color.a as u32;
+            let lit_rb = (color.r as u32 | (color.b as u32) << 16) * a + 0x007f_007f;
+            let lit_g = color.g as u32 * a + 0x7f;
+            let by255 = |y: u32| ((y + 0x0001_0001 + ((y >> 8) & 0x00ff_00ff)) >> 8) & 0x00ff_00ff;
+            for p in run {
+                let v = u32::from_le_bytes(*p);
+                let rb = by255(lit_rb + (v & 0x00ff_00ff) * (255 - a));
+                let g = by255(lit_g + ((v >> 8) & 0xff) * (255 - a)) & 0xff;
+                *p = (rb | (g << 8) | 0xff00_0000).to_le_bytes();
+            }
+        } else {
+            for p in run {
+                blend_px(p, color, color.a as u32);
             }
         }
     }
 
+    /// The outline of a rounded rectangle, `t` wide, centred on its edge.
+    /// Each row looks only at the pixels the outline crosses on either side
+    /// of the middle it leaves clear, and writes straight those it covers
+    /// wholly.
     pub fn stroke_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, t: f32, color: Rgba) {
         let (cx, cy) = (x + w / 2.0, y + h / 2.0);
         let (hx, hy) = (w / 2.0, h / 2.0);
         let r = r.min(hx).min(hy);
-        let pad = t + 1.0;
+        let half = t / 2.0;
+        let pad = half + 1.0;
         let (x0, x1) = self.columns((x - pad).floor() as i32, (x + w + pad).ceil() as i32);
         let (y0, y1) = self.rows((y - pad).floor() as i32, (y + h + pad).ceil() as i32);
+        if x0 >= x1 {
+            return;
+        }
+        // A pixel centre no further than half the width less half a pixel
+        // from the edge, either way, is covered wholly; one further than
+        // half the width and half a pixel not at all.
         for py in y0..y1 {
-            for px in x0..x1 {
-                let d = rr_sdf(px as f32 + 0.5, py as f32 + 0.5, cx, cy, hx, hy, r);
-                let cov = (0.5 - (d.abs() - t / 2.0)).clamp(0.0, 1.0);
-                if cov > 0.0 {
-                    self.blend(px, py, color, cov);
+            let fy = py as f32 + 0.5;
+            let qy = (fy - cy).abs() - (hy - r);
+            let reach = |by: f32| round_reach(hx, r, qy, by);
+            let Some(outer) = reach(half + 0.5) else { continue };
+            let lo = ((cx - outer - 0.5).floor() as i32).max(x0);
+            let hi = (((cx + outer - 0.5).ceil() as i32) + 1).min(x1).max(lo);
+            let clear = reach(-half - 0.5).map_or((lo, lo), |k| centred(cx, k, lo, hi));
+            let whole = match reach(half - 0.5).filter(|_| half >= 0.5) {
+                Some(k) => {
+                    let (a, b) = centred(cx, k, lo, hi);
+                    match reach(0.5 - half) {
+                        Some(k) => {
+                            let (c, d) = centred(cx, k, a, b);
+                            [(a, c), (d, b)]
+                        }
+                        None => [(a, b), (b, b)],
+                    }
                 }
+                None => [(lo, lo), (lo, lo)],
+            };
+            let mut skip = [whole[0], clear, whole[1]];
+            skip.sort_unstable_by_key(|s| s.0);
+            let mut px = lo;
+            for (from, to) in skip.into_iter().chain([(hi, hi)]) {
+                while px < from.min(hi) {
+                    let d = rr_sdf(px as f32 + 0.5, fy, cx, cy, hx, hy, r);
+                    let cov = (0.5 - (d.abs() - half)).clamp(0.0, 1.0);
+                    if cov > 0.0 {
+                        self.blend(px, py, color, cov);
+                    }
+                    px += 1;
+                }
+                px = px.max(to);
+            }
+            for (a, b) in whole {
+                self.span(py, a, b, color);
             }
         }
     }
 
+    /// A disc: each row's run inside it written straight, its edge pixel by
+    /// pixel.
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, color: Rgba) {
         let (x0, x1) = self.columns((cx - r - 1.0).floor() as i32, (cx + r + 1.0).ceil() as i32);
         let (y0, y1) = self.rows((cy - r - 1.0).floor() as i32, (cy + r + 1.0).ceil() as i32);
+        if x0 >= x1 {
+            return;
+        }
         for py in y0..y1 {
-            for px in x0..x1 {
+            let dy = py as f32 + 0.5 - cy;
+            // Pixels whose centres lie half a pixel inside are covered
+            // wholly.
+            let inside = (r - 0.5) * (r - 0.5) - dy * dy;
+            let (a, b) = if r >= 0.5 && inside >= 0.0 {
+                let half = inside.sqrt();
+                let a = ((cx - half - 0.5).ceil() as i32).clamp(x0, x1);
+                (a, (((cx + half - 0.5).floor() as i32) + 1).clamp(a, x1))
+            } else {
+                (x1, x1)
+            };
+            for px in (x0..a).chain(b..x1) {
                 let dx = px as f32 + 0.5 - cx;
-                let dy = py as f32 + 0.5 - cy;
-                let d = (dx * dx + dy * dy).sqrt() - r;
-                let cov = (0.5 - d).clamp(0.0, 1.0);
+                let cov = (0.5 - ((dx * dx + dy * dy).sqrt() - r)).clamp(0.0, 1.0);
                 if cov > 0.0 {
                     self.blend(px, py, color, cov);
                 }
             }
+            self.span(py, a, b, color);
         }
     }
 
+    /// A ring `t` wide: in each row only the pixels near it are looked at.
     pub fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, t: f32, color: Rgba) {
         let (x0, x1) = self.columns((cx - r - t).floor() as i32, (cx + r + t).ceil() as i32);
         let (y0, y1) = self.rows((cy - r - t).floor() as i32, (cy + r + t).ceil() as i32);
+        if x0 >= x1 {
+            return;
+        }
+        // Pixels this far or nearer the centre are clear of the ring.
+        let hole = r - t / 2.0 - 1.0;
         for py in y0..y1 {
-            for px in x0..x1 {
+            let dy = py as f32 + 0.5 - cy;
+            let clear = hole * hole - dy * dy;
+            let (a, b) = if hole > 0.0 && clear > 0.0 {
+                let half = clear.sqrt();
+                (((cx - half).ceil() as i32).clamp(x0, x1), ((cx + half).floor() as i32).clamp(x0, x1))
+            } else {
+                (x1, x1)
+            };
+            for px in (x0..a).chain(b.max(a)..x1) {
                 let dx = px as f32 + 0.5 - cx;
-                let dy = py as f32 + 0.5 - cy;
                 let d = (dx * dx + dy * dy).sqrt() - r;
                 let cov = (0.5 - (d.abs() - t / 2.0)).clamp(0.0, 1.0);
                 if cov > 0.0 {
@@ -618,16 +721,34 @@ impl Canvas {
         }
     }
 
+    /// A line `t` wide with round ends. Each row looks only at the pixels
+    /// whose centres lie near enough the line for it to cover them, and
+    /// writes straight those it covers wholly.
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Rgba) {
-        let (minx, maxx) = self.columns((x0.min(x1) - t).floor() as i32, (x0.max(x1) + t).ceil() as i32);
-        let (miny, maxy) = self.rows((y0.min(y1) - t).floor() as i32, (y0.max(y1) + t).ceil() as i32);
         let vx = x1 - x0;
         let vy = y1 - y0;
         let len2 = (vx * vx + vy * vy).max(1e-6);
-        for py in miny..maxy {
-            for px in minx..maxx {
+        // A pixel centre this near the line is covered at all, and this near
+        // wholly.
+        let (outer, inner) = (t / 2.0 + 0.5, t / 2.0 - 0.5);
+        let (top, bottom) = self.rows((y0.min(y1) - outer).floor() as i32, (y0.max(y1) + outer).ceil() as i32);
+        for py in top..bottom {
+            let fy = py as f32 + 0.5;
+            let Some((lo, hi)) = near_segment(x0, y0, x1, y1, fy, outer) else { continue };
+            let (lo, hi) = self.columns((lo - 0.5).ceil() as i32, ((hi - 0.5).floor() as i32) + 1);
+            if lo >= hi {
+                continue;
+            }
+            let (a, b) = match near_segment(x0, y0, x1, y1, fy, inner).filter(|_| inner > 0.0) {
+                Some((a, b)) => {
+                    let a = ((a - 0.5).ceil() as i32).clamp(lo, hi);
+                    (a, (((b - 0.5).floor() as i32) + 1).clamp(a, hi))
+                }
+                None => (hi, hi),
+            };
+            for px in (lo..a).chain(b..hi) {
                 let wx = px as f32 + 0.5 - x0;
-                let wy = py as f32 + 0.5 - y0;
+                let wy = fy - y0;
                 let s = ((wx * vx + wy * vy) / len2).clamp(0.0, 1.0);
                 let dx = wx - vx * s;
                 let dy = wy - vy * s;
@@ -637,6 +758,7 @@ impl Canvas {
                     self.blend(px, py, color, cov);
                 }
             }
+            self.span(py, a, b, color);
         }
     }
 
@@ -819,6 +941,70 @@ fn front_cover(x: i32, y: i32, front: i32, h: i32, radius: f32) -> f32 {
     let qy = (py - half).abs() - (half - radius);
     let d = if qx > 0.0 && qy > 0.0 { qx.hypot(qy) - radius } else { qx.max(qy) - radius };
     (0.5 - d).clamp(0.0, 1.0)
+}
+
+/// How far either way from the middle a row of a rounded rectangle `hx`
+/// half wide with corners `r` round reaches, for its outline moved `by`
+/// outwards; `qy` is how far the row lies past where the corners start to
+/// round. Nothing if the row misses it.
+fn round_reach(hx: f32, r: f32, qy: f32, by: f32) -> Option<f32> {
+    let rr = r + by;
+    if rr <= 0.0 {
+        // Corners sharper than the move: a plain rectangle.
+        (qy <= rr).then_some(hx + by)
+    } else if qy <= 0.0 {
+        Some(hx + by)
+    } else if qy < rr {
+        Some(hx - r + (rr * rr - qy * qy).sqrt())
+    } else {
+        None
+    }
+}
+
+/// The pixels of `lo..hi` whose centres lie no further than `reach` from
+/// `cx` either way: the first, and one past the last.
+fn centred(cx: f32, reach: f32, lo: i32, hi: i32) -> (i32, i32) {
+    let a = ((cx - reach - 0.5).ceil() as i32).clamp(lo, hi);
+    (a, (((cx + reach - 0.5).floor() as i32) + 1).clamp(a, hi))
+}
+
+/// Where along the row at height `y` points lie within `reach` of the
+/// segment from (`x0`, `y0`) to (`x1`, `y1`): the round end about either
+/// point, or beside the segment between them. The three meet, so together
+/// they make one run.
+fn near_segment(x0: f32, y0: f32, x1: f32, y1: f32, y: f32, reach: f32) -> Option<(f32, f32)> {
+    let end = |ex: f32, ey: f32| {
+        let dy = y - ey;
+        (dy.abs() <= reach).then(|| {
+            let half = (reach * reach - dy * dy).sqrt();
+            (ex - half, ex + half)
+        })
+    };
+    let (vx, vy) = (x1 - x0, y1 - y0);
+    let len = (vx * vx + vy * vy).sqrt();
+    let wy = y - y0;
+    // Beside the segment: no further from its line than `reach`, and
+    // between the lines across its two ends. Each is `lo` ≤ k u + `at` ≤
+    // `hi` for u = x - x0, which bounds u from both sides, or holds for
+    // all of the row or none of it.
+    let between = |k: f32, at: f32, lo: f32, hi: f32| -> Option<(f32, f32)> {
+        if k.abs() < 1e-6 {
+            return (lo <= at && at <= hi).then_some((f32::MIN, f32::MAX));
+        }
+        let (a, b) = ((lo - at) / k, (hi - at) / k);
+        Some((a.min(b), a.max(b)))
+    };
+    let side = (len > 1e-6)
+        .then(|| {
+            // Distance from the line: (u vy - wy vx) / len; how far along
+            // it: (u vx + wy vy) / len.
+            let across = between(vy, -wy * vx, -reach * len, reach * len)?;
+            let along = between(vx, wy * vy, 0.0, len * len)?;
+            let (lo, hi) = (across.0.max(along.0), across.1.min(along.1));
+            (lo <= hi).then_some((x0 + lo, x0 + hi))
+        })
+        .flatten();
+    [end(x0, y0), end(x1, y1), side].into_iter().flatten().reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
 }
 
 fn rr_sdf(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {

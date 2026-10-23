@@ -261,16 +261,16 @@ fn folder_icon(c: &mut Canvas, x: f32, y: f32, size: f32) {
     let at = |v: f32, w: f32| (x + v * u, y + w * u);
     let (tab, under) = (Rgba::rgb(243, 175, 64), Rgba::rgb(238, 164, 59));
     let (b0, b1) = (y + 6.34 * u, y + 12.92 * u);
-    let back = |_: f32, py: f32| mix(tab, under, (py - b0) / (b1 - b0));
-    c.fill_round_rect_paint(x + 3.0 * u, b0, 12.6 * u, 6.0 * u, 1.9 * u, &back);
+    let back = |py: f32| mix(tab, under, (py - b0) / (b1 - b0));
+    c.fill_round_rect_graded(x + 3.0 * u, b0, 12.6 * u, 6.0 * u, 1.9 * u, &back);
     c.fill_convex(&[at(13.0, 6.34), at(14.6, 6.34), at(17.9, 8.8), at(13.0, 8.8)], tab);
-    c.fill_round_rect_paint(x + 3.0 * u, y + 8.8 * u, 34.0 * u, 24.86 * u, 4.7 * u, &back);
+    c.fill_round_rect_graded(x + 3.0 * u, y + 8.8 * u, 34.0 * u, 24.86 * u, 4.7 * u, &back);
     c.fill_round_rect(x + 5.4 * u, y + 11.1 * u, 29.4 * u, 20.6 * u, 1.2 * u, Rgba::rgb(255, 255, 255));
     let (top, foot) = (Rgba::rgb(248, 215, 83), Rgba::rgb(241, 176, 67));
     let (y0, y1) = (y + 12.92 * u, y + 33.66 * u);
-    let front = |_: f32, py: f32| mix(top, foot, (py - y0) / (y1 - y0));
-    c.fill_round_rect_paint(x + 3.0 * u, y0, 34.0 * u, y1 - y0, 4.7 * u, &front);
-    c.fill_round_rect_paint(x + 3.0 * u, y0, 34.0 * u, 10.0 * u, 1.45 * u, &front);
+    let front = |py: f32| mix(top, foot, (py - y0) / (y1 - y0));
+    c.fill_round_rect_graded(x + 3.0 * u, y0, 34.0 * u, y1 - y0, 4.7 * u, &front);
+    c.fill_round_rect_graded(x + 3.0 * u, y0, 34.0 * u, 10.0 * u, 1.45 * u, &front);
 }
 
 /// A file 40 units square scaled to `size`: a sheet with its top right
