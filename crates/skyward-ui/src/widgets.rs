@@ -577,14 +577,16 @@ fn mask(c: &mut Canvas, h: f32, stops: &[(f32, f32)], color: Rgba, level: f32, s
             let k = (a + BAYER[y as usize % 4][i] as f32 / 16.0 - 0.5).clamp(0.0, 255.0).round() as u32;
             k + (k >> 7)
         });
-        let lit: [[u32; 3]; 4] = k.map(|k| ink.map(|v| v * k + 128));
+        // Each pixel as a word, its red and blue mixed towards the ink in
+        // one multiply, then its green; its alpha kept.
+        let lit: [(u32, u32, u32); 4] = k.map(|k| ((ink[0] | ink[2] << 16) * k + 0x0080_0080, ink[1] * k + 0x80, 256 - k));
         let start = y as usize * row_len;
         for quad in c.data[start..start + row_len].as_chunks_mut::<16>().0 {
-            for (i, px) in quad.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                let keep = 256 - k[i];
-                for ch in 0..3 {
-                    px[ch] = ((lit[i][ch] + px[ch] as u32 * keep) >> 8) as u8;
-                }
+            for (px, &(lit_rb, lit_g, keep)) in quad.as_chunks_mut::<4>().0.iter_mut().zip(&lit) {
+                let v = u32::from_le_bytes(*px);
+                let rb = ((lit_rb + (v & 0x00ff_00ff) * keep) >> 8) & 0x00ff_00ff;
+                let g = ((lit_g + ((v >> 8) & 0xff) * keep) >> 8) & 0xff;
+                *px = (rb | (g << 8) | (v & 0xff00_0000)).to_le_bytes();
             }
         }
     }

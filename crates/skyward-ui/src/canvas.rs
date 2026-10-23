@@ -271,6 +271,14 @@ impl Canvas {
             let src = &layer.data[((ly * lw + x0) * 4) as usize..((ly * lw + x1) * 4) as usize];
             let start = self.at(x + x0, py);
             let dst = &mut self.data[start..start + src.len()];
+            if src.as_chunks::<4>().0.iter().fold(255, |all, s| all & s[3]) == 255 {
+                // Where the layer is opaque, each pixel mixes at the same
+                // strength.
+                for (s, d) in src.as_chunks::<4>().0.iter().zip(dst.as_chunks_mut::<4>().0) {
+                    *d = mix(*d, *s, strength);
+                }
+                continue;
+            }
             for (s, d) in src.as_chunks::<4>().0.iter().zip(dst.as_chunks_mut::<4>().0) {
                 if s[3] == 0 {
                     continue;
@@ -304,7 +312,17 @@ impl Canvas {
             let (from, to) = (((ly * lw + x0) * 4) as usize, ((ly * lw + x1) * 4) as usize);
             let start = ((py * sw + x + x0) * 4) as usize;
             let dst = &mut self.data[start..start + to - from];
-            let pairs = layer.data[from..to].as_chunks::<4>().0.iter().zip(now.data[from..to].as_chunks::<4>().0);
+            let (was, is) = (layer.data[from..to].as_chunks::<4>().0, now.data[from..to].as_chunks::<4>().0);
+            if was.iter().fold(255, |all, p| all & p[3]) == 255 {
+                // Where the layer was opaque, the pixel moves towards the
+                // new layer's, except where the two layers are the same,
+                // so what lies over them stays.
+                for ((was, is), d) in was.iter().zip(is).zip(dst.as_chunks_mut::<4>().0) {
+                    *d = mix(*d, *is, if was == is { 0 } else { k8 as u32 });
+                }
+                continue;
+            }
+            let pairs = was.iter().zip(is);
             for ((was, is), d) in pairs.zip(dst.as_chunks_mut::<4>().0) {
                 if was == is {
                     continue;
@@ -950,6 +968,16 @@ impl Drop for Canvas {
             }
         }
     }
+}
+
+/// The pixel `s` laid over the pixel `d` `a` 256ths of the way, `d`'s
+/// alpha kept: red and blue mixed in one multiply, then green.
+#[inline]
+fn mix(d: [u8; 4], s: [u8; 4], a: u32) -> [u8; 4] {
+    let (dv, sv) = (u32::from_le_bytes(d), u32::from_le_bytes(s));
+    let rb = (((sv & 0x00ff_00ff) * a + (dv & 0x00ff_00ff) * (256 - a) + 0x0080_0080) >> 8) & 0x00ff_00ff;
+    let g = ((((sv >> 8) & 0xff) * a + ((dv >> 8) & 0xff) * (256 - a) + 0x80) >> 8) & 0xff;
+    (rb | (g << 8) | (dv & 0xff00_0000)).to_le_bytes()
 }
 
 /// The opaque pixel `p` keeping `keep` 256ths of its light: its red and
