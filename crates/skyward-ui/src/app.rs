@@ -1808,6 +1808,9 @@ pub struct App {
     /// While a page slides: the page shown drawn on its own, and how it
     /// showed, to slide it again as it was while it shows the same.
     layer: Option<(View, Canvas)>,
+    /// Bands of rows of the page drawn that show what has changed since,
+    /// to draw again.
+    stale: Vec<(u32, u32)>,
     /// How many columns from the left edge of the page's rows drawn are
     /// drawn; a page opened is drawn across as it slides in.
     cols: u32,
@@ -1866,6 +1869,7 @@ impl App {
             shown: None,
             turn: None,
             layer: None,
+            stale: Vec::new(),
             cols: 0,
             backdrop: None,
             corners: 0.0,
@@ -2219,12 +2223,26 @@ impl App {
     /// The page's readings changed (battery, storage): render it again.
     pub fn refresh(&mut self) {
         self.frame = None;
+        self.stale.clear();
         self.spots = None;
         self.knob = None;
         self.row_art = None;
         self.shown = None;
         self.layer = None;
         self.spare.extend(self.drawn.drain(..).map(|(_, c)| c));
+        self.dirty = true;
+    }
+
+    /// What the page shows changed only in rows `first..end`: draw those
+    /// again, and the rest stays as drawn.
+    fn refresh_rows(&mut self, first: u32, end: u32) {
+        if self.frame.is_none() {
+            return;
+        }
+        self.stale.push((first, end));
+        self.spots = None;
+        self.shown = None;
+        self.layer = None;
         self.dirty = true;
     }
 
@@ -2656,7 +2674,8 @@ impl App {
     }
 
     /// Render the current page if what it shows has changed: the rows of
-    /// it on screen, the rest as they come into view.
+    /// it on screen, the rest as they come into view; or, where only some
+    /// rows changed, those rows.
     pub fn frame(&mut self, f: &Fonts, info: &DeviceInfo) -> &Frame {
         self.render(f, info, self.w)
     }
@@ -2664,6 +2683,19 @@ impl App {
     /// [`App::frame`], drawing of a page rendered anew only its columns
     /// from the left edge to `wide`.
     fn render(&mut self, f: &Fonts, info: &DeviceInfo, wide: u32) -> &Frame {
+        if self.frame.is_some() && !self.stale.is_empty() {
+            let t = self.theme();
+            let screen = self.screen();
+            for rows in std::mem::take(&mut self.stale) {
+                let band = Band { rows, cols: (0, self.cols) };
+                let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
+                let fresh = pages::render(screen, &cx);
+                let mut canvas = self.frame.take().expect("checked above").canvas;
+                assert_eq!(canvas.h, fresh.canvas.h, "a page drawn again in part is as tall as it was");
+                canvas.replace(&fresh.canvas);
+                self.frame = Some(Frame { canvas, ..fresh });
+            }
+        }
         if self.frame.is_none() {
             let t = self.theme();
             let screen = self.screen();
@@ -3822,6 +3854,7 @@ impl App {
     /// A key of the on-screen keyboard. A capital lasts one letter; return
     /// opens the first result of a search, and runs a terminal's command.
     fn type_key(&mut self, cap: Cap, now: u64) -> Vec<Effect> {
+        let layer = self.state.layer;
         match cap {
             Cap::Char(ch) => {
                 let shifted = self.state.layer == Layer::Shifted;
@@ -3872,7 +3905,14 @@ impl App {
                 other => unreachable!("{other:?} shows no keyboard"),
             },
         }
-        self.refresh();
+        // What is typed shows above the keyboard, which stays as it was
+        // while its keys do.
+        if matches!(cap, Cap::Char(_) | Cap::Space | Cap::Backspace) && self.state.layer == layer {
+            let t = self.theme();
+            self.refresh_rows(0, (t.m.h as f32 - widgets::keyboard_height(&t)).floor() as u32);
+        } else {
+            self.refresh();
+        }
         Vec::new()
     }
 
@@ -4102,8 +4142,15 @@ impl App {
             _ => None,
         };
         if held != self.state.pressed {
-            self.state.pressed = held;
-            self.refresh();
+            let was = std::mem::replace(&mut self.state.pressed, held);
+            // Only the rows of the key let go and the key held change.
+            let keys: Option<Vec<Rect>> = self.frame.as_ref().and_then(|fr| {
+                [was, held].into_iter().flatten().map(|cap| fr.hits.iter().find(|h| h.action == Action::Type(cap)).map(|h| h.rect)).collect()
+            });
+            match keys {
+                Some(keys) => keys.into_iter().for_each(|r| self.refresh_rows(r.y.floor() as u32, (r.y + r.h).ceil() as u32)),
+                None => self.refresh(),
+            }
         }
         fx
     }
@@ -4844,6 +4891,31 @@ mod tests {
                 assert_eq!(differs(&across), None, "{screen:?}: the first row drawn otherwise across");
             }
         }
+    }
+
+    #[test]
+    fn a_page_typed_on_draws_again_only_what_changed_and_shows_what_it_would_drawn_anew() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Search, W, H, PPD);
+        let mut out = Canvas::new(W, H);
+        app.compose(&mut out, &f, &i, "12:00", 0);
+        let anew = |app: &App| {
+            let t = app.theme();
+            pages::render(Screen::Search, &Ctx { t: &t, f: &f, info: &i, state: &app.state, term: None, band: None })
+        };
+        for cap in [Cap::Char('b'), Cap::Char('f'), Cap::Space, Cap::Backspace, Cap::Shift, Cap::Char('q')] {
+            let (x, y) = spot(&mut app, &f, &i, Action::Type(cap));
+            app.touch(Touch::Down(x, y), &f, 0);
+            assert!(app.frame.is_some() && !app.stale.is_empty() || cap == Cap::Shift, "{cap:?}: the key held is drawn again on its own");
+            app.compose(&mut out, &f, &i, "12:00", 0);
+            assert!(app.frame.as_ref().unwrap().canvas.data == anew(&app).canvas.data, "{cap:?} held down");
+            app.touch(Touch::Up, &f, 0);
+            app.compose(&mut out, &f, &i, "12:00", 0);
+            let (drawn, fresh) = (app.frame.as_ref().unwrap(), anew(&app));
+            assert!(drawn.canvas.data == fresh.canvas.data, "{cap:?} typed");
+            assert_eq!(drawn.hits.iter().map(|h| h.action).collect::<Vec<_>>(), fresh.hits.iter().map(|h| h.action).collect::<Vec<_>>(), "{cap:?} typed");
+        }
+        assert_eq!(app.state.search, "bfQ");
     }
 
     /// Where on screen the first control doing `action` sits.
