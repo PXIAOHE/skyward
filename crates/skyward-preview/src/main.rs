@@ -285,7 +285,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 100] = [
+    let pages: [PageShot; 101] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -434,6 +434,9 @@ fn main() -> Result<()> {
         ("50-files-light", Screen::Files, false, &|app| app.set_files("/".into(), Ok(sample_root()), LISTED)),
         ("51-files-dark", Screen::Files, true, &|app| app.set_files("/".into(), Ok(sample_root()), LISTED)),
         ("52-file-info-light", Screen::FileInfo, false, &|app| app.state.file = sample_root().into_iter().find(|e| e.name == "init.environ.rc")),
+        ("52-file-permissions-dark", Screen::Permissions, true, &|app| {
+            app.state.file = sample_root().into_iter().find(|e| e.name == "init.environ.rc")
+        }),
         ("61-files-names-light", Screen::Files, false, &|app| app.set_files("/sdcard/Download".into(), Ok(sample_download()), LISTED)),
         ("110-files-types-light", Screen::Files, false, &|app| app.set_files("/sdcard/Download".into(), Ok(sample_types()), LISTED)),
         ("110-files-types-dark", Screen::Files, true, &|app| app.set_files("/sdcard/Download".into(), Ok(sample_types()), LISTED)),

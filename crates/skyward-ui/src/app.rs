@@ -52,6 +52,8 @@ pub enum Screen {
     Files,
     /// One file, and what can be done with it.
     FileInfo,
+    /// The permission bits of the entry the file page shows, a switch each.
+    Permissions,
     Terminal,
     Language,
     TimeZone,
@@ -817,6 +819,10 @@ pub enum Action {
     Unpick,
     /// Give the entry the file page shows a new name.
     RenameEntry,
+    /// Open the page of the permissions of the entry the file page shows.
+    OpenPermissions,
+    /// Turn this permission bit of the entry the file page shows on or off.
+    ModeBit(u32),
     /// Ask to delete the entry the file page shows, or the backup the
     /// restore page shows; a swipe then confirms.
     AskDelete,
@@ -1278,6 +1284,9 @@ pub enum Effect {
     /// Give an entry a new name; how it went comes back with
     /// [`App::renamed`].
     Rename { path: String, name: String },
+    /// Give an entry these permission bits; how it went comes back with
+    /// [`App::mode_set`].
+    SetMode { path: String, mode: u32 },
     /// Delete an entry, folders whole.
     Delete(String),
     /// Stop the work on files under way.
@@ -2444,6 +2453,27 @@ impl App {
             Err(RenameRefused::Taken) => self.say_taken(now),
             Err(RenameRefused::Failed(why)) => self.report(&why, now),
         }
+    }
+
+    /// The entry the file page shows was to have the permission bits
+    /// `wanted`: those it has now, or why it has not.
+    pub fn mode_set(&mut self, wanted: u32, outcome: Result<u32, String>, now: u64) {
+        let bits = match outcome {
+            Ok(bits) => bits,
+            Err(why) => return self.report(&format!("修改权限失败：{why}"), now),
+        };
+        let entry = self.state.file.as_mut().expect("the permissions page shows an entry");
+        entry.mode = (entry.mode & !0o7777) | bits;
+        let name = entry.name.clone();
+        if let Ok(entries) = &mut self.state.files.entries {
+            if let Some(listed) = entries.iter_mut().find(|e| e.name == name) {
+                listed.mode = (listed.mode & !0o7777) | bits;
+            }
+        }
+        if bits != wanted {
+            self.say("该位置不支持修改权限", now);
+        }
+        self.refresh();
     }
 
     /// The name typed for an entry is another entry's in the folder.
@@ -3695,6 +3725,11 @@ impl App {
                 self.state.new_name = self.state.file.as_ref().expect("the file page shows an entry").name.clone();
                 self.state.layer = Layer::Letters;
                 self.open(Screen::Rename);
+            }
+            Action::OpenPermissions => self.open(Screen::Permissions),
+            Action::ModeBit(bit) => {
+                let mode = self.state.file.as_ref().expect("the permissions page shows an entry").mode;
+                return vec![Effect::SetMode { path: self.entry_path(), mode: (mode ^ bit) & 0o7777 }];
             }
             Action::AskDelete => {
                 self.state.asking_delete = true;
@@ -7542,6 +7577,43 @@ mod tests {
         assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("该文件夹中已有\"ab\""), "as the folder compares names");
         app.renamed(Ok(()), 0);
         assert_eq!(app.screen(), Screen::Files, "renamed, the folder shows again");
+    }
+
+    #[test]
+    fn permissions_switch_a_bit_at_a_time_and_show_what_the_entry_took() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        tap(&mut app, &f, &i, Action::OpenPermissions);
+        assert_eq!(app.screen(), Screen::Permissions);
+        let bits: Vec<u32> = app.frame(&f, &i).hits.iter().filter_map(|h| if let Action::ModeBit(b) = h.action { Some(b) } else { None }).collect();
+        assert_eq!(bits, [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001, 0o4000, 0o2000, 0o1000]);
+        let set = |mode| vec![Effect::SetMode { path: "/sdcard/a.zip".into(), mode }];
+        assert_eq!(tap(&mut app, &f, &i, Action::ModeBit(0o002)), set(0o757), "everyone may write");
+        app.mode_set(0o757, Ok(0o757), 0);
+        assert_eq!(app.state.file.as_ref().unwrap().mode, 0o040_757, "its type stays");
+        assert_eq!(tap(&mut app, &f, &i, Action::ModeBit(0o100)), set(0o657), "and back off");
+        app.toast = None;
+        app.mode_set(0o4757, Ok(0o757), 0);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("该位置不支持修改权限"), "a filesystem that kept none of it");
+        app.mode_set(0o755, Err("give /sdcard/a.zip the permissions 0755: Read-only file system (os error 30)".into()), 0);
+        assert!(app.toast.as_ref().is_some_and(|t| t.0.starts_with("修改权限失败：give /sdcard/a.zip")), "{:?}", app.toast);
+        assert_eq!(app.state.file.as_ref().unwrap().mode, 0o040_757, "as it last was");
+        tap_back(&mut app, &f, &i, 0);
+        tap_back(&mut app, &f, &i, 0);
+        assert_eq!(app.state.files.entries.as_ref().unwrap()[1].mode, 0o040_757, "the folder knows it too");
+    }
+
+    #[test]
+    fn a_links_page_offers_no_permissions_of_its_own() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        app.state.file = Some(entry("latest", FileKind::Link { target: "DCIM".into(), folder: true }));
+        app.open(Screen::FileInfo);
+        assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::OpenPermissions));
+        app.state.file = Some(entry("a.zip", FileKind::File));
+        app.refresh();
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::OpenPermissions));
     }
 
     #[test]

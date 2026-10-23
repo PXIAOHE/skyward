@@ -72,6 +72,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Advanced => advanced(cx),
         Screen::Files => files(cx),
         Screen::FileInfo => file_info(cx),
+        Screen::Permissions => permissions(cx),
         Screen::Terminal => terminal(cx),
         Screen::Language => language(cx),
         Screen::TimeZone => time_zone(cx),
@@ -1620,18 +1621,18 @@ pub fn file_info(cx: &Ctx) -> Frame {
     facts.push(("修改时间", fmt::datetime(e.modified, s.time_zone)));
     facts.push(("权限", format!("{}，所有者 {}，用户组 {}", fmt::mode(e.mode), e.uid, e.gid)));
     let y = widgets::info_card(&mut c, t, f, top, &facts);
-    let actions = widgets::list(&mut c, t, f, y + t.m.card_gap, &[
-        Row::new("复制"),
-        Row::new("移动"),
-        Row::new("重命名"),
-        Row::new("删除").tint(t.pal.danger).trail(Trail::None),
-    ]);
-    let mut out = hits(&actions.rows, &[
-        Action::PickEntry(FileOp::Copy),
-        Action::PickEntry(FileOp::Move),
-        Action::RenameEntry,
-        Action::AskDelete,
-    ]);
+    let mut rows = vec![Row::new("复制"), Row::new("移动"), Row::new("重命名")];
+    let mut acts = vec![Action::PickEntry(FileOp::Copy), Action::PickEntry(FileOp::Move), Action::RenameEntry];
+    // A link's own permissions mean nothing; its target is changed where
+    // it is.
+    if !matches!(e.kind, FileKind::Link { .. }) {
+        rows.push(Row::new("修改权限"));
+        acts.push(Action::OpenPermissions);
+    }
+    rows.push(Row::new("删除").tint(t.pal.danger).trail(Trail::None));
+    acts.push(Action::AskDelete);
+    let actions = widgets::list(&mut c, t, f, y + t.m.card_gap, &rows);
+    let mut out = hits(&actions.rows, &acts);
     let mut bottom = actions.bottom;
     if s.asking_delete {
         let what = if folder {
@@ -1647,6 +1648,29 @@ pub fn file_info(cx: &Ctx) -> Frame {
     }
     let title = if folder { "文件夹信息" } else { "文件信息" };
     Frame::new(t, fit(c, t, bottom), out, title, top)
+}
+
+/// The permission bits of the entry the file page shows, a switch each that
+/// takes effect at once: reading, writing and running for its owner, its
+/// group and everyone else, then the set-ID and sticky bits.
+pub fn permissions(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let e = s.file.as_ref().expect("the permissions page shows an entry");
+    let mut c = long_page(cx);
+    let top = t.m.content_top;
+    let mode = e.mode & 0o7777;
+    let mut y = widgets::info_card(&mut c, t, f, top, &[("名称", e.name.clone()), ("权限", format!("{}，{mode:04o}", fmt::mode(e.mode)))]);
+    let mut out = Vec::new();
+    let classes = [("所有者", 6), ("用户组", 3), ("其他用户", 0)];
+    let groups = classes.map(|(title, shift)| (title, [("读取", 4 << shift), ("写入", 2 << shift), ("执行", 1 << shift)]));
+    for (title, bits) in groups.into_iter().chain([("特殊权限", [("SUID", 0o4000), ("SGID", 0o2000), ("粘滞位", 0o1000)])]) {
+        y = widgets::section(&mut c, t, f, y, title);
+        let rows = bits.map(|(name, bit)| Row::new(name).trail(Trail::Switch(mode & bit != 0)));
+        let list = widgets::list(&mut c, t, f, y, &rows);
+        out.extend(hits(&list.rows, &bits.map(|(_, bit)| Action::ModeBit(bit))));
+        y = list.bottom;
+    }
+    Frame::new(t, fit(c, t, y), out, "修改权限", top)
 }
 
 /// A new name for the entry the file page shows, typed on the keyboard.

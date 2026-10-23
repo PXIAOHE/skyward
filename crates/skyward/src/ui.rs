@@ -1504,6 +1504,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             Err(e) => app.report(&format!("导出失败：{e:#}"), now),
                         }
                     }
+                    Effect::SetMode { path, mode } => {
+                        let outcome = skyward_files::set_mode(Path::new(&path), mode).map_err(|e| format!("{e:#}"));
+                        app.mode_set(mode, outcome, now);
+                    }
                     Effect::Rename { path, name } => match skyward_files::rename(Path::new(&path), &name) {
                         Ok(_) => {
                             app.renamed(Ok(()), now);
