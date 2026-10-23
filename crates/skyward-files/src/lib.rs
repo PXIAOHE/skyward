@@ -435,6 +435,16 @@ pub fn rename(path: &Path, new: &str) -> Result<PathBuf> {
     Ok(to)
 }
 
+/// Give the entry at `path`, a link's target, the permission bits `mode`,
+/// the set-ID and sticky bits among them, and say which it has after: a
+/// filesystem that keeps none of its own, as FAT keeps none, leaves them as
+/// they were.
+pub fn set_mode(path: &Path, mode: u32) -> Result<u32> {
+    let mode = mode & 0o7777;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).with_context(|| format!("give {} the permissions {mode:04o}", path.display()))?;
+    Ok(fs::metadata(path).with_context(|| format!("look at {}", path.display()))?.mode() & 0o7777)
+}
+
 /// Delete each of `paths`, folders with all they hold. A folder that has a
 /// filesystem mounted on or inside it is refused before anything goes.
 pub fn delete(paths: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
@@ -824,6 +834,23 @@ mod tests {
             assert!(rename(&at.join("c.txt"), bad).is_err(), "{bad:?}");
         }
         assert_eq!(rename(&at.join("c.txt"), "c.txt").unwrap(), at.join("c.txt"), "the same name changes nothing");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn permissions_are_set_and_read_back() {
+        let at = scratch("mode");
+        fs::write(at.join("run.sh"), b"#!/system/bin/sh\n").unwrap();
+        fs::set_permissions(at.join("run.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(set_mode(&at.join("run.sh"), 0o755).unwrap(), 0o755);
+        assert_eq!(fs::metadata(at.join("run.sh")).unwrap().mode() & 0o7777, 0o755);
+        assert_eq!(set_mode(&at.join("run.sh"), 0o100_600).unwrap(), 0o600, "the bits of the type are not permissions");
+        fs::create_dir(at.join("shared")).unwrap();
+        assert_eq!(set_mode(&at.join("shared"), 0o1777).unwrap(), 0o1777, "a folder takes the sticky bit");
+        std::os::unix::fs::symlink("run.sh", at.join("link")).unwrap();
+        assert_eq!(set_mode(&at.join("link"), 0o700).unwrap(), 0o700, "a link's target is changed");
+        assert_eq!(fs::metadata(at.join("run.sh")).unwrap().mode() & 0o7777, 0o700);
+        assert!(set_mode(&at.join("gone"), 0o644).is_err());
         fs::remove_dir_all(&at).unwrap();
     }
 
