@@ -1771,7 +1771,8 @@ pub fn terminal(cx: &Ctx) -> Frame {
     let l = term::layout(t, f, top);
     term::draw(&mut c, t, f, &l, cx.term);
     let held = cx.term.is_some_and(|term| term.ctrl);
-    out.extend(term::keys(&mut c, t, f, &l, held).into_iter().map(|(rect, key)| Hit { rect, action: Action::TermKey(key) }));
+    let keys = term::keys(&mut c, t, f, &l, &term::TERM_KEYS, held);
+    out.extend(keys.into_iter().map(|(rect, key)| Hit { rect, action: Action::TermKey(key) }));
     Frame { scrollback: Some((l.card, l.pitch)), ..Frame::new(t, c, out, "终端", top) }
 }
 

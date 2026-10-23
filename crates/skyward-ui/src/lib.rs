@@ -1,6 +1,7 @@
 pub mod app;
 pub mod canvas;
 pub mod color;
+pub mod editor;
 pub mod files;
 pub mod fling;
 pub mod fmt;

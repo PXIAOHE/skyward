@@ -1705,6 +1705,7 @@ dependencies = [
  "skyward-install",
  "skyward-vab",
  "ttf-parser",
+ "unicode-width",
  "vt100",
 ]
 

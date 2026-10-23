@@ -24,7 +24,7 @@ const KEYS_GAP_DP: f32 = 10.0;
 /// How round the row's keys' corners are.
 pub const KEY_RADIUS_DP: f32 = 8.0;
 
-/// A key of the terminal's own row, above the keyboard.
+/// A key of the row above the keyboard, the terminal's or the editor's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TermKey {
     Esc,
@@ -145,7 +145,8 @@ pub struct Layout {
     /// The top left of the first cell.
     pub x0: f32,
     pub y0: f32,
-    /// A cell's width, and a row's height.
+    /// The type size, a cell's width, and a row's height.
+    pub px: f32,
     pub cell: f32,
     pub pitch: f32,
     pub rows: u16,
@@ -165,7 +166,7 @@ pub fn layout(t: &Theme, f: &Fonts, top: f32) -> Layout {
     let pitch = m.dp(PITCH_DP);
     let cols = ((card.w - pad * 2.0) / cell).floor().max(1.0) as u16;
     let rows = ((card.h - pad * 2.0) / pitch).floor().max(1.0) as u16;
-    Layout { card, x0: card.x + pad, y0: card.y + pad, cell, pitch, rows, cols, keys_top }
+    Layout { card, x0: card.x + pad, y0: card.y + pad, px, cell, pitch, rows, cols, keys_top }
 }
 
 /// The advance of the monospaced face, one cell.
@@ -242,7 +243,7 @@ pub fn draw(c: &mut Canvas, t: &Theme, f: &Fonts, l: &Layout, term: Option<&Term
     c.fill_round_rect(l.card.x, l.card.y, l.card.w, l.card.h, m.card_radius, t.pal.card);
     let Some(term) = term else { return };
     let screen = term.screen();
-    let px = m.dp(TEXT_DP);
+    let px = l.px;
     // Every row sits on the baseline the UI face would give it.
     let ascent = -f.body.ink(px).0;
     let (cursor_row, cursor_col) = screen.cursor_position();
@@ -284,16 +285,17 @@ pub fn draw(c: &mut Canvas, t: &Theme, f: &Fonts, l: &Layout, term: Option<&Term
     }
 }
 
-/// The row of the terminal's own keys; Ctrl shows held while it is.
-pub fn keys(c: &mut Canvas, t: &Theme, f: &Fonts, l: &Layout, ctrl: bool) -> Vec<(Rect, TermKey)> {
+/// The row of `keys` above the keyboard, the terminal's or the editor's;
+/// Ctrl shows held while it is.
+pub fn keys(c: &mut Canvas, t: &Theme, f: &Fonts, l: &Layout, keys: &[TermKey], ctrl: bool) -> Vec<(Rect, TermKey)> {
     let m = &t.m;
-    let n = TERM_KEYS.len() as f32;
+    let n = keys.len() as f32;
     let gap = m.dp(6.0);
     let w = (m.w as f32 - m.margin * 2.0 - gap * (n - 1.0)) / n;
     let h = m.dp(KEYS_H_DP);
     let px = m.dp(14.0);
     let mut out = Vec::new();
-    for (k, &key) in TERM_KEYS.iter().enumerate() {
+    for (k, &key) in keys.iter().enumerate() {
         let r = Rect::new(m.margin + k as f32 * (w + gap), l.keys_top, w, h);
         let held = key == TermKey::Ctrl && ctrl;
         let (fill, ink) = if held { (t.pal.accent, t.pal.card) } else { (t.pal.card, t.pal.text) };

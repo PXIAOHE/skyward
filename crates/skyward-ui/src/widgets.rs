@@ -913,10 +913,20 @@ fn cursor(t: &Theme, f: &Fonts, x: f32, cy: f32, px: f32) -> Rect {
     Rect::new(x, base + top, t.m.dp(CARET_W_DP), bottom - top)
 }
 
+/// A text cursor with its left edge on `x`, from `top` to `bottom`.
+pub fn caret_rect(t: &Theme, x: f32, top: f32, bottom: f32) -> Rect {
+    Rect::new(x, top, t.m.dp(CARET_W_DP), bottom - top)
+}
+
+/// Draw a text cursor in `at`.
+pub fn draw_caret(c: &mut Canvas, t: &Theme, at: Rect) {
+    c.fill_round_rect(at.x, at.y, at.w, at.h, t.m.dp(CARET_RADIUS_DP), t.pal.accent);
+}
+
 /// The stretch of a field round the cursor at `at`, drawn by `draw` into a
 /// canvas of its own; `draw` gets how far that canvas's corner is from
 /// the field's.
-fn caret_over(at: Rect, draw: impl FnOnce(&mut Canvas, f32, f32)) -> Caret {
+pub fn caret_over(at: Rect, draw: impl FnOnce(&mut Canvas, f32, f32)) -> Caret {
     let (x, y) = (at.x.floor() as i32 - 1, at.y.floor() as i32 - 1);
     let mut art = Canvas::new(at.w.ceil() as u32 + 3, at.h.ceil() as u32 + 3);
     draw(&mut art, x as f32, y as f32);
