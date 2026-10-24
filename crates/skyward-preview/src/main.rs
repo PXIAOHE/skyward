@@ -5,9 +5,9 @@ use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Reflash, Refusal, St
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Wlan};
 use skyward_ui::app::{
-    Action, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, EraseStop, FileKind,
-    FileOp, FileRow, FileTask, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch,
-    UsbDrive, UsbLink, SCREEN_OFF,
+    Action, Adding, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, EraseStop,
+    Field, FileKind, FileOp, FileRow, FileTask, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow, Part, Pick, Place, Screen,
+    Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Cap, Layer};
 use skyward_ui::{editor, fmt, pages, Canvas, Ctx, Fonts, Theme};
@@ -297,7 +297,10 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 121] = [
+    let adding = |app: &mut App, name: &str, security: Security, field: Field, choosing: bool| {
+        app.state.adding = Some(Adding { name: name.into(), security, field, choosing });
+    };
+    let pages: [PageShot; 125] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -519,6 +522,16 @@ fn main() -> Result<()> {
             app.state.details = Some(nearby()[7].clone());
         }),
         ("153-wlan-light-searching", Screen::Wlan, false, &|app| app.state.wlan = Some(Wlan { power: Power::On, ..Wlan::default() })),
+        ("154-wlan-add-light", Screen::WlanAdd, false, &|app| adding(app, "", Security::Open, Field::Name, false)),
+        ("155-wlan-add-light-password", Screen::WlanAdd, false, &|app| {
+            adding(app, "attic", Security::Psk, Field::Password, false);
+            app.state.password = "skyward2024".into();
+        }),
+        ("156-wlan-add-light-choosing", Screen::WlanAdd, false, &|app| adding(app, "attic", Security::Psk, Field::Name, true)),
+        ("157-wlan-add-dark-choosing", Screen::WlanAdd, true, &|app| {
+            adding(app, "attic", Security::Open, Field::Name, true);
+            app.state.held = Some(Action::PickSecurity(Security::Sae));
+        }),
         ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
             let (rows, cols) = app.term_size(&fonts);
             app.term_started(rows, cols);

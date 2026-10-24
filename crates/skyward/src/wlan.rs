@@ -344,7 +344,10 @@ impl Station {
         let r = self.running.as_ref().context("the WLAN is off")?;
         r.control.order("REMOVE_NETWORK all")?;
         let id: u32 = r.control.ask("ADD_NETWORK")?.trim().parse().context("wpa_supplicant numbered the network with no number")?;
-        for c in supplicant::network_commands(id, &joined.ssid, joined.security, password)? {
+        // One the last scan did not see may hide its name, as one added by
+        // hand may.
+        let hidden = !r.found.iter().any(|b| b.ssid == joined.ssid);
+        for c in supplicant::network_commands(id, &joined.ssid, joined.security, password, hidden)? {
             r.control.order(&c)?;
         }
         r.control.order(&format!("SELECT_NETWORK {id}"))

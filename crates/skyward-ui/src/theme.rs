@@ -41,6 +41,13 @@ pub struct Palette {
     /// in it.
     pub round: Rgba,
     pub round_mark: Rgba,
+    /// The arrows up and down after the value of a row that opens a list of
+    /// choices.
+    pub updown: Rgba,
+    /// A list of choices open over the page, and the shadow it casts where
+    /// the shadow is whole.
+    pub popup: Rgba,
+    pub shadow: Rgba,
 }
 
 /// The status bar battery's inks, partly see-through as the stock status
@@ -269,6 +276,11 @@ const LIGHT: Palette = Palette {
     // Sampled from the stock WLAN page.
     round: Rgba::rgb(242, 242, 242),
     round_mark: Rgba::rgb(169, 169, 169),
+    // Sampled from the stock page that adds a network; the shadow as the
+    // grey it leaves on the page beside the list is fitted.
+    updown: Rgba::rgb(214, 214, 214),
+    popup: Rgba::rgb(255, 255, 255),
+    shadow: Rgba::rgb(0, 0, 0).with_alpha(27),
 };
 
 const DARK: Palette = Palette {
@@ -311,6 +323,12 @@ const DARK: Palette = Palette {
     // As far from the card as the light theme's are from its own.
     round: Rgba::rgb(41, 41, 41),
     round_mark: Rgba::rgb(118, 118, 118),
+    // The arrows as much softer than the chevron as in the light theme; the
+    // list a step lighter than the cards it opens over, and its shadow
+    // darker, for it to show on them.
+    updown: Rgba::rgb(54, 54, 54),
+    popup: Rgba::rgb(41, 41, 41),
+    shadow: Rgba::rgb(0, 0, 0).with_alpha(77),
 };
 
 // Sampled from the stock「我的设备」page: in light mode the cards are

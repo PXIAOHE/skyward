@@ -151,10 +151,15 @@ pub fn hex(bytes: &[u8]) -> String {
 /// What sets up a network with id `id` to join it: its name, how it is
 /// protected and its password. The name and a WPA3 password go as hex,
 /// which takes any byte; a WPA2 password goes in quotes, which the
-/// supplicant takes up to the last one, so a quote inside it stays.
-pub fn network_commands(id: u32, ssid: &[u8], security: Security, password: &str) -> Result<Vec<String>> {
+/// supplicant takes up to the last one, so a quote inside it stays. A
+/// network `hidden`, which answers only a scan that names it, is scanned
+/// for by name.
+pub fn network_commands(id: u32, ssid: &[u8], security: Security, password: &str, hidden: bool) -> Result<Vec<String>> {
     let set = |name: &str, value: String| format!("SET_NETWORK {id} {name} {value}");
     let mut commands = vec![set("ssid", hex(ssid))];
+    if hidden {
+        commands.push(set("scan_ssid", "1".into()));
+    }
     let psk = || -> Result<String> {
         ensure!((8..=63).contains(&password.len()), "a WPA2 password is 8 to 63 characters long");
         ensure!(password.bytes().all(|b| (32..=126).contains(&b)), "a WPA2 password is printable ASCII");
@@ -396,20 +401,22 @@ mod tests {
 
     #[test]
     fn a_network_is_set_up_with_its_name_and_password_written_as_the_supplicant_takes_them() {
-        let wpa2 = network_commands(0, "家".as_bytes(), Security::Psk, "pass\"word").unwrap();
+        let wpa2 = network_commands(0, "家".as_bytes(), Security::Psk, "pass\"word", false).unwrap();
         assert_eq!(
             wpa2,
             ["SET_NETWORK 0 ssid e5aeb6", "SET_NETWORK 0 key_mgmt WPA-PSK WPA-PSK-SHA256", "SET_NETWORK 0 psk \"pass\"word\""]
         );
-        let wpa3 = network_commands(2, b"x", Security::Sae, "short").unwrap();
+        let wpa3 = network_commands(2, b"x", Security::Sae, "short", false).unwrap();
         assert_eq!(wpa3[1..], ["SET_NETWORK 2 key_mgmt SAE", "SET_NETWORK 2 sae_password 73686f7274", "SET_NETWORK 2 ieee80211w 2"]);
-        let both = network_commands(1, b"x", Security::PskSae, "12345678").unwrap();
+        let both = network_commands(1, b"x", Security::PskSae, "12345678", false).unwrap();
         assert!(both.contains(&"SET_NETWORK 1 psk \"12345678\"".to_string()));
         assert!(both.contains(&"SET_NETWORK 1 sae_password 3132333435363738".to_string()));
-        assert_eq!(network_commands(0, b"x", Security::Open, "").unwrap()[1], "SET_NETWORK 0 key_mgmt NONE");
-        assert!(network_commands(0, b"x", Security::Psk, "1234567").is_err(), "a WPA2 password is 8 characters at least");
-        assert!(network_commands(0, b"x", Security::Psk, "密码密码密码密码").is_err(), "a WPA2 password is ASCII");
-        assert!(network_commands(0, b"x", Security::Wep, "12345").is_err());
+        assert_eq!(network_commands(0, b"x", Security::Open, "", false).unwrap()[1], "SET_NETWORK 0 key_mgmt NONE");
+        assert!(network_commands(0, b"x", Security::Psk, "1234567", false).is_err(), "a WPA2 password is 8 characters at least");
+        assert!(network_commands(0, b"x", Security::Psk, "密码密码密码密码", false).is_err(), "a WPA2 password is ASCII");
+        assert!(network_commands(0, b"x", Security::Wep, "12345", false).is_err());
+        let hidden = network_commands(3, b"x", Security::Open, "", true).unwrap();
+        assert_eq!(hidden, ["SET_NETWORK 3 ssid 78", "SET_NETWORK 3 scan_ssid 1", "SET_NETWORK 3 key_mgmt NONE"]);
     }
 
     #[test]

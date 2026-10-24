@@ -264,6 +264,8 @@ pub struct Tone {
     /// The round button at the end of a WLAN network's row, and its arrow.
     pub round: Rgba,
     pub round_mark: Rgba,
+    /// The arrows after the value of a row that opens a list of choices.
+    pub updown: Rgba,
 }
 
 impl Tone {
@@ -279,6 +281,7 @@ impl Tone {
             faint: p.chevron,
             round: p.round,
             round_mark: p.round_mark,
+            updown: p.updown,
         }
     }
 
@@ -294,6 +297,7 @@ impl Tone {
             faint: h.chevron,
             round: t.pal.round,
             round_mark: t.pal.round_mark,
+            updown: t.pal.updown,
         }
     }
 
@@ -302,7 +306,18 @@ impl Tone {
     pub fn lit(t: &Theme) -> Tone {
         let (accent, white) = (t.pal.accent, Rgba::rgb(255, 255, 255));
         let at = |k: f32| crate::color::mix(accent, white, k);
-        Tone { card: accent, text: white, sub: at(0.6), value: at(0.6), chevron: white, caption: at(0.6), faint: at(0.35), round: at(0.18), round_mark: white }
+        Tone {
+            card: accent,
+            text: white,
+            sub: at(0.6),
+            value: at(0.6),
+            chevron: white,
+            caption: at(0.6),
+            faint: at(0.35),
+            round: at(0.18),
+            round_mark: white,
+            updown: at(0.6),
+        }
     }
 }
 
@@ -1144,6 +1159,9 @@ pub enum Trail<'a> {
     /// A WLAN network's padlock, where joining it takes a password, and the
     /// round button that opens its details.
     Network { locked: bool },
+    /// The value chosen, and the arrows up and down that say the row opens
+    /// a list of choices.
+    Choice(&'a str),
 }
 
 #[derive(Clone, Copy)]
@@ -1216,6 +1234,7 @@ fn layout(c: &Canvas, t: &Theme, f: &Fonts, r: &Row) -> Layout {
         Trail::Network { locked } => {
             m.inner + m.dp(ROUND_D) + m.value_gap + if locked { m.dp(LOCK_GAP + LOCK_W) } else { 0.0 }
         }
+        Trail::Choice(s) => m.dp(UPDOWN_RIGHT + UPDOWN_W + UPDOWN_VALUE_GAP) + m.value_gap + c.text_width(&f.value, s, m.sub_px),
     };
     let text_max = card_w - text_x - trail_w;
     let sub_lines = r.sub.map(|s| wrap(c, &f.body, s, m.sub_px, text_max)).unwrap_or_default();
@@ -1322,7 +1341,94 @@ fn draw_row(c: &mut Canvas, t: &Theme, f: &Fonts, r: &Row, lay: &Layout, top: f3
                 padlock(c, round.x - m.dp(LOCK_GAP + LOCK_W / 2.0), cy, m.dp(LOCK_H), tone.value);
             }
         }
+        Trail::Choice(s) => {
+            let arrows = right - m.dp(UPDOWN_RIGHT);
+            updown(c, t, arrows, cy, tone.updown);
+            let w = c.text_width(&f.value, s, m.sub_px);
+            c.text_vc(&f.value, s, arrows - m.dp(UPDOWN_W + UPDOWN_VALUE_GAP) - w, cy, m.sub_px, tone.value, None);
+        }
     }
+}
+
+// The arrows after the value of a row that opens a list of choices, as the
+// stock rows draw them, in dp: their right end from the card's, how wide
+// and tall each is, how far apart, their stroke, and the room before them.
+const UPDOWN_RIGHT: f32 = 16.0;
+const UPDOWN_W: f32 = 10.0;
+const UPDOWN_H: f32 = 5.67;
+const UPDOWN_GAP: f32 = 4.0;
+const UPDOWN_STROKE: f32 = 1.6;
+const UPDOWN_VALUE_GAP: f32 = 9.0;
+
+/// The arrow up over the arrow down, their right end at `right`, the pair
+/// centred on `cy`.
+fn updown(c: &mut Canvas, t: &Theme, right: f32, cy: f32, color: Rgba) {
+    let m = &t.m;
+    let (w, h, gap, sw) = (m.dp(UPDOWN_W), m.dp(UPDOWN_H), m.dp(UPDOWN_GAP), m.dp(UPDOWN_STROKE));
+    let (x0, mid, x1) = (right - w + sw / 2.0, right - w / 2.0, right - sw / 2.0);
+    let (up, down) = (cy - gap / 2.0 - h, cy + gap / 2.0);
+    let (top, foot) = (sw / 2.0, h - sw / 2.0);
+    c.line(x0, up + foot, mid, up + top, sw, color);
+    c.line(mid, up + top, x1, up + foot, sw, color);
+    c.line(x0, down + top, mid, down + foot, sw, color);
+    c.line(mid, down + foot, x1, down + top, sw, color);
+}
+
+// The stock list of choices opened from a row, in dp: how wide it is, how
+// far in from the row's right end and down from its top it opens, its
+// corners, the room above and below its choices, each choice's height,
+// where the words start and how big they are, the tick's centre from the
+// right edge and its stroke, and the deviation of the blur that makes its
+// shadow.
+const CHOICES_W: f32 = 286.0;
+const CHOICES_RIGHT: f32 = 16.7;
+const CHOICES_DROP: f32 = 15.0;
+const CHOICES_RADIUS: f32 = 24.0;
+const CHOICES_PAD: f32 = 8.0;
+const CHOICE_H: f32 = 43.67;
+const CHOICE_TEXT_X: f32 = 20.3;
+const CHOICE_PX: f32 = 16.0;
+const TICK_RIGHT: f32 = 31.0;
+const TICK_STROKE: f32 = 2.0;
+const CHOICES_SHADOW: f32 = 10.7;
+
+/// A list of choices open over the page from `row`, as the stock one
+/// opens: a card lifted off the page, its choices one under another, the
+/// one `chosen` in the accent with a tick, and the one `held` darkened
+/// while a finger holds it. Returns each choice's rect.
+#[allow(clippy::too_many_arguments)]
+pub fn choices(c: &mut Canvas, t: &Theme, f: &Fonts, row: Rect, names: &[&str], chosen: Option<usize>, held: Option<usize>) -> Vec<Rect> {
+    let m = &t.m;
+    let (w, item, pad, r) = (m.dp(CHOICES_W), m.dp(CHOICE_H), m.dp(CHOICES_PAD), m.dp(CHOICES_RADIUS));
+    let (x, y) = (row.x + row.w - m.dp(CHOICES_RIGHT) - w, row.y + m.dp(CHOICES_DROP));
+    let h = pad * 2.0 + item * names.len() as f32;
+    let rects: Vec<Rect> = (0..names.len()).map(|i| Rect::new(x, y + pad + item * i as f32, w, item)).collect();
+    c.shadow_round_rect(x, y, w, h, r, m.dp(CHOICES_SHADOW), t.pal.shadow);
+    let (popup, darker) = (t.pal.popup, over(t.pal.row_press, t.pal.popup));
+    let held = held.map(|i| rects[i]);
+    c.fill_round_rect_graded(x, y, w, h, r, &|fy| match held {
+        Some(b) if fy >= b.y && fy < b.y + b.h => darker,
+        _ => popup,
+    });
+    for (i, (name, at)) in names.iter().zip(&rects).enumerate() {
+        let cy = at.y + at.h / 2.0;
+        let ink = if chosen == Some(i) { t.pal.accent } else { t.pal.text };
+        c.text_vc(&f.heading, name, x + m.dp(CHOICE_TEXT_X), cy, m.dp(CHOICE_PX), ink, None);
+        if chosen == Some(i) {
+            tick(c, t, x + w - m.dp(TICK_RIGHT), cy, t.pal.accent);
+        }
+    }
+    rects
+}
+
+/// The tick beside the choice taken, its ink centred on (`cx`, `cy`).
+fn tick(c: &mut Canvas, t: &Theme, cx: f32, cy: f32, color: Rgba) {
+    let m = &t.m;
+    let at = |dx: f32, dy: f32| (cx + m.dp(dx), cy + m.dp(dy));
+    let (a, b, z) = (at(-5.0, 0.0), at(-1.17, 4.1), at(5.27, -3.83));
+    let sw = m.dp(TICK_STROKE);
+    c.line(a.0, a.1, b.0, b.1, sw, color);
+    c.line(b.0, b.1, z.0, z.1, sw, color);
 }
 
 /// The round button at the end of a WLAN network's row `row`, which opens
@@ -2394,6 +2500,31 @@ mod tests {
             assert!((x - 100.0).abs() <= 3.0 && (y - 100.0).abs() <= 3.0, "{icon:?} centred: ({x}, {y})");
             assert!(right - l <= 66.0 && bottom - top <= 66.0, "{icon:?} within 22 dp: {}x{}", right - l, bottom - top);
         }
+    }
+
+    #[test]
+    fn a_list_of_choices_opens_where_the_stock_one_does_and_ticks_the_one_taken() {
+        // The 17 Ultra, three pixels a dp: its row of protections spans
+        // 621 to 797, the arrows after its value 1086..1116 by 685..731,
+        // and its list 256..1114 from 666, the tick 1003..1040 by 741..771.
+        let t = Theme::light(1200, 2608, 3.0);
+        let f = crate::font::bundled();
+        let mut c = Canvas::filled(1200, 2608, t.pal.bg);
+        let rows = list(&mut c, &t, &f, 621.0, &[Row::new("安全性").trail(Trail::Choice("无"))]);
+        let row = rows.rows[0];
+        let arrows = ink_box(&c, Rect::new(1070.0, row.y + 55.0, 55.0, row.h - 110.0), |p| p[0] < 252);
+        let (cy, w, h) = ((arrows.1 + arrows.3) / 2.0, arrows.2 - arrows.0, arrows.3 - arrows.1);
+        assert!((arrows.2 - 1116.0).abs() <= 1.0 && (w - 30.0).abs() <= 1.5 && (h - 46.0).abs() <= 1.5, "arrows {arrows:?}");
+        assert!((cy - (row.y + row.h / 2.0)).abs() <= 1.0, "the arrows centred on the row: {cy}");
+        let stock = Rect::new(36.0, 621.0, 1128.0, 176.0);
+        let picks = choices(&mut c, &t, &f, stock, &["无", "WPA/WPA2-Personal", "WPA3-Personal"], Some(0), None);
+        let (first, last) = (picks[0], picks[2]);
+        assert!((first.x - 256.0).abs() <= 0.5 && (first.x + first.w - 1114.0).abs() <= 0.5, "across {}..{}", first.x, first.x + first.w);
+        assert!((first.y - 690.0).abs() <= 0.5 && (last.y + last.h - 1083.0).abs() <= 0.5, "down {}..{}", first.y, last.y + last.h);
+        let tick = ink_box(&c, Rect::new(990.0, first.y, 60.0, first.h), |p| p[2] > 200 && p[0] < 150);
+        let centre = ((tick.0 + tick.2) / 2.0, (tick.1 + tick.3) / 2.0);
+        assert!((centre.0 - 1021.4).abs() <= 1.5 && (centre.1 - 755.9).abs() <= 1.5, "the tick centred where the stock one is: {centre:?}");
+        assert!((tick.2 - tick.0 - 37.0).abs() <= 2.0 && (tick.3 - tick.1 - 30.0).abs() <= 2.0, "and as big: {tick:?}");
     }
 
     #[test]

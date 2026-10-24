@@ -58,11 +58,12 @@ pub fn spots(t: &Theme, frame: &Frame) -> Vec<Spot> {
         out.extend(strip);
     }
     // The pattern grid is drawn on with a finger; the keys join its dots
-    // one by one.
+    // one by one. Off a list open over the page a touch closes it, which
+    // the keys do going back.
     let mut page: Vec<Spot> = frame
         .hits
         .iter()
-        .filter(|h| h.action != Action::Pattern)
+        .filter(|h| !matches!(h.action, Action::Pattern | Action::CloseChoices))
         .map(|h| Spot { stop: Stop::Hit(h.action), group: Group::Page, rect: h.rect })
         .collect();
     if let Some((cx, cy, span)) = frame.pattern {

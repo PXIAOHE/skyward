@@ -107,6 +107,9 @@ pub enum Screen {
     WlanPassword,
     /// The network joined, and the address and the rest it gave.
     WlanNetwork,
+    /// A network added by hand: its name, how it is protected and its
+    /// password, typed on the screen's keyboard.
+    WlanAdd,
 }
 
 /// A password typed, which what is printed of it leaves out: the recovery
@@ -119,6 +122,31 @@ impl std::fmt::Debug for Secret {
         write!(f, "Secret({} characters)", self.0.chars().count())
     }
 }
+
+/// A network being added by hand, as its page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Adding {
+    pub name: String,
+    pub security: Security,
+    /// What the keyboard types into.
+    pub field: Field,
+    /// The protections to choose from are open over the page.
+    pub choosing: bool,
+}
+
+/// A text field of the page that adds a network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Name,
+    Password,
+}
+
+/// How a network added by hand can be protected, in the order the stock
+/// list gives them: those the recovery joins.
+pub const ADDABLE: [Security; 3] = [Security::Open, Security::Psk, Security::Sae];
+
+/// The longest name a network can have, in bytes.
+const SSID_MAX: usize = 32;
 
 /// What turns down a password the protection `security` cannot take.
 fn refused(security: Security, password: &str) -> Option<&'static str> {
@@ -907,6 +935,16 @@ pub enum Action {
     LeaveNetwork,
     /// Look for the networks in range again.
     Rescan,
+    /// Open the page that adds a network by hand.
+    AddNetwork,
+    /// Type into this field of the page that adds a network.
+    TypeInto(Field),
+    /// Open the protections a network added by hand can have.
+    ChooseSecurity,
+    /// Take this protection, and close the list.
+    PickSecurity(Security),
+    /// Close the list open over the page, choosing nothing.
+    CloseChoices,
     /// A control whose work is not wired up yet; touching it says so.
     Unavailable(&'static str),
 }
@@ -1143,9 +1181,11 @@ pub struct State {
     pub code: String,
     /// What is typed in the search field.
     pub search: String,
-    /// The on-screen keyboard's layer, and the key held down on it.
+    /// The on-screen keyboard's layer.
     pub layer: Layer,
-    pub pressed: Option<Cap>,
+    /// The key of the on-screen keyboard, or the choice of a list open over
+    /// the page, a finger holds down.
+    pub held: Option<Action>,
     /// The folder the file manager shows.
     pub files: Folder,
     /// The folder of internal storage a file to install is chosen in, its
@@ -1189,6 +1229,10 @@ pub struct State {
     pub joining: Option<Network>,
     /// The network the details page is of, as it was found.
     pub details: Option<Network>,
+    /// The network the page that adds one is adding.
+    pub adding: Option<Adding>,
+    /// The password typed on the password page or the page that adds a
+    /// network, and whether it shows.
     pub password: String,
     pub show_password: bool,
 }
@@ -1234,7 +1278,7 @@ impl Default for State {
             code: String::new(),
             search: String::new(),
             layer: Layer::Letters,
-            pressed: None,
+            held: None,
             files: Folder::new("/"),
             storage: Folder::new(""),
             usb_drive: None,
@@ -1254,6 +1298,7 @@ impl Default for State {
             wlan: None,
             joining: None,
             details: None,
+            adding: None,
             password: String::new(),
             show_password: false,
         }
@@ -1261,6 +1306,14 @@ impl Default for State {
 }
 
 impl State {
+    /// The key of the on-screen keyboard a finger holds down.
+    pub fn key_held(&self) -> Option<Cap> {
+        match self.held {
+            Some(Action::Type(cap)) => Some(cap),
+            _ => None,
+        }
+    }
+
     /// The folder the list on page `screen` shows: the file manager's, or
     /// a place's to choose a file to install in.
     pub fn folder(&self, screen: Screen) -> &Folder {
@@ -3646,6 +3699,16 @@ impl App {
                 self.state.password.clear();
             }
             Screen::WlanNetwork => self.state.details = None,
+            // A list open over the page closes first.
+            Screen::WlanAdd => {
+                if let Some(a) = self.state.adding.as_mut().filter(|a| a.choosing) {
+                    a.choosing = false;
+                    self.refresh();
+                    return fx;
+                }
+                self.state.adding = None;
+                self.state.password.clear();
+            }
             Screen::FileJob => {
                 if self.state.job.as_ref().is_some_and(|j| j.outcome.is_none()) {
                     self.say("请等待完成或停止后再返回", now);
@@ -4230,6 +4293,41 @@ impl App {
                 return fx;
             }
             Action::Rescan => return vec![Effect::ScanWlan],
+            Action::AddNetwork => {
+                self.state.adding = Some(Adding { name: String::new(), security: Security::Open, field: Field::Name, choosing: false });
+                self.state.password.clear();
+                self.state.show_password = false;
+                self.state.layer = Layer::Letters;
+                self.open(Screen::WlanAdd);
+            }
+            Action::TypeInto(field) => {
+                let a = self.state.adding.as_mut().expect("the fields are on the page that adds a network");
+                if a.field != field {
+                    a.field = field;
+                    self.refresh();
+                }
+            }
+            Action::ChooseSecurity => {
+                self.state.adding.as_mut().expect("the protection is on the page that adds a network").choosing = true;
+                // The page draws the row held down while its list is open.
+                self.row_press = None;
+                self.row_art = None;
+                self.refresh();
+            }
+            Action::PickSecurity(security) => {
+                let a = self.state.adding.as_mut().expect("the protections open on the page that adds a network");
+                a.security = security;
+                a.choosing = false;
+                // With no password to type, the keyboard types the name.
+                if !security.password() {
+                    a.field = Field::Name;
+                }
+                self.refresh();
+            }
+            Action::CloseChoices => {
+                self.state.adding.as_mut().expect("the protections open on the page that adds a network").choosing = false;
+                self.refresh();
+            }
             Action::Unavailable(text) => self.say(text, now),
         }
         Vec::new()
@@ -4242,6 +4340,13 @@ impl App {
             Screen::Decrypt => &mut self.state.code,
             Screen::Rename => &mut self.state.new_name,
             Screen::WlanPassword => &mut self.state.password,
+            Screen::WlanAdd => {
+                let a = self.state.adding.as_mut().expect("the page adds a network");
+                match a.field {
+                    Field::Name => &mut a.name,
+                    Field::Password => &mut self.state.password,
+                }
+            }
             s => panic!("{s:?} has no text field"),
         }
     }
@@ -4443,6 +4548,36 @@ impl App {
                         }
                     }
                 }
+                // So is a name no network can have; the keyboard then types
+                // into the field turned down.
+                Screen::WlanAdd => {
+                    let a = self.state.adding.as_mut().expect("the page adds a network");
+                    let (field, why) = match a.name.len() {
+                        0 => (Field::Name, Some("请输入网络名称".to_string())),
+                        n if n > SSID_MAX => (Field::Name, Some(format!("网络名称不能超过 {SSID_MAX} 个字符"))),
+                        _ if a.security.password() => (Field::Password, refused(a.security, &self.state.password).map(str::to_string)),
+                        _ => (Field::Name, None),
+                    };
+                    match why {
+                        Some(why) => {
+                            if a.field != field {
+                                a.field = field;
+                                self.refresh();
+                            }
+                            self.say(&why, now)
+                        }
+                        None => {
+                            let (name, security) = (a.name.clone(), a.security);
+                            let password = match security.password() {
+                                true => Secret(std::mem::take(&mut self.state.password)),
+                                false => Secret::default(),
+                            };
+                            let mut fx = self.back(now);
+                            fx.push(Effect::JoinWlan { ssid: name.clone().into_bytes(), name, security, password });
+                            return fx;
+                        }
+                    }
+                }
                 other => unreachable!("{other:?} shows no keyboard"),
             },
         }
@@ -4554,7 +4689,7 @@ impl App {
                 // the finger lands on it, if the finger stays.
                 let row = hit
                     .filter(|&(a, r)| self.frame.as_ref().is_some_and(|fr| fr.hits.contains(&Hit { rect: r, action: a })))
-                    .filter(|&(a, r)| row_wide(&t, r) && !matches!(a, Action::Open(Screen::Search) | Action::Confirm(_)))
+                    .filter(|&(a, r)| row_wide(&t, r) && !matches!(a, Action::Open(Screen::Search) | Action::Confirm(_) | Action::TypeInto(_)))
                     .map(|(_, r)| r);
                 self.drag = match hit {
                     Some((Action::Brightness, track)) => {
@@ -4700,20 +4835,21 @@ impl App {
         if self.pressing() != pressing {
             self.dirty = true;
         }
-        // A key of the on-screen keyboard shows held down while the finger
-        // rests on it.
+        // A key of the on-screen keyboard, or a choice of a list open over
+        // the page, shows held down while the finger rests on it.
         let held = match self.drag {
-            Drag::Press { action: Some(Action::Type(cap)), .. } => Some(cap),
+            Drag::Press { action: Some(a @ (Action::Type(_) | Action::PickSecurity(_))), .. } => Some(a),
             _ => None,
         };
-        if held != self.state.pressed {
-            let was = std::mem::replace(&mut self.state.pressed, held);
-            // Only the rows of the key let go and the key held change.
-            let keys: Option<Vec<Rect>> = self.frame.as_ref().and_then(|fr| {
-                [was, held].into_iter().flatten().map(|cap| fr.hits.iter().find(|h| h.action == Action::Type(cap)).map(|h| h.rect)).collect()
-            });
-            match keys {
-                Some(keys) => keys.into_iter().for_each(|r| self.refresh_rows(r.y.floor() as u32, (r.y + r.h).ceil() as u32)),
+        if held != self.state.held {
+            let was = std::mem::replace(&mut self.state.held, held);
+            // Only the rows of what is let go and what is held change.
+            let rects: Option<Vec<Rect>> = self
+                .frame
+                .as_ref()
+                .and_then(|fr| [was, held].into_iter().flatten().map(|a| fr.hits.iter().find(|h| h.action == a).map(|h| h.rect)).collect());
+            match rects {
+                Some(rects) => rects.into_iter().for_each(|r| self.refresh_rows(r.y.floor() as u32, (r.y + r.h).ceil() as u32)),
                 None => self.refresh(),
             }
         }
@@ -7745,9 +7881,9 @@ mod tests {
         let mut app = opened(Screen::Search, &f, &i);
         let (x, y) = spot(&mut app, &f, &i, Action::Type(Cap::Char('q')));
         app.touch(Touch::Down(x, y), &f, 0);
-        assert_eq!(app.state.pressed, Some(Cap::Char('q')));
+        assert_eq!(app.state.key_held(), Some(Cap::Char('q')));
         app.touch(Touch::Up, &f, 0);
-        assert_eq!(app.state.pressed, None);
+        assert_eq!(app.state.held, None);
         assert_eq!(app.state.search, "q");
     }
 
@@ -8330,6 +8466,137 @@ mod tests {
         assert_eq!(app.state.details.as_ref().map(|n| n.name.as_str()), Some("Skyward"));
         app.key(Key::Back, 0);
         assert_eq!(app.state.details, None);
+    }
+
+    #[test]
+    fn a_network_is_added_by_hand_with_its_name_protection_and_password() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.wlan = Some(Wlan { power: Power::On, networks: Vec::new(), joined: None });
+        app.act(Action::Open(Screen::Wlan), 0);
+        tap(&mut app, &f, &i, Action::AddNetwork);
+        assert_eq!(app.screen(), Screen::WlanAdd, "the list ends with adding one, found networks or none");
+        let type_in = |app: &mut App, text: &str| {
+            for ch in text.chars() {
+                tap(app, &f, &i, Action::Type(Cap::Char(ch)));
+            }
+        };
+        assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty());
+        assert_eq!(toast(&app), Some("请输入网络名称"));
+        type_in(&mut app, "attic");
+        let frame = app.frame(&f, &i);
+        assert!(!frame.hits.iter().any(|h| h.action == Action::TypeInto(Field::Password)), "an open network takes no password");
+        // The protections open over the page, which then answers no touch
+        // but closes them.
+        tap(&mut app, &f, &i, Action::ChooseSecurity);
+        let frame = app.frame(&f, &i);
+        assert!(frame.hits.iter().all(|h| matches!(h.action, Action::CloseChoices | Action::PickSecurity(_))));
+        assert!(frame.caret.is_none(), "no cursor shows through the list");
+        let below = (W as f32 / 2.0, H as f32 - 20.0);
+        app.touch(Touch::Down(below.0, below.1), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        let a = app.state.adding.clone().unwrap();
+        assert_eq!((a.name.as_str(), a.security, a.choosing), ("attic", Security::Open, false), "a touch off the list types nothing");
+        tap(&mut app, &f, &i, Action::ChooseSecurity);
+        app.key(Key::Back, 0);
+        assert_eq!((app.screen(), app.state.adding.as_ref().unwrap().choosing), (Screen::WlanAdd, false), "back closes the list first");
+        tap(&mut app, &f, &i, Action::ChooseSecurity);
+        tap(&mut app, &f, &i, Action::PickSecurity(Security::Psk));
+        let a = app.state.adding.clone().unwrap();
+        assert_eq!((a.security, a.choosing, a.field), (Security::Psk, false, Field::Name));
+        // The keyboard types into the field touched.
+        tap(&mut app, &f, &i, Action::TypeInto(Field::Password));
+        type_in(&mut app, "secret");
+        tap(&mut app, &f, &i, Action::TypeInto(Field::Name));
+        assert_eq!((app.state.adding.as_ref().unwrap().name.as_str(), app.state.password.as_str()), ("attic", "secret"));
+        assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty());
+        assert_eq!(toast(&app), Some("请输入 8 到 63 位密码"));
+        assert_eq!(app.state.adding.as_ref().unwrap().field, Field::Password, "the keyboard types into the field turned down");
+        tap(&mut app, &f, &i, Action::Type(Cap::Show(Layer::Digits)));
+        type_in(&mut app, "12");
+        let fx = tap(&mut app, &f, &i, Action::Type(Cap::Enter));
+        let join = Effect::JoinWlan { ssid: b"attic".to_vec(), name: "attic".into(), security: Security::Psk, password: Secret("secret12".into()) };
+        assert_eq!(fx, vec![join]);
+        assert_eq!(app.screen(), Screen::Wlan, "the WLAN page shows how joining goes");
+        assert_eq!((app.state.adding.as_ref(), app.state.password.as_str()), (None, ""), "nothing typed is kept");
+    }
+
+    #[test]
+    fn a_network_added_by_hand_is_turned_down_for_a_name_too_long_and_joined_open_without_its_password() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.wlan = Some(Wlan { power: Power::On, networks: vec![network("cafe", -72, Security::Open)], joined: None });
+        app.act(Action::Open(Screen::Wlan), 0);
+        tap(&mut app, &f, &i, Action::AddNetwork);
+        tap(&mut app, &f, &i, Action::ChooseSecurity);
+        tap(&mut app, &f, &i, Action::PickSecurity(Security::Sae));
+        tap(&mut app, &f, &i, Action::TypeInto(Field::Password));
+        tap(&mut app, &f, &i, Action::Type(Cap::Char('x')));
+        tap(&mut app, &f, &i, Action::ChooseSecurity);
+        tap(&mut app, &f, &i, Action::PickSecurity(Security::Open));
+        assert_eq!(app.state.adding.as_ref().unwrap().field, Field::Name, "with the password field gone, the keyboard types the name");
+        for _ in 0..33 {
+            tap(&mut app, &f, &i, Action::Type(Cap::Char('a')));
+        }
+        assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty());
+        assert_eq!(toast(&app), Some("网络名称不能超过 32 个字符"));
+        tap(&mut app, &f, &i, Action::Type(Cap::Backspace));
+        let fx = tap(&mut app, &f, &i, Action::Type(Cap::Enter));
+        let name = "a".repeat(32);
+        assert_eq!(fx, vec![Effect::JoinWlan { ssid: name.clone().into_bytes(), name, security: Security::Open, password: Secret::default() }]);
+    }
+
+    #[test]
+    fn the_keys_open_a_list_of_choices_take_one_and_close_it_going_back() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.wlan = Some(Wlan { power: Power::On, networks: Vec::new(), joined: None });
+        app.act(Action::Open(Screen::Wlan), 0);
+        app.act(Action::AddNetwork, 0);
+        app.frame(&f, &i);
+        light_on(&mut app, &f, &i, Stop::Hit(Action::ChooseSecurity));
+        press(&mut app, Key::Power, 0);
+        assert!(app.state.adding.as_ref().unwrap().choosing);
+        let t = app.theme();
+        let stops: Vec<Stop> = focus::spots(&t, app.frame(&f, &i)).iter().map(|s| s.stop).collect();
+        let pick = |s| Stop::Hit(Action::PickSecurity(s));
+        assert_eq!(stops, [Stop::Back, pick(Security::Open), pick(Security::Psk), pick(Security::Sae)], "only the list and back");
+        light_on(&mut app, &f, &i, pick(Security::Sae));
+        press(&mut app, Key::Power, 0);
+        let a = app.state.adding.clone().unwrap();
+        assert_eq!((a.security, a.choosing), (Security::Sae, false));
+        light_on(&mut app, &f, &i, Stop::Hit(Action::ChooseSecurity));
+        press(&mut app, Key::Power, 0);
+        press(&mut app, Key::Back, 0);
+        assert_eq!((app.screen(), app.state.adding.as_ref().unwrap().choosing), (Screen::WlanAdd, false));
+    }
+
+    #[test]
+    fn a_choice_shows_held_down_while_touched() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.wlan = Some(Wlan { power: Power::On, networks: Vec::new(), joined: None });
+        app.act(Action::Open(Screen::Wlan), 0);
+        tap(&mut app, &f, &i, Action::AddNetwork);
+        tap(&mut app, &f, &i, Action::ChooseSecurity);
+        let wpa3 = Action::PickSecurity(Security::Sae);
+        let rect = app.frame(&f, &i).hits.iter().find(|h| h.action == wpa3).unwrap().rect;
+        // Clear of the words, where only the list's own colour shows.
+        let at = |app: &mut App| {
+            let c = &app.frame(&f, &i).canvas;
+            let (x, y) = ((rect.x + rect.w) as u32 - 20, (rect.y + rect.h / 2.0) as u32);
+            let k = ((y - c.held().start) * c.w + x) as usize * 4;
+            Rgba::rgb(c.data[k], c.data[k + 1], c.data[k + 2])
+        };
+        let t = app.theme();
+        assert_eq!(at(&mut app), t.pal.popup);
+        let (x, y) = spot(&mut app, &f, &i, wpa3);
+        app.touch(Touch::Down(x, y), &f, 0);
+        assert_eq!(app.state.held, Some(wpa3));
+        assert_eq!(at(&mut app), over(t.pal.row_press, t.pal.popup));
+        app.touch(Touch::Up, &f, 0);
+        assert_eq!(app.state.held, None);
+        assert_eq!(app.state.adding.as_ref().unwrap().security, Security::Sae);
     }
 
     #[test]

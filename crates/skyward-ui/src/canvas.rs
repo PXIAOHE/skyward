@@ -586,6 +586,44 @@ impl Canvas {
         }
     }
 
+    /// The soft shadow a rounded rectangle lifted off the page casts: its
+    /// shape blurred by a Gaussian of deviation `sigma`, in `color` where
+    /// the shape is whole. Only what lies outside the rectangle is laid,
+    /// the rectangle being drawn over the rest: half the colour at its
+    /// edge, fading with the distance from it as the blur has it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shadow_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, sigma: f32, color: Rgba) {
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        let (hx, hy) = (w / 2.0, h / 2.0);
+        let r = r.min(hx).min(hy);
+        let reach = SHADOW_REACH * sigma;
+        let (x0, x1) = self.columns((x - reach).floor() as i32, (x + w + reach).ceil() as i32);
+        let (y0, y1) = self.rows((y - reach).floor() as i32, (y + h + reach).ceil() as i32);
+        if x0 >= x1 {
+            return;
+        }
+        // How strong it is a whole number of pixels out, read between.
+        let spread = sigma * std::f32::consts::SQRT_2;
+        let level: Vec<f32> = (0..reach.ceil() as usize + 2).map(|d| 0.5 * erfc(d as f32 / spread)).collect();
+        for py in y0..y1 {
+            let fy = py as f32 + 0.5;
+            let qy = (fy - cy).abs() - (hy - r);
+            // The pixels wholly inside are left for the rectangle.
+            let (a, b) = match round_reach(hx, r, qy, -0.5) {
+                Some(inner) => centred(cx, inner, x0, x1),
+                None => (x1, x1),
+            };
+            for px in (x0..a).chain(b..x1) {
+                let d = rr_sdf(px as f32 + 0.5, fy, cx, cy, hx, hy, r).max(0.0);
+                if d >= reach {
+                    continue;
+                }
+                let (i, k) = (d as usize, d.fract());
+                self.blend(px, py, color, level[i] + (level[i + 1] - level[i]) * k);
+            }
+        }
+    }
+
     /// The outline of a rounded rectangle, `t` wide, centred on its edge.
     /// Each row looks only at the pixels the outline crosses on either side
     /// of the middle it leaves clear, and writes straight those it covers
@@ -1081,6 +1119,18 @@ fn near_segment(x0: f32, y0: f32, x1: f32, y1: f32, y: f32, reach: f32) -> Optio
     [end(x0, y0), end(x1, y1), side].into_iter().flatten().reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
 }
 
+/// How many deviations out a shadow reaches: beyond, under a 255th of its
+/// colour is left.
+const SHADOW_REACH: f32 = 3.0;
+
+/// The complementary error function, for `x` from 0 on, by a rational
+/// approximation good to 1.5e-7.
+fn erfc(x: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let poly = t * (0.254_829_6 + t * (-0.284_496_74 + t * (1.421_413_8 + t * (-1.453_152 + t * 1.061_405_4))));
+    poly * (-x * x).exp()
+}
+
 fn rr_sdf(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
     let dx = (px - cx).abs() - (hx - r);
     let dy = (py - cy).abs() - (hy - r);
@@ -1092,6 +1142,24 @@ fn rr_sdf(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shadow_fades_out_from_its_edge_as_the_stock_list_of_choices_casts_one() {
+        assert!((erfc(0.0) - 1.0).abs() < 1e-6);
+        assert!((erfc(1.0) - 0.157_299_2).abs() < 1e-6);
+        assert!(erfc(3.0) < 3e-5);
+        // The 17 Ultra's list over its grey page, 3 pixels a dp: the grey
+        // it took on 0, 10, 20 … 60 pixels out from its right edge.
+        let mut c = Canvas::filled(400, 300, Rgba::rgb(243, 243, 243));
+        c.shadow_round_rect(50.0, 50.0, 200.0, 200.0, 72.0, 32.1, Rgba::rgb(0, 0, 0).with_alpha(27));
+        let stock = [230.0, 233.1, 235.9, 238.2, 239.9, 241.0, 242.2];
+        for (k, want) in stock.into_iter().enumerate() {
+            let got = c.px(250 + 10 * k as i32, 150).expect("on the canvas")[0] as f32;
+            assert!((got - want).abs() <= 1.5, "{} px out: {got}, the stock list {want}", 10 * k);
+        }
+        assert_eq!(c.px(150, 150).expect("on the canvas")[0], 243, "inside is left for the rectangle");
+        assert_eq!(c.px(360, 150).expect("on the canvas")[0], 243, "it reaches no further than three deviations");
+    }
 
     /// A canvas two pixels wide whose row k is grey k.
     fn graded(h: u32) -> Canvas {

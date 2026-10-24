@@ -1,7 +1,7 @@
 use crate::app::{
-    Action, BackupAt, BackupEnd, BackupJob, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, FileKind, FileOp, FileTask, Folder,
-    Frame, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe,
-    BACKUP_PARTS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
+    Action, BackupAt, BackupEnd, BackupJob, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, Field, FileKind, FileOp, FileTask,
+    Folder, Frame, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe,
+    ADDABLE, BACKUP_PARTS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -96,6 +96,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Wlan => wlan(cx),
         Screen::WlanPassword => wlan_password(cx),
         Screen::WlanNetwork => wlan_network(cx),
+        Screen::WlanAdd => wlan_add(cx),
     }
 }
 
@@ -554,7 +555,7 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
     let bottom = match keys {
         Keys::Letters => {
             let top = m.h as f32 - widgets::keyboard_height(t);
-            let caps = widgets::keyboard(&mut c, t, f, top, s.layer, s.pressed, "解密");
+            let caps = widgets::keyboard(&mut c, t, f, top, s.layer, s.key_held(), "解密");
             if !checking {
                 out.extend(caps.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
             }
@@ -572,7 +573,7 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
         }
         Keys::Digits => {
             let top = m.h as f32 - widgets::keypad_height(t);
-            let caps = widgets::keypad(&mut c, t, f, top, s.pressed);
+            let caps = widgets::keypad(&mut c, t, f, top, s.key_held());
             if !checking {
                 out.extend(caps.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
             }
@@ -1131,7 +1132,7 @@ pub fn wipe(cx: &Ctx) -> Frame {
 /// is, and its keys as touch targets.
 fn keyboard_hits(c: &mut Canvas, t: &Theme, f: &Fonts, s: &State, enter: &str, out: &mut Vec<Hit>) -> f32 {
     let top = t.m.h as f32 - widgets::keyboard_height(t);
-    let keys = widgets::keyboard(c, t, f, top, s.layer, s.pressed, enter);
+    let keys = widgets::keyboard(c, t, f, top, s.layer, s.key_held(), enter);
     out.extend(keys.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
     top
 }
@@ -1639,30 +1640,33 @@ pub fn wlan(cx: &Ctx) -> Frame {
             out.push(Hit { rect: rescan, action: Action::Rescan });
             y = below;
             if others.is_empty() {
-                y = widgets::footnote(&mut c, t, f, y - t.m.dp(10.0), "正在搜索附近的 WLAN");
-            } else {
-                let tags: Vec<Option<String>> = others.iter().map(|(_, n)| fmt::band_tag(n.bands)).collect();
-                let rows: Vec<Row> = others
-                    .iter()
-                    .zip(&tags)
-                    .map(|((_, n), tag)| {
-                        let row = Row::new(&n.name).fan(fmt::signal_level(n.signal)).trail(Trail::Network { locked: locked(n.security) });
-                        match tag {
-                            Some(tag) => row.tag(tag),
-                            None => row,
-                        }
-                    })
-                    .collect();
-                let list = widgets::list(&mut c, t, f, y, &rows);
-                let picks: Vec<Action> = others.iter().map(|(k, _)| Action::JoinNetwork(*k)).collect();
-                out.extend(hits(&list.rows, &picks));
-                // The round buttons come after the rows they sit on, and a
-                // touch finds the last control under it.
-                for (rect, (k, _)) in list.rows.iter().zip(&others) {
-                    out.push(Hit { rect: widgets::round_button(t, *rect), action: Action::NetworkDetails(*k) });
-                }
-                y = list.bottom;
+                y = widgets::footnote(&mut c, t, f, y - t.m.dp(10.0), "正在搜索附近的 WLAN") + t.m.card_gap;
             }
+            let tags: Vec<Option<String>> = others.iter().map(|(_, n)| fmt::band_tag(n.bands)).collect();
+            let mut rows: Vec<Row> = others
+                .iter()
+                .zip(&tags)
+                .map(|((_, n), tag)| {
+                    let row = Row::new(&n.name).fan(fmt::signal_level(n.signal)).trail(Trail::Network { locked: locked(n.security) });
+                    match tag {
+                        Some(tag) => row.tag(tag),
+                        None => row,
+                    }
+                })
+                .collect();
+            // The list ends with adding a network by hand, as the stock one
+            // does.
+            rows.push(Row::new("添加网络").tint(t.pal.accent).trail(Trail::None));
+            let list = widgets::list(&mut c, t, f, y, &rows);
+            let mut picks: Vec<Action> = others.iter().map(|(k, _)| Action::JoinNetwork(*k)).collect();
+            picks.push(Action::AddNetwork);
+            out.extend(hits(&list.rows, &picks));
+            // The round buttons come after the rows they sit on, and a touch
+            // finds the last control under it.
+            for (rect, (k, _)) in list.rows.iter().zip(&others) {
+                out.push(Hit { rect: widgets::round_button(t, *rect), action: Action::NetworkDetails(*k) });
+            }
+            y = list.bottom;
         }
     }
     Frame::new(t, fit(c, t, y), out, "WLAN", top)
@@ -1683,6 +1687,52 @@ pub fn wlan_password(cx: &Ctx) -> Frame {
     out.extend(hits(&show.rows, &[Action::Toggle(Switch::ShowPassword)]));
     keyboard_hits(&mut c, t, f, s, "连接", &mut out);
     Frame { caret: Some(caret), ..Frame::new(t, c, out, "输入密码", top) }
+}
+
+/// A network added by hand: its name, how it is protected, its password
+/// where it takes one with the switch that shows it, and the keyboard,
+/// which types into the field touched. The protections open over the page
+/// from their row, which alone then answers a touch.
+pub fn wlan_add(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let m = &t.m;
+    let a = s.adding.as_ref().expect("the page adds a network");
+    let mut c = page(cx);
+    let mut out = Vec::new();
+    let top = m.content_top;
+    let field = |y: f32| Rect::new(m.margin, y, m.w as f32 - m.margin * 2.0, m.dp(56.0));
+    let y = widgets::section_first(&mut c, t, f, top, "网络名称");
+    let (below, mut caret) = widgets::text_field(&mut c, t, f, y, &a.name);
+    out.push(Hit { rect: field(y), action: Action::TypeInto(Field::Name) });
+    // Held down while its list is open, as the stock row stays.
+    let tone = if a.choosing { Tone::page(&t.pressed()) } else { Tone::page(t) };
+    let protection = [Row::new("安全性").trail(Trail::Choice(fmt::security(a.security)))];
+    let security = widgets::list_toned(&mut c, t, f, below + m.card_gap, &protection, &tone);
+    out.extend(hits(&security.rows, &[Action::ChooseSecurity]));
+    if a.security.password() {
+        let y = widgets::section(&mut c, t, f, security.bottom, "密码");
+        let shown = if s.show_password { s.password.clone() } else { "•".repeat(s.password.chars().count()) };
+        let (below, typed) = widgets::text_field(&mut c, t, f, y, &shown);
+        out.push(Hit { rect: field(y), action: Action::TypeInto(Field::Password) });
+        if a.field == Field::Password {
+            caret = typed;
+        }
+        let show = widgets::list(&mut c, t, f, below + m.card_gap, &[Row::new("显示密码").trail(Trail::Switch(s.show_password))]);
+        out.extend(hits(&show.rows, &[Action::Toggle(Switch::ShowPassword)]));
+    }
+    keyboard_hits(&mut c, t, f, s, "连接", &mut out);
+    if !a.choosing {
+        return Frame { caret: Some(caret), ..Frame::new(t, c, out, "添加网络", top) };
+    }
+    // A touch anywhere off the list closes it.
+    out.clear();
+    out.push(Hit { rect: Rect::new(0.0, 0.0, m.w as f32, m.h as f32), action: Action::CloseChoices });
+    let names = ADDABLE.map(fmt::security);
+    let chosen = ADDABLE.iter().position(|&p| p == a.security);
+    let held = ADDABLE.iter().position(|&p| s.held == Some(Action::PickSecurity(p)));
+    let list = widgets::choices(&mut c, t, f, security.rows[0], &names, chosen, held);
+    out.extend(hits(&list, &ADDABLE.map(Action::PickSecurity)));
+    Frame::new(t, c, out, "添加网络", top)
 }
 
 /// A network's details, in the stock page's grid: for the one chosen, how
