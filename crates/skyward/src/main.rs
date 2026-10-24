@@ -509,7 +509,25 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
-    services::start(&services, libraries.as_deref())
+    services::start(&services, libraries.as_deref())?;
+    agree_on_the_notes_key(&registering)
+}
+
+/// Have the parts of the secure world that keep keys agree on the key they
+/// sign their notes with, where the phone has any that do. Android's key
+/// service has them agree as the phone starts; until they have, the
+/// credential service cannot write a note the key service will take, and
+/// the keys the phone guards behind a screen lock stay unusable.
+#[cfg(target_os = "android")]
+fn agree_on_the_notes_key(registered: &[String]) -> Result<()> {
+    let interface = format!("{}/", skyward_crypto::sharedsecret::INTERFACE);
+    let names: Vec<String> = registered.iter().filter(|n| n.starts_with(&interface)).cloned().collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    let binder = skyward_binder::driver::Binder::open()?;
+    let agreed = skyward_crypto::sharedsecret::agree(&binder, &names)?;
+    skyward_sys::kmsg(&format!("{agreed} of the secure world agreed on the key it signs its notes with"))
 }
 
 /// A slot of the credential service that belongs to no user, which the
