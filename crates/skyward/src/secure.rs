@@ -175,15 +175,23 @@ fn image(file: &Path) -> Result<(u64, u64)> {
 }
 
 /// Give the phone's service directory the descriptions of the services in
-/// `wanted`. The directory turns away a hardware service the running system
-/// does not describe, and a recovery starts up describing only the few
-/// services of its own. Only the descriptions that are needed are taken:
-/// the directory reads the whole of its description directory at once, and
-/// one file it cannot make sense of leaves it describing nothing.
-pub fn publish_descriptions(wanted: &[String]) -> Result<usize> {
+/// `wanted`, and the description files in `files`, which the phone keeps
+/// apart from the rest. The directory turns away a hardware service the
+/// running system does not describe, and a recovery starts up describing
+/// only the few services of its own. Only the descriptions that are needed
+/// are taken: the directory reads the whole of its description directory
+/// at once, and one file it cannot make sense of leaves it describing
+/// nothing.
+pub fn publish_descriptions(wanted: &[String], files: &[String]) -> Result<usize> {
     let into = Path::new(RECOVERY_DESCRIPTIONS);
     fs::create_dir_all(into).with_context(|| format!("make {}", into.display()))?;
     let mut copied = 0;
+    let mut take = |from: &Path, text: &str| -> Result<()> {
+        let name = from.file_name().with_context(|| format!("{} names no file", from.display()))?;
+        fs::write(into.join(name), as_framework(text)).with_context(|| format!("copy {}", from.display()))?;
+        copied += 1;
+        Ok(())
+    };
     for dir in DESCRIPTIONS {
         let listing = match fs::read_dir(dir) {
             Ok(listing) => listing,
@@ -196,13 +204,14 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<usize> {
                 continue;
             }
             let text = fs::read_to_string(&from).with_context(|| format!("read {}", from.display()))?;
-            if !wanted.iter().any(|w| describes(&text, w)) {
-                continue;
+            if wanted.iter().any(|w| describes(&text, w)) {
+                take(&from, &text)?;
             }
-            let name = from.file_name().expect("a listed file has a name");
-            fs::write(into.join(name), as_framework(&text)).with_context(|| format!("copy {}", from.display()))?;
-            copied += 1;
         }
+    }
+    for file in files {
+        let from = Path::new(file);
+        take(from, &fs::read_to_string(from).with_context(|| format!("read {file}"))?)?;
     }
     let rewritten = say_framework(into)?;
     if copied > 0 || rewritten > 0 {

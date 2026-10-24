@@ -15,7 +15,166 @@ diagonal = 6.9
 corner_radius = 170
 
 [modules]
-sources = ["vendor_boot", "vendor_dlkm", "vendor"]
+sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
+# The touchscreen: Synaptics TouchComm over SPI, behind Xiaomi's touch
+# layer, whose input device the touches come in on. Its firmware is read
+# from /odm/firmware.
+load = ["synaptics_tcm2"]
 
-[decrypt]
-weaver = ["goodix", "thales"]
+# The driver resets the touch controller as it connects to it, and the
+# controller comes back sending only raw frames, which the system's touch
+# algorithm turns into touches: Xiaomi's touch feature service runs it from
+# /odm/lib64/libtouchreport.so, and a recovery runs none of it. Told
+# through Xiaomi's touch layer, the driver has the controller report
+# positions itself, and has it do so again each time it wakes the
+# controller.
+[touch]
+writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
+
+# The firmware of the WLAN chip, and the apps the secure world loads for the
+# secure element's service, are on the modem partition, which the phone
+# mounts at /vendor/firmware_mnt and its own recovery leaves unmounted.
+[firmware]
+partition = "modem"
+
+# The persist partition, which the phone mounts at /mnt/vendor/persist and
+# its own recovery leaves unmounted. The secure world keeps its own files
+# there, through a listener qseecomd registers: among them what the key
+# service needs to use a key that cannot be rolled back, such as the one
+# guarding each user's secret. The WLAN's MAC address is there as well.
+[partitions]
+mounted = ["persist"]
+
+# The secure world reaches back into Android through the listeners this
+# daemon registers; without them the key service cannot use any key.
+[[service]]
+path = "/vendor/bin/qseecomd"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_property = "vendor.sys.listeners.registered"
+
+# The opener the secure world's apps are reached through by programs that
+# speak to them as GlobalPlatform's TEE client does, which loads those apps
+# from /vendor/firmware_mnt/image as they are first asked for.
+[[service]]
+path = "/vendor/bin/hlosminkdaemon"
+libraries = ["/system/lib64", "/vendor/lib64"]
+
+# The key service, which is the only thing that can use the keys the phone
+# wrapped in hardware. The same program serves the secure clock and the
+# shared secret, which the phone describes apart from it.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+registers = [
+    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
+    "android.hardware.security.secureclock.ISecureClock/default",
+    "android.hardware.security.sharedsecret.ISharedSecret/default",
+]
+
+# The credential service: it is what the secure world has check the secret
+# behind a screen lock, and the only thing that can hand out the note the
+# key service wants before it will use a key that secret guards.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper-rust-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
+
+# The weaver, in the secure element of the builds whose odm properties set
+# ro.special_edition: Goodix's, behind its own service, which reaches it
+# through the secure world. Every user's secret is bound to a slot of it,
+# with a screen lock or without. The phone's init puts the description of
+# what the secure element's service registers in place of an empty one on
+# those builds. Both programs load the vendor partition's libhardware,
+# which asks for the installed system's libvndksupport, and that for its
+# libdl_android, of which only the copy in bootstrap is a file rather than
+# a link into a bundle; the installed system's libraries come last, so only
+# these two are taken from them. The other builds keep their weaver in a
+# Thales secure element, which its service reaches only through Android's
+# own OMAPI service, and a recovery runs none of Android's framework.
+[[service]]
+path = "/odm/bin/hw/android.hardware.secure_element-service-goodix"
+libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+ready_service = "android.hardware.secure_element.ISecureElement/eSE2"
+registers = ["vendor.goodix.hardware.secure_element_aidl.IGdxEse/default"]
+description = "/odm/etc/secure_element-service-goodixsp.xml"
+when = { property = "ro.special_edition", value = "true" }
+
+[[service]]
+path = "/odm/bin/hw/android.hardware.weaver-service"
+libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+ready_service = "android.hardware.weaver.IWeaver/default"
+when = { property = "ro.special_edition", value = "true" }
+
+# The boot control, which says which slot the bootloader starts next and
+# switches it, writing where the bootloader reads it. It comes last: the
+# phone is usable without it.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot-service.qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.boot.IBootControl/default"
+
+# WLAN: Qualcomm's Peach on PCIe, driven by qca_cld3_peach_v2 over the
+# cnss2 platform driver. The vendor's cfg80211 asks for rfkill, one of the
+# kernel's own modules in system_dlkm, which the system loads before any of
+# the vendor's and a recovery leaves out. Once fs_ready is written, cnss2
+# powers the chip up and loads its firmware from the modem partition, and
+# wlan0 appears. The driver reads its settings and the MAC address through
+# the firmware loader, from links the vendor partition keeps in its own
+# firmware folder, into the vendor partition and into persist.
+# wpa_supplicant runs on the recovery's own libraries before the vendor
+# partition's: the vendor partition carries its own copies of the lowest of
+# them, and a program loading those would not be understood by the
+# recovery's service directory.
+[wlan]
+modules = ["rfkill", "qca_cld3_peach_v2"]
+writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+
+# The update server the stock updater of the Chinese system asks.
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+# qcom-hv-haptics. Waveform 0 is the click: 4 FIFO samples at the motor's
+# resonant period, 22220 µs in all (the driver's dump of its predefined
+# effects as it probes).
+[haptics]
+click = 0
+click_ms = 22
+
+# The partitions a backup of the baseband and EFS takes: the baseband's
+# settings, with the IMEI, and the sensors' calibration. And what of the
+# data partition a backup leaves out because the secure world keeps it in
+# step with itself: its own storage, its apps' data, that of Xiaomi's own
+# trusted environment, the secure element's state and the fingerprint
+# templates.
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+data_skipped = [
+    "vendor/tzstorage",
+    "vendor/qtee",
+    "vendor/mitee",
+    "vendor/goodix",
+    "vendor/fingerprint",
+    "vendor/fpdata",
+    "vendor/misc/mi_fp",
+]
+
+# Where the phone's own programs keep logs in the data partition: the
+# system's, the minidumps, what Xiaomi's log manager keeps of each part of
+# the phone, and what the modem, Wi-Fi and Bluetooth leave when they crash.
+[wipe]
+logs = [
+    "/data/miuilog",
+    "/data/vendor/diag",
+    "/data/vendor/bsplog",
+    "/data/vendor/log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ramdump_ssr",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]

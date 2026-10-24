@@ -106,7 +106,8 @@ enum Cmd {
     /// merge where it has not begun, and follow it to its end.
     #[cfg(target_os = "android")]
     Merge,
-    /// Keep the configuration's services running until stopped.
+    /// Keep the configuration's services that this phone runs going until
+    /// stopped.
     #[cfg(target_os = "android")]
     Services {
         #[arg(long, default_value = "/skyward/device.toml")]
@@ -165,6 +166,10 @@ enum Cmd {
     /// credential and changes nothing.
     #[cfg(target_os = "android")]
     Gatekeeper,
+    /// Say what the phone's weaver says of itself, which reads no slot and
+    /// changes nothing.
+    #[cfg(target_os = "android")]
+    Weaver,
     /// Open the data partition with the key the phone keeps for it, check
     /// it and mount it writable as the phone does, and open each user's
     /// files that open; the owner's shared storage then shows at /sdcard.
@@ -257,7 +262,10 @@ fn main() -> Result<()> {
         Cmd::Umount => skyward_vab::unmount_partitions(booted_slot()?),
         #[cfg(target_os = "android")]
         Cmd::Services { config } => {
-            services::start(&DeviceConfig::load(&config)?.services, secure::libraries()?.as_deref())?;
+            let props = skyward_info::installed_props(booted_slot()?)?;
+            let mut services = DeviceConfig::load(&config)?.services;
+            services.retain(|s| s.runs_on(&props));
+            services::start(&services, secure::libraries()?.as_deref())?;
             loop {
                 std::thread::park();
             }
@@ -323,9 +331,16 @@ fn main() -> Result<()> {
         }
         #[cfg(target_os = "android")]
         Cmd::Gatekeeper => {
-            let hardware = skyward_binder::driver::Binder::hardware()?;
-            let gatekeeper = skyward_crypto::gatekeeper::Gatekeeper::open(&hardware)?;
+            let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
+            let gatekeeper = skyward_crypto::gatekeeper::Gatekeeper::open(&binder, &hardware)?;
             println!("the credential service answers for {}", gatekeeper.serves()?);
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Weaver => {
+            let binder = skyward_binder::driver::Binder::open()?;
+            let c = skyward_crypto::weaver::Weaver::open(&binder)?.config()?;
+            println!("the weaver has {} slots, keeps keys of {} bytes and values of {} bytes", c.slots, c.key_bytes, c.value_bytes);
             Ok(())
         }
         #[cfg(target_os = "android")]
@@ -429,18 +444,34 @@ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
     skyward_modules::load(&dirs, names)
 }
 
-/// Load the configured kernel modules and start the phone's own programs,
-/// both read from the partitions just mounted: on the 13 Ultra, the
-/// touchscreen driver and the touch processing.
+/// Make the phone's firmware reachable to its drivers, mount the partitions
+/// its own programs and drivers use where it mounts them, load the
+/// configured kernel modules and start the phone's own programs, read from
+/// the partitions just mounted: on the 13 Ultra, the touchscreen driver and
+/// the touch processing. Of the programs the configuration names, only
+/// those this phone's build of the hardware runs are started.
 #[cfg(target_os = "android")]
 fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     let nodes = skyward_sys::ueventd::apply()?;
     skyward_sys::kmsg(&format!("{nodes} device nodes given the owner their phone describes"))?;
-    adopt_installed_version(slot)?;
+    let props = skyward_info::installed_props(slot)?;
+    adopt_installed_version(&props)?;
+    let services: Vec<_> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().collect();
+    // The drivers ask for their firmware by name, and the kernel looks only
+    // in folders of its own unless told to pass on what it does not find
+    // there to ueventd, which looks in the recovery's firmware folders.
+    std::fs::write(FIRMWARE_FALLBACK, "1").with_context(|| format!("write 1 to {FIRMWARE_FALLBACK}"))?;
+    if let Some(firmware) = &cfg.firmware {
+        mount_firmware(&firmware.partition)?;
+    }
+    for name in &cfg.partitions.mounted {
+        let at = skyward_block::fstab::mount(name)?;
+        skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
+    }
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }
-    let hardware: Vec<String> = cfg.services.iter().filter_map(|s| s.ready_hardware_service.clone()).collect();
+    let hardware: Vec<String> = services.iter().filter_map(|s| s.ready_hardware_service.clone()).collect();
     if !hardware.is_empty() {
         secure::prepare_hardware_directory(&hardware)?;
         skyward_sys::kmsg("the directory for the phone's hardware services can run")?;
@@ -450,33 +481,65 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     // registers whenever the WLAN is turned on, and the directory can no
     // longer start again by then: the key service registers with it below,
     // and nothing would register that again.
-    let mut registering: Vec<String> = cfg.services.iter().filter_map(|s| s.ready_service.clone()).collect();
+    let mut registering: Vec<String> = services.iter().flat_map(|s| s.ready_service.iter().chain(&s.registers).cloned()).collect();
     registering.extend(cfg.wlan.iter().map(|w| w.service.clone()));
-    if !registering.is_empty() {
-        let described = secure::publish_descriptions(&registering)?;
+    let files: Vec<String> = services.iter().filter_map(|s| s.description.clone()).collect();
+    if !registering.is_empty() || !files.is_empty() {
+        let described = secure::publish_descriptions(&registering, &files)?;
         skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;
     }
     let libraries = secure::libraries()?;
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
-    services::start(&cfg.services, libraries.as_deref())
+    services::start(&services, libraries.as_deref())
+}
+
+/// The switch that has the kernel pass the firmware requests it cannot
+/// answer itself on to ueventd.
+#[cfg(target_os = "android")]
+const FIRMWARE_FALLBACK: &str = "/proc/sys/kernel/firmware_config/force_sysfs_fallback";
+
+/// Where the firmware partition is shown as well: the recovery's own
+/// ueventd looks in the image folder inside it.
+#[cfg(target_os = "android")]
+const FIRMWARE_SHOWN: &str = "/firmware";
+
+/// Mount the partition holding the firmware images where and as the
+/// phone's own table mounts it, which is where the loaders of the secure
+/// world's apps look for theirs, and show it where the recovery's ueventd
+/// looks for the rest. Both stay when the recovery service starts again.
+#[cfg(target_os = "android")]
+fn mount_firmware(partition: &str) -> Result<()> {
+    let shown = Path::new(FIRMWARE_SHOWN);
+    if skyward_block::mount::is_mount_point(shown)? {
+        return Ok(());
+    }
+    let at = skyward_block::fstab::mount(partition)?;
+    std::fs::create_dir_all(shown).with_context(|| format!("make {}", shown.display()))?;
+    skyward_block::mount::bind(&at, shown)?;
+    skyward_sys::kmsg(&format!("{partition} is mounted on {}, shown at {}", at.display(), shown.display()))
 }
 
 /// What the phone's own secure services read to tell the secure world which
-/// build is running. A recovery image carries its own, older build's values;
-/// the secure world then sees keys the installed system made as made under
-/// a build it does not know, and refuses them. The recovery's property files
-/// leave these two out so that they can be set here instead.
+/// build is running: the system's version and patch level, and the vendor
+/// partition's patch level. A recovery image carries its own, older build's
+/// values; the secure world then sees keys the installed system made as
+/// made under a build it does not know, and refuses them. The recovery's
+/// property files leave these out so that they can be set here instead.
 #[cfg(target_os = "android")]
-const BUILD_VERSION: [&str; 2] = ["ro.build.version.release", "ro.build.version.security_patch"];
+const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
 
+/// Set each of [`BUILD_VERSION`] to the installed system's value. An earlier
+/// run of the recovery service may have set it already, and init sets such
+/// a property only once.
 #[cfg(target_os = "android")]
-fn adopt_installed_version(slot: skyward_vab::Slot) -> Result<()> {
-    let props = skyward_info::installed_props(slot)?;
+fn adopt_installed_version(props: &std::collections::HashMap<String, String>) -> Result<()> {
     for name in BUILD_VERSION {
         let value = props.get(name).with_context(|| format!("the installed system says no {name}"))?;
-        skyward_sys::set_prop(name, value)?;
+        if skyward_sys::prop(name).as_ref() != Some(value) {
+            skyward_sys::set_prop(name, value)?;
+        }
         skyward_sys::kmsg(&format!("{name} is the installed system's {value}"))?;
     }
     Ok(())
@@ -650,8 +713,8 @@ fn slot() -> Result<()> {
     #[cfg(target_os = "android")]
     {
         use skyward_vab::boot::BootControl;
-        let binder = skyward_binder::driver::Binder::hardware()?;
-        let opened = BootControl::open(&binder);
+        let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
+        let opened = BootControl::open(&binder, &hardware);
         match opened {
             Ok(control) => {
                 let slots = control.slots()?;

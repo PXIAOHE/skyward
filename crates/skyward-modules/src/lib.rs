@@ -4,13 +4,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Where a module source's files are in the recovery: the vendor_boot
-/// ramdisk's modules under /lib/modules, and the vendor_dlkm and vendor
-/// partitions where they are mounted.
+/// ramdisk's modules under /lib/modules, the vendor_dlkm and vendor
+/// partitions where they are mounted, and the kernel's own modules in
+/// system_dlkm, which it also keeps in one folder.
 pub fn source_dir(source: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(match source {
         "vendor_boot" => "/lib/modules",
         "vendor_dlkm" => "/vendor_dlkm/lib/modules",
         "vendor" => "/vendor/lib/modules",
+        "system_dlkm" => "/system_dlkm/flatten/lib/modules",
         _ => bail!("unknown module source {source:?}"),
     }))
 }

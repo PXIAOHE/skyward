@@ -8,6 +8,8 @@ use crate::gatekeeper::Gatekeeper;
 use crate::keymint::KeyMint;
 use crate::keystore::{StoredKey, Unwrap};
 use crate::token::Token;
+use crate::user::Bound;
+use crate::weaver::Weaver;
 use anyhow::{Context, Result};
 use skyward_binder::driver::Binder;
 use skyward_block::dm::Target;
@@ -211,14 +213,15 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
     let mut closed = Vec::new();
     let mut owner = None;
     for user in open_users(service)? {
-        match protector(user)?.lock {
+        let protector = protector(user)?;
+        match protector.lock {
             None => {
                 let note = open_user_files(service, user, None, None)?;
                 if user == OWNER {
                     owner = note;
                 }
             }
-            Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user), why: None }),
+            Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
         }
     }
     Ok(Opening { mounted, closed: open_made_up(service, closed, owner.as_ref()) })
@@ -254,10 +257,10 @@ fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: Option<&Token>) -
         .collect()
 }
 
-/// Whether the phone made up the credential of `user`, keeping it behind
-/// the owner's.
-fn made_up(user: u32) -> bool {
-    Path::new(MADE_UP).join(user.to_string()).join(MADE_UP_FILE).is_file()
+/// Whether the phone made up the credential of `user`, whose protector is
+/// `id`, keeping it behind the owner's.
+fn made_up(user: u32, id: &str) -> bool {
+    made_up_record(user, id).is_some()
 }
 
 /// Where the phone keeps the key for the files that are readable before
@@ -340,10 +343,18 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
         )?),
         false => None,
     };
+    // A phone with a weaver records the slot it keeps for the blob; any
+    // other keeps the bytes the blob is bound to beside it.
+    let slot = dir.join(format!("{id}.weaver"));
+    let bound = match slot.exists() {
+        true => Bound::Weaver(crate::user::weaver_slot(&std::fs::read(&slot).with_context(|| format!("read {}", slot.display()))?)?),
+        false => Bound::Secdiscardable(
+            std::fs::read(dir.join(format!("{id}.secdis"))).with_context(|| format!("read what the blob in {} is bound to", dir.display()))?,
+        ),
+    };
     Ok(crate::user::Protector {
         blob: std::fs::read(dir.join(format!("{id}.spblob"))).with_context(|| format!("read the blob in {}", dir.display()))?,
-        secdiscardable: std::fs::read(dir.join(format!("{id}.secdis")))
-            .with_context(|| format!("read what the blob in {} is bound to", dir.display()))?,
+        bound,
         id: id.clone(),
         lock,
     })
@@ -372,25 +383,40 @@ fn blobs(user: u32) -> PathBuf {
 const MADE_UP: &str = "/data/system/users";
 const MADE_UP_FILE: &str = "gatekeeper.profile.key";
 
-/// The name the key service keeps that key under.
+/// The name the key service keeps that key under, the user's number after
+/// it.
 const MADE_UP_KEY: &str = "profile_key_name_decrypt_";
 
-/// The credential a phone made up for `user`, where it made one up. A
-/// phone does this for the users it keeps beside the owner's own, such as
-/// the one that holds a second copy of an app: nobody ever types their
-/// credential, so the phone writes one down for itself and keeps it behind
-/// the owner's. `owner` is the note the owner's credential gave.
-fn made_up_credential(service: &KeyMint, user: u32, owner: Option<&Token>) -> Result<Option<Vec<u8>>> {
-    let file = Path::new(MADE_UP).join(user.to_string()).join(MADE_UP_FILE);
-    if !file.is_file() {
-        return Ok(None);
+/// HyperOS keeps the file beside the blob of the user's protector instead,
+/// named after the protector with this ending, and puts the protector's
+/// name after the user's number in the key's name too.
+const MADE_UP_BESIDE_BLOB: &str = "profile_pwd";
+
+/// The file holding the credential the phone made up for `user`, whose
+/// protector is `id`, and the name of the key it is encrypted under: where
+/// Android keeps them, or where HyperOS does. `None` where it made none up.
+fn made_up_record(user: u32, id: &str) -> Option<(PathBuf, String)> {
+    let android = Path::new(MADE_UP).join(user.to_string()).join(MADE_UP_FILE);
+    if android.is_file() {
+        return Some((android, format!("{MADE_UP_KEY}{user}")));
     }
+    let hyperos = blobs(user).join(format!("{id}.{MADE_UP_BESIDE_BLOB}"));
+    hyperos.is_file().then(|| (hyperos, format!("{MADE_UP_KEY}{user}.{id}")))
+}
+
+/// The credential a phone made up for `user`, whose protector is `id`,
+/// where it made one up. A phone does this for the users it keeps beside
+/// the owner's own, such as the one that holds a second copy of an app:
+/// nobody ever types their credential, so the phone writes one down for
+/// itself and keeps it behind the owner's. `owner` is the note the owner's
+/// credential gave.
+fn made_up_credential(service: &KeyMint, user: u32, id: &str, owner: Option<&Token>) -> Result<Option<Vec<u8>>> {
+    let Some((file, alias)) = made_up_record(user, id) else { return Ok(None) };
     let stored = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
     if stored.len() < NONCE_BYTES + TAG_BYTES {
         anyhow::bail!("{} is {} bytes, too few to hold a credential", file.display(), stored.len());
     }
     let (nonce, body) = stored.split_at(NONCE_BYTES);
-    let alias = format!("{MADE_UP_KEY}{user}");
     let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &alias)?;
     let credential = service.gcm_decrypt(&held, &[], nonce, body, owner).with_context(|| {
         format!("open the credential the phone made up for user {user}, which is kept behind the owner's own")
@@ -412,29 +438,43 @@ const TAG_BYTES: usize = 16;
 /// shows at /sdcard.
 fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Option<Token>> {
     let protector = protector(user)?;
-    let (stretched, note) = match &protector.lock {
+    let stretched = match &protector.lock {
         Some(lock) => {
-            let typed = match made_up_credential(service, user, owner)? {
+            let typed = match made_up_credential(service, user, &protector.id, owner)? {
                 Some(made_up) => made_up,
                 None => credential
                     .with_context(|| format!("user {user} has set a screen lock, and their files do not open without it"))?
                     .to_vec(),
             };
-            let stretched = lock.stretched(&typed).context("stretch the credential")?;
-            // The key holding this user's secret is guarded by the screen
-            // lock, so the secure world has to be shown the credential
-            // itself before it will use that key.
-            let hardware = Binder::hardware()?;
-            let note = Gatekeeper::open(&hardware)?.verify(
+            lock.stretched(&typed).context("stretch the credential")?
+        }
+        None => crate::user::stretched_without_credential(),
+    };
+    let (secret, note) = match (&protector.bound, &protector.lock) {
+        // The weaver checks the credential itself, and gives back the value
+        // the secret is bound to only for the right one. The key holding
+        // the secret is then guarded by nothing else.
+        (Bound::Weaver(slot), _) => {
+            let binder = Binder::open()?;
+            let weaver = Weaver::open(&binder)?;
+            let key = crate::user::weaver_key(&stretched, weaver.config()?.key_bytes)?;
+            let value = weaver.read(*slot, &key)?;
+            (crate::user::weaver_protector_secret(&stretched, &value), None)
+        }
+        // The key holding this user's secret is guarded by the screen lock,
+        // so the secure world has to be shown the credential itself before
+        // it will use that key.
+        (Bound::Secdiscardable(secdiscardable), Some(lock)) => {
+            let (binder, hardware) = (Binder::open()?, Binder::hardware()?);
+            let note = Gatekeeper::open(&binder, &hardware)?.verify(
                 TYPED_SLOT + user,
                 &lock.enrolled,
                 &crate::user::gatekeeper_password(&stretched),
             )?;
-            (stretched, Some(note))
+            (crate::user::protector_secret(&stretched, secdiscardable), Some(note))
         }
-        None => (crate::user::stretched_without_credential(), None),
+        (Bound::Secdiscardable(secdiscardable), None) => (crate::user::protector_secret(&stretched, secdiscardable), None),
     };
-    let stretched = &stretched[..];
     let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &protector.key_alias())?;
     let content = crate::user::content(&protector.blob)?;
     if content.len() < NONCE_BYTES + TAG_BYTES {
@@ -444,7 +484,6 @@ fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owne
     let inner = service
         .gcm_decrypt(&held, &[], nonce, body, note.as_ref())
         .context("open what the secure world holds the user's blob closed with")?;
-    let secret = crate::user::protector_secret(stretched, &protector.secdiscardable);
     let synthetic_password = crate::user::open_inner(&secret, &inner)?;
     let file_secret = crate::user::file_secret(&synthetic_password);
 
@@ -473,9 +512,9 @@ fn secret_note(user: u32, synthetic_password: &[u8]) -> Result<Option<Token>> {
         return Ok(None);
     }
     let enrolled = std::fs::read(&handle).with_context(|| format!("read {}", handle.display()))?;
-    let hardware = Binder::hardware()?;
+    let (binder, hardware) = (Binder::open()?, Binder::hardware()?);
     let password = crate::user::secret_gatekeeper_password(synthetic_password);
-    let note = Gatekeeper::open(&hardware)?
+    let note = Gatekeeper::open(&binder, &hardware)?
         .verify(user, &enrolled, &password)
         .with_context(|| format!("have the secure world check the secret behind user {user}'s credential"))?;
     Ok(Some(note))

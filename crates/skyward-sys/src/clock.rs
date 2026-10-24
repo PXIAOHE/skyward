@@ -4,7 +4,8 @@ use anyhow::{anyhow, bail, Result};
 /// the real time runs ahead of the phone's real-time clock.
 pub const PERSIST: &str = "/dev/block/by-name/persist";
 
-/// Where the recovery mounts persist, read-only and only while it reads.
+/// Where the recovery mounts persist while it reads, read-only, when it is
+/// not mounted already.
 pub const MOUNT: &str = "/skyward/persist";
 
 /// The time daemon's offset for the time of day, relative to persist's root:
@@ -38,11 +39,20 @@ pub fn set_from_rtc() -> Result<u64> {
     use anyhow::Context;
     use std::fs;
     use std::path::Path;
-    let mount = Path::new(MOUNT);
-    fs::create_dir_all(mount).with_context(|| format!("make {}", mount.display()))?;
-    skyward_block::mount::mount_ro(Path::new(PERSIST), mount)?;
-    let read = fs::read(mount.join(OFFSET)).with_context(|| format!("read persist's {OFFSET}"));
-    skyward_block::mount::umount(mount)?;
+    // An earlier run of the recovery service may have left persist mounted
+    // where the phone's own programs use it, writable, and then it cannot
+    // be mounted read-only besides.
+    let read = match skyward_block::mount::points_of(skyward_block::devnum(PERSIST)?)?.first() {
+        Some(at) => fs::read(at.join(OFFSET)).with_context(|| format!("read persist's {OFFSET}")),
+        None => {
+            let mount = Path::new(MOUNT);
+            fs::create_dir_all(mount).with_context(|| format!("make {}", mount.display()))?;
+            skyward_block::mount::mount_ro(Path::new(PERSIST), mount)?;
+            let read = fs::read(mount.join(OFFSET)).with_context(|| format!("read persist's {OFFSET}"));
+            skyward_block::mount::umount(mount)?;
+            read
+        }
+    };
     let offset_ms = offset(&read?)?;
     let rtc = fs::read_to_string(RTC).with_context(|| format!("read {RTC}"))?;
     let rtc_s: u64 = rtc.trim().parse().with_context(|| format!("{RTC} holds {rtc:?}"))?;

@@ -149,6 +149,20 @@ impl<'a> KeyMint<'a> {
     /// secure world: what comes back is wrapped again, for the hardware to
     /// unwrap as it reads and writes.
     pub fn ephemeral_storage_key(&self, key: &[u8]) -> Result<Vec<u8>> {
+        match self.convert(key) {
+            Err(e) if status::refused_with(&e) == Some(KEY_REQUIRES_UPGRADE) => {
+                // As with a key that decrypts, the key is renewed for the
+                // firmware running now, as Android's keystore2 renews one
+                // for vold, and the one on disk is left as it is. A storage
+                // key is bound to nothing that has to be given again.
+                let renewed = self.upgrade(key, |call| call.i32(0)).context("renew the storage key for the firmware running now")?;
+                self.convert(&renewed)
+            }
+            converted => converted,
+        }
+    }
+
+    fn convert(&self, key: &[u8]) -> Result<Vec<u8>> {
         let mut call = Parcel::call(DEVICE);
         call.blob(key);
         let reply = self.device.transact(CONVERT_STORAGE_KEY, &call).context("make a storage key for this start")?;
@@ -202,7 +216,9 @@ impl<'a> KeyMint<'a> {
                 // made. Renewing it gives a key for the firmware running
                 // now; the one on disk is left as it is, so nothing of the
                 // phone's own is changed by reading it here.
-                let renewed = self.upgrade(key_blob, app_id, nonce).context("renew the key for the firmware running now")?;
+                let renewed = self
+                    .upgrade(key_blob, |call| Self::gcm_params(call, app_id, nonce))
+                    .context("renew the key for the firmware running now")?;
                 self.begin(&renewed, app_id, nonce, note)?
             }
             Err(e) => return Err(e),
@@ -215,12 +231,20 @@ impl<'a> KeyMint<'a> {
     /// What the key service has to be told to use an AES-GCM key: how it is
     /// used, how long its tag is, what it is bound to, and the nonce it was
     /// encrypted under.
+    ///
+    /// What a key is bound to is named only where there is something: the
+    /// secure world folds the binding into the key it unwraps the key blob
+    /// with, and a binding to nothing named is not the same to it as none
+    /// named at all, so naming an empty one leaves it unable to unwrap a
+    /// key that was made bound to nothing.
     fn gcm_params(call: &mut Parcel, app_id: &[u8], nonce: &[u8]) {
-        call.i32(6);
+        call.i32(if app_id.is_empty() { 5 } else { 6 });
         parameter(call, TAG_BLOCK_MODE, Value::Enum(VALUE_BLOCK_MODE, BLOCK_MODE_GCM));
         parameter(call, TAG_PADDING, Value::Enum(VALUE_PADDING_MODE, PADDING_NONE));
         parameter(call, TAG_MAC_LENGTH, Value::Integer(128));
-        parameter(call, TAG_APPLICATION_ID, Value::Blob(app_id));
+        if !app_id.is_empty() {
+            parameter(call, TAG_APPLICATION_ID, Value::Blob(app_id));
+        }
         parameter(call, TAG_NONCE, Value::Blob(nonce));
         parameter(call, TAG_PURPOSE, Value::Enum(VALUE_KEY_PURPOSE, PURPOSE_DECRYPT));
     }
@@ -258,12 +282,12 @@ impl<'a> KeyMint<'a> {
     }
 
     /// A key for the firmware running now, from one made under an older
-    /// build. What it is bound to has to be given again, or the service
-    /// cannot tell it is the right key.
-    fn upgrade(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
+    /// build. What it is bound to has to be given again, as `params` write
+    /// it, or the service cannot tell it is the right key.
+    fn upgrade(&self, key_blob: &[u8], params: impl FnOnce(&mut Parcel)) -> Result<Vec<u8>> {
         let mut call = Parcel::call(DEVICE);
         call.blob(key_blob);
-        Self::gcm_params(&mut call, app_id, nonce);
+        params(&mut call);
         let reply = self.device.transact(UPGRADE_KEY, &call).context("renew the key")?;
         let mut read = reply.read();
         status::ok(&mut read).context("renew the key")?;

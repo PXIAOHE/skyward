@@ -109,7 +109,8 @@ fn ensure_no_snapshot() -> Result<()> {
 /// mount them, all read-only. Where an update went to the slot and is not
 /// merged yet, each partition it has a snapshot of is mapped through that
 /// snapshot, as the system's own first stage maps it, merging where the
-/// merge is under way.
+/// merge is under way. A partition an earlier run of the recovery service
+/// mounted, and that still shows, is taken as it is.
 pub fn mount_partitions(slot: Slot) -> Result<Mounts> {
     let metadata = Path::new(METADATA);
     if !mount::is_mount_point(metadata)? {
@@ -124,8 +125,13 @@ pub fn mount_partitions(slot: Slot) -> Result<Mounts> {
         _ => None,
     };
 
+    let shown = mounted_partitions(slot)?;
     let mut mounts = Mounts { partitions: Vec::new(), damaged: md.damaged.clone() };
     for p in slot_partitions(&md, slot) {
+        if let Some(m) = shown.iter().find(|m| m.partition == p.name) {
+            mounts.partitions.push(m.clone());
+            continue;
+        }
         let mounted = match through.map(|s| Ok::<_, anyhow::Error>((s, s.live(p)?))).transpose()? {
             Some((s, Some(status))) => mount_snapshot(s, &md, &devices, p, &status, slot)?,
             _ => map_and_mount(p, &devices, slot)?,

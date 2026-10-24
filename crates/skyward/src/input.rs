@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use evdev::raw_stream::RawDevice;
 use evdev::{AbsoluteAxisCode, EventSummary, InputEvent, KeyCode, PropType, SynchronizationCode};
+use skyward_config::Write;
 use skyward_ui::app::{Key, Touch};
 use std::collections::HashSet;
 use std::ffi::CString;
+use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
@@ -181,12 +183,14 @@ pub struct Inputs {
     panel: Option<Panel>,
     buttons: Vec<(PathBuf, RawDevice)>,
     seen: HashSet<PathBuf>,
+    /// What the touchscreen is told each time its panel is taken in.
+    touch_writes: Vec<Write>,
     w: f32,
     h: f32,
 }
 
 impl Inputs {
-    pub fn open(w: u32, h: u32) -> Result<Self> {
+    pub fn open(w: u32, h: u32, touch_writes: Vec<Write>) -> Result<Self> {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
             return Err(io::Error::last_os_error()).context("create inotify instance");
@@ -198,7 +202,8 @@ impl Inputs {
         if unsafe { libc::inotify_add_watch(fd, dir.as_ptr(), libc::IN_CREATE | libc::IN_ATTRIB) } < 0 {
             return Err(io::Error::last_os_error()).context("watch /dev/input");
         }
-        let mut inputs = Inputs { watch, panel: None, buttons: Vec::new(), seen: HashSet::new(), w: w as f32, h: h as f32 };
+        let mut inputs =
+            Inputs { watch, panel: None, buttons: Vec::new(), seen: HashSet::new(), touch_writes, w: w as f32, h: h as f32 };
         inputs.scan()?;
         if inputs.panel.is_none() {
             eprintln!("no touch panel yet; waiting for one to appear under /dev/input");
@@ -208,7 +213,8 @@ impl Inputs {
 
     /// Take in the devices under /dev/input not seen before: the first
     /// direct multitouch device as the panel, and every device with a
-    /// power, volume or back key as buttons.
+    /// power, volume or back key as buttons. A panel taken in is told what
+    /// the device description writes to the touchscreen.
     fn scan(&mut self) -> Result<()> {
         for (path, dev) in evdev::raw_stream::enumerate() {
             if !self.seen.insert(path.clone()) {
@@ -222,6 +228,10 @@ impl Inputs {
             eprintln!("input {}: {:?} direct={direct} multitouch={mt} keys={keys}", path.display(), dev.name().unwrap_or("?"));
             if direct && mt && self.panel.is_none() {
                 self.panel = Some(Panel::new(path, dev)?);
+                for w in &self.touch_writes {
+                    fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
+                    skyward_sys::kmsg(&format!("wrote {} to {} for the touchscreen", w.value, w.path))?;
+                }
             } else if keys {
                 set_nonblocking(dev.as_raw_fd()).context("make buttons non-blocking")?;
                 self.buttons.push((path, dev));

@@ -1,5 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Recovery ramdisk files Skyward reads, adds or changes, as archive paths
@@ -36,10 +37,16 @@ pub struct DeviceConfig {
     pub display: Display,
     #[serde(default)]
     pub modules: Modules,
+    #[serde(default)]
+    pub touch: Touch,
+    #[serde(default)]
+    pub partitions: Partitions,
+    /// Where the firmware the phone's drivers ask for is, on phones whose
+    /// recovery leaves it out of their reach.
+    #[serde(default)]
+    pub firmware: Option<FirmwarePartition>,
     #[serde(default, rename = "service")]
     pub services: Vec<Service>,
-    #[serde(default)]
-    pub decrypt: Decrypt,
     /// The vibration motor's click, on phones that have one.
     #[serde(default)]
     pub haptics: Option<Haptics>,
@@ -90,6 +97,17 @@ pub struct Wlan {
 pub struct Write {
     pub path: String,
     pub value: String,
+}
+
+/// The partition holding the firmware images of a phone's processors and
+/// radios, which their drivers ask the kernel's firmware loader for, and of
+/// the apps its secure world runs. It is mounted where and as the phone's
+/// own table mounts it, and shown as well at the folder whose image folder
+/// the recovery's own ueventd looks in.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FirmwarePartition {
+    /// The partition's name, without the slot it is of.
+    pub partition: String,
 }
 
 /// A file a driver asks the firmware loader for, and where it is.
@@ -207,6 +225,27 @@ impl Default for Modules {
     }
 }
 
+/// The touchscreen, on phones whose touch controller is to be told
+/// something before a recovery can read touches from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Touch {
+    /// What is written once the touchscreen's input device has appeared,
+    /// each value to its file: the driver makes that device as the last
+    /// step of starting the controller.
+    #[serde(default)]
+    pub writes: Vec<Write>,
+}
+
+/// Partitions as the phone itself mounts them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Partitions {
+    /// Partitions the phone's own programs and drivers use where its own
+    /// table mounts them, mounted there as that table says before any of
+    /// them starts.
+    #[serde(default)]
+    pub mounted: Vec<String>,
+}
+
 /// A program from the phone's own partitions that the recovery keeps
 /// running, such as the touch processing of a panel that hands raw frames
 /// to the host.
@@ -225,11 +264,32 @@ pub struct Service {
     /// once it is ready.
     #[serde(default)]
     pub ready_service: Option<String>,
+    /// Services the program registers besides that one, which the
+    /// directory takes only when they are described to it as well.
+    #[serde(default)]
+    pub registers: Vec<String>,
+    /// The file that describes what the program registers, where the phone
+    /// keeps that file apart from its other descriptions, as one its init
+    /// puts in place of another on some builds of the hardware.
+    #[serde(default)]
+    pub description: Option<String>,
     /// A service the program registers with the other directory, the one
     /// the phone's hardware services of the older kind use. It is written
     /// as the interface and then which of them it is.
     #[serde(default)]
     pub ready_hardware_service: Option<String>,
+    /// Where one model's hardware comes in more than one build, the
+    /// installed system's own properties say which build it is: the program
+    /// runs only where the property has this value.
+    #[serde(default)]
+    pub when: Option<Property>,
+}
+
+/// A property of the installed system, and a value it may have.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Property {
+    pub property: String,
+    pub value: String,
 }
 
 impl Service {
@@ -238,12 +298,12 @@ impl Service {
     pub fn uses(&self, dir: &Path) -> bool {
         Path::new(&self.path).starts_with(dir) || self.libraries.iter().any(|l| Path::new(l).starts_with(dir))
     }
-}
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Decrypt {
-    #[serde(default)]
-    pub weaver: Vec<String>,
+    /// Whether the program is this phone's to run, by the installed
+    /// system's own properties.
+    pub fn runs_on(&self, props: &HashMap<String, String>) -> bool {
+        self.when.as_ref().is_none_or(|p| props.get(&p.property) == Some(&p.value))
+    }
 }
 
 fn default_true() -> bool {
@@ -278,6 +338,13 @@ impl DeviceConfig {
         }
         for name in &cfg.backup.efs {
             ensure!(!name.is_empty() && !name.contains('/'), "[backup] efs: {name} is not a partition's name");
+        }
+        if let Some(firmware) = &cfg.firmware {
+            let name = &firmware.partition;
+            ensure!(!name.is_empty() && !name.contains('/'), "[firmware] partition: {name} is not a partition's name");
+        }
+        for name in &cfg.partitions.mounted {
+            ensure!(!name.is_empty() && !name.contains('/'), "[partitions] mounted: {name} is not a partition's name");
         }
         for folder in &cfg.backup.data_skipped {
             let path = Path::new(folder);
@@ -319,6 +386,7 @@ mod tests {
         assert_eq!(cfg.device.os_version_prop, "ro.build.display.id");
         assert_eq!(cfg.modules.sources, default_module_sources());
         assert!(cfg.modules.load.is_empty());
+        assert_eq!((cfg.firmware, cfg.wlan, cfg.update), (None, None, None), "a phone may have none of them");
     }
 
     #[test]
@@ -329,7 +397,90 @@ mod tests {
         assert_eq!(cfg.device.soc.as_deref(), Some("第五代骁龙®8至尊版移动平台"));
         assert_eq!(cfg.display.width, 1200);
         assert_eq!(cfg.display.diagonal, Some(6.9));
-        assert_eq!(cfg.decrypt.weaver, vec!["goodix", "thales"]);
+        assert_eq!(cfg.modules.load, ["synaptics_tcm2"]);
+        assert_eq!(
+            cfg.touch.writes,
+            [Write { path: "/sys/class/touch/touch_dev/enable_touch_raw".into(), value: "0".into() }],
+            "its controller reports positions itself"
+        );
+        assert_eq!(cfg.firmware, Some(FirmwarePartition { partition: "modem".into() }));
+        assert_eq!(cfg.partitions.mounted, ["persist"], "the secure world keeps its own files there");
+        let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/vendor/bin/qseecomd",
+                "/vendor/bin/hlosminkdaemon",
+                "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti",
+                "/vendor/bin/hw/android.hardware.gatekeeper-rust-service-qti",
+                "/odm/bin/hw/android.hardware.secure_element-service-goodix",
+                "/odm/bin/hw/android.hardware.weaver-service",
+                "/vendor/bin/hw/android.hardware.boot-service.qti",
+            ]
+        );
+        for s in &cfg.services {
+            assert_eq!(s.libraries[..2], ["/system/lib64", "/vendor/lib64"], "{} loads the recovery's own libraries first", s.path);
+            assert_eq!(s.ready_hardware_service, None, "{} is of the newer kind", s.path);
+        }
+        let [listeners, opener, keymint, gatekeeper, element, weaver, boot] = &cfg.services[..] else { panic!("seven programs") };
+        assert_eq!(listeners.ready_property.as_deref(), Some("vendor.sys.listeners.registered"));
+        assert_eq!((opener.ready_property.as_ref(), opener.ready_service.as_ref()), (None, None));
+        assert_eq!(keymint.ready_service.as_deref(), Some("android.hardware.security.keymint.IKeyMintDevice/default"));
+        assert!(keymint.registers.contains(&"android.hardware.security.secureclock.ISecureClock/default".to_string()));
+        assert!(keymint.registers.contains(&"android.hardware.security.sharedsecret.ISharedSecret/default".to_string()));
+        assert_eq!(gatekeeper.ready_service.as_deref(), Some("android.hardware.gatekeeper.IGatekeeper/default"));
+        assert_eq!(element.ready_service.as_deref(), Some("android.hardware.secure_element.ISecureElement/eSE2"));
+        assert_eq!(element.description.as_deref(), Some("/odm/etc/secure_element-service-goodixsp.xml"));
+        assert_eq!(weaver.ready_service.as_deref(), Some("android.hardware.weaver.IWeaver/default"));
+        assert_eq!(boot.ready_service.as_deref(), Some("android.hardware.boot.IBootControl/default"));
+        assert_eq!(cfg.haptics, Some(Haptics { click: 0, click_ms: 22 }));
+        assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
+        assert!(cfg.backup.data_skipped.contains(&"vendor/goodix".to_string()));
+        assert!(cfg.wipe.logs.contains(&"/data/vendor/bsplog".to_string()));
+    }
+
+    #[test]
+    fn the_secure_element_of_each_build_runs_on_that_build_alone() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        let runs = |props: &[(&str, &str)]| -> Vec<String> {
+            let props: HashMap<String, String> = props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            cfg.services.iter().filter(|s| s.runs_on(&props)).map(|s| s.path.clone()).collect()
+        };
+        let leica = runs(&[("ro.special_edition", "true")]);
+        assert_eq!(leica.len(), 7);
+        let plain = runs(&[]);
+        assert_eq!(plain.len(), 5);
+        assert!(!plain.iter().any(|p| p.starts_with("/odm/")), "the other builds' weaver cannot run in a recovery");
+        assert_eq!(runs(&[("ro.special_edition", "false")]), plain);
+    }
+
+    #[test]
+    fn a_program_runs_only_where_the_property_has_its_value() {
+        let base = "[device]\ncodename = \"x\"\n[[service]]\npath = \"/odm/bin/a\"\n";
+        let only = DeviceConfig::parse(&format!("{base}when = {{ property = \"ro.sku\", value = \"p\" }}\n")).unwrap();
+        let always = DeviceConfig::parse(base).unwrap();
+        let props = |v: Option<&str>| -> HashMap<String, String> { v.map(|v| ("ro.sku".to_string(), v.to_string())).into_iter().collect() };
+        for (value, runs) in [(Some("p"), true), (Some("q"), false), (None, false)] {
+            assert_eq!(only.services[0].runs_on(&props(value)), runs, "with ro.sku {value:?}");
+            assert!(always.services[0].runs_on(&props(value)));
+        }
+    }
+
+    #[test]
+    fn the_firmware_partition_is_named_plainly() {
+        let base = "[device]\ncodename = \"x\"\n[firmware]\n";
+        assert!(DeviceConfig::parse(&format!("{base}partition = \"modem\"\n")).is_ok());
+        assert!(DeviceConfig::parse(&format!("{base}partition = \"by-name/modem\"\n")).is_err());
+        assert!(DeviceConfig::parse(&format!("{base}partition = \"\"\n")).is_err());
+    }
+
+    #[test]
+    fn a_partition_mounted_as_the_phone_mounts_it_is_named_plainly() {
+        let with = |name: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[partitions]\nmounted = [\"{name}\"]\n"));
+        assert_eq!(with("persist").unwrap().partitions.mounted, ["persist"]);
+        assert!(with("by-name/persist").is_err());
+        assert!(with("").is_err());
+        assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().partitions.mounted.is_empty(), "a phone may need none");
     }
 
     #[test]
@@ -337,8 +488,9 @@ mod tests {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
         assert_eq!(cfg.device.codename, "ishtar");
         assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 560));
-        assert!(cfg.decrypt.weaver.is_empty());
         assert_eq!(cfg.modules.load, ["fts_touch_spi"]);
+        assert!(cfg.touch.writes.is_empty(), "its own touch processing runs");
+        assert!(cfg.firmware.is_none(), "its recovery mounts the modem partition itself");
         let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -405,8 +557,18 @@ mod tests {
         assert_eq!(wlan.interface, "wlan0");
         assert_eq!(wlan.service, "android.hardware.wifi.supplicant.ISupplicant/default");
         assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
-        let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
-        assert_eq!((nezha.wlan, nezha.update), (None, None), "a phone may have neither");
+    }
+
+    #[test]
+    fn nezha_brings_its_wlan_up_from_its_own_partitions() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        assert!(cfg.modules.sources.iter().any(|s| s == "system_dlkm"), "the kernel's own modules are a source");
+        let wlan = cfg.wlan.expect("the 17 Ultra's WLAN is described");
+        assert_eq!(wlan.modules, ["rfkill", "qca_cld3_peach_v2"]);
+        assert_eq!(wlan.writes, [Write { path: "/sys/kernel/cnss/fs_ready".into(), value: "1".into() }]);
+        assert!(wlan.firmware.is_empty(), "the vendor's own links reach its settings and persist's MAC address");
+        assert_eq!(wlan.libraries, ["/system/lib64", "/vendor/lib64"], "the recovery's own libraries come first");
+        assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
     }
 
     #[test]

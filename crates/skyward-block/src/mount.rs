@@ -304,6 +304,11 @@ mod sys {
             unpark(parked).with_context(|| format!("after {e:#}"))?;
             return Err(e);
         }
+        // What shows at `target` now may lack a folder one of them was on,
+        // as the recovery's own root lacks a phone partition's folders.
+        for (home, _) in &parked.moved {
+            fs::create_dir_all(home).with_context(|| format!("make {} to keep the mount there", home.display()))?;
+        }
         unpark(parked)
     }
 

@@ -2,7 +2,7 @@
 //! it holds, and how it is encrypted.
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Where the phone's own partitions keep the table.
 pub const FILES: [&str; 2] = ["/vendor/etc/fstab.qcom", "/odm/etc/fstab.qcom"];
@@ -51,9 +51,8 @@ pub fn entries(text: &str) -> Vec<Entry> {
     out
 }
 
-/// What the phone's own table says about `mount_point`, read from wherever
-/// the table is.
-pub fn read(mount_point: &str) -> Result<Vec<Entry>> {
+/// Every entry of the phone's own table, read from wherever the table is.
+fn table() -> Result<Vec<Entry>> {
     let mut out = Vec::new();
     for file in FILES {
         let text = match std::fs::read_to_string(file) {
@@ -61,23 +60,58 @@ pub fn read(mount_point: &str) -> Result<Vec<Entry>> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("read {file}")),
         };
-        out.extend(entries(&text).into_iter().filter(|e| e.mount_point == mount_point));
+        out.extend(entries(&text));
     }
     Ok(out)
 }
 
-/// The partition an entry names, as it is reachable now. A phone's table
-/// points at its storage controller by a path a recovery need not have.
+/// What the phone's own table says about `mount_point`.
+pub fn read(mount_point: &str) -> Result<Vec<Entry>> {
+    Ok(table()?.into_iter().filter(|e| e.mount_point == mount_point).collect())
+}
+
+/// What the phone's own table says about the partition `name`: the first
+/// entry naming it, by whichever path the table reaches it.
+pub fn partition(name: &str) -> Result<Option<Entry>> {
+    Ok(table()?.into_iter().find(|e| names(e, name)))
+}
+
+/// Whether an entry is of the partition `name`.
+fn names(entry: &Entry, name: &str) -> bool {
+    Path::new(&entry.device).file_name().is_some_and(|n| n == name)
+}
+
+/// The partition an entry names, as it is reachable now: of the booted
+/// slot, where the phone keeps one of it per slot. A phone's table points
+/// at its storage controller by a path a recovery need not have.
 pub fn device(entry: &Entry) -> Result<String> {
-    if Path::new(&entry.device).exists() {
-        return Ok(entry.device.clone());
+    let path = match entry.extras.iter().any(|e| e == "slotselect") {
+        true => format!("{}{}", entry.device, crate::slot_suffix()?.with_context(|| format!("{} is of a slot, and the phone has none", entry.device))?),
+        false => entry.device.clone(),
+    };
+    if Path::new(&path).exists() {
+        return Ok(path);
     }
-    let name = Path::new(&entry.device).file_name().with_context(|| format!("{} names no partition", entry.device))?;
+    let name = Path::new(&path).file_name().with_context(|| format!("{path} names no partition"))?;
     let by_name = Path::new(crate::BY_NAME).join(name);
     if by_name.exists() {
         return Ok(by_name.to_string_lossy().into_owned());
     }
-    anyhow::bail!("neither {} nor {} is here", entry.device, by_name.display())
+    anyhow::bail!("neither {path} nor {} is here", by_name.display())
+}
+
+/// Mount the partition `name` where and as the phone's own table mounts
+/// it, and say where. Whatever shows there already, as what an earlier run
+/// of the recovery service mounted does, is taken as it is.
+pub fn mount(name: &str) -> Result<PathBuf> {
+    let entry = partition(name)?.with_context(|| format!("the phone's own table does not mount {name}"))?;
+    let at = PathBuf::from(&entry.mount_point);
+    if crate::mount::is_mount_point(&at)? {
+        return Ok(at);
+    }
+    std::fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
+    crate::mount::mount(Path::new(&device(&entry)?), &at, &entry.filesystem, &entry.options)?;
+    Ok(at)
 }
 
 #[cfg(test)]
@@ -114,6 +148,17 @@ mod tests {
         assert_eq!(data.extra("keydirectory"), Some("/metadata/vold/metadata_encryption"));
         assert_eq!(data.extra("quota"), None, "a word on its own has no value");
         assert_eq!(data.extra("keydir"), None, "a shorter name is another extra");
+    }
+
+    #[test]
+    fn an_entry_is_of_the_partition_its_path_ends_in() {
+        let modem = &entries(
+            "/dev/block/bootdevice/by-name/modem /vendor/firmware_mnt vfat ro,uid=1000,context=u:object_r:firmware_file:s0 wait,slotselect\n",
+        )[0];
+        assert!(names(modem, "modem"));
+        assert!(!names(modem, "modemfirmware") && !names(modem, "mode"), "a name is matched whole");
+        assert_eq!(modem.options[0], "ro");
+        assert!(modem.extras.iter().any(|e| e == "slotselect"), "one of each slot");
     }
 
     #[test]

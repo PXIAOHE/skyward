@@ -113,12 +113,18 @@ impl Backlight {
     }
 }
 
+/// How a panel's node in the device tree may give its normal maximum: the
+/// property holding it, and the one holding the whole range on the same
+/// scale. The 13 Ultra's panel gives both on a finer scale of its own that
+/// spans the same light as the backlight's range; the 17 Ultra's gives them
+/// on the backlight's own scale.
+const NORMAL_MAX: [(&str, &str); 2] =
+    [("mi,normal-max-brightness-clone", "mi,max-brightness-clone"), ("mi,max-brightness-normal", "qcom,mdss-dsi-bl-max-level")];
+
 /// The raw backlight level, out of `max`, at the panel's normal maximum.
 /// Above it the panel runs in high brightness mode, which the stock system
 /// keeps for strong sunlight and its slider does not reach. The panel the
-/// display driver booted with gives that maximum in the device tree, on a
-/// finer brightness scale of its own that spans the same light as the
-/// backlight's range.
+/// display driver booted with gives that maximum in the device tree.
 fn normal_max(max: u32) -> Result<u32> {
     let param = "/sys/module/msm_drm/parameters/dsi_display0";
     let boot = fs::read_to_string(param).with_context(|| format!("read {param}"))?;
@@ -140,8 +146,11 @@ fn normal_max(max: u32) -> Result<u32> {
         let cell: [u8; 4] = bytes.as_slice().try_into().map_err(|_| anyhow!("{} is not one cell", path.display()))?;
         Ok(u32::from_be_bytes(cell))
     };
-    let normal = cell("mi,normal-max-brightness-clone")?;
-    let full = cell("mi,max-brightness-clone")?;
+    let (normal, full) = NORMAL_MAX
+        .iter()
+        .find(|(normal, _)| node.join(normal).exists())
+        .with_context(|| format!("panel {name} gives its normal maximum as none of {NORMAL_MAX:?}"))?;
+    let (normal, full) = (cell(normal)?, cell(full)?);
     ensure!(normal > 0 && normal <= full, "panel {name}: normal maximum {normal} out of {full}");
     Ok((f64::from(max) * f64::from(normal) / f64::from(full)).round() as u32)
 }
@@ -801,13 +810,15 @@ fn read_folder(path: &Path) -> Result<Vec<FileRow>> {
 
 /// The slot's logical partitions and how each shows now, for the mount page.
 /// A mounted partition is in use when a program holds it, or when one of
-/// `services` runs from it: those are started again from there whenever
-/// they end.
+/// `services` this phone's build of the hardware runs is run from it: those
+/// are started again from there whenever they end.
 fn read_mounts(services: &[Service]) -> Result<Vec<skyward_ui::app::MountRow>> {
     use skyward_ui::app::MountRow;
     let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
     let shown = skyward_vab::mounted_partitions(slot)?;
     let holders = skyward_block::mount::holders()?;
+    let props = skyward_info::installed_props(slot)?;
+    let services: Vec<&Service> = services.iter().filter(|s| s.runs_on(&props)).collect();
     let mut rows = Vec::new();
     for base in skyward_vab::slot_bases(slot)? {
         let point = skyward_vab::mount_point(&base);
@@ -835,8 +846,8 @@ fn read_mounts(services: &[Service]) -> Result<Vec<skyward_ui::app::MountRow>> {
 /// asked.
 fn read_slots() -> Result<skyward_vab::BootSlots, String> {
     let read = || -> Result<skyward_vab::BootSlots> {
-        let binder = skyward_binder::driver::Binder::hardware()?;
-        let control = skyward_vab::boot::BootControl::open(&binder)?;
+        let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
+        let control = skyward_vab::boot::BootControl::open(&binder, &hardware)?;
         control.slots()
     };
     read().map_err(|e| format!("{e:#}"))
@@ -849,8 +860,8 @@ fn set_slot(slot: skyward_vab::Slot) -> Result<skyward_vab::BootSlots, String> {
     let set = || -> Result<skyward_vab::BootSlots> {
         let state = skyward_vab::snapshot_state()?;
         ensure!(state == skyward_vab::SnapshotState::None, "an update is in flight ({state:?}), and it set the slot it needs");
-        let binder = skyward_binder::driver::Binder::hardware()?;
-        let control = skyward_vab::boot::BootControl::open(&binder)?;
+        let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
+        let control = skyward_vab::boot::BootControl::open(&binder, &hardware)?;
         control.set_active(slot)?;
         skyward_sys::kmsg(&format!("slot {} starts next", slot.letter()))?;
         control.slots()
@@ -950,7 +961,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
-    let mut inputs = Inputs::open(w, h)?;
+    let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
     let mut touch_known = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.

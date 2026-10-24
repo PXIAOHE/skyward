@@ -771,7 +771,7 @@ fn main() -> Result<()> {
             app.state.next_slot = Some(Slot::A);
         }),
         ("60-slot-light-unread", Screen::Slot, false, &|app| {
-            app.set_boot_slots(Err("android.hardware.boot@1.2::IBootControl is not running; the phone's boot control has to be started first".into()))
+            app.set_boot_slots(Err("android.hardware.boot.IBootControl/default is not running; the phone's boot control has to be started first".into()))
         }),
         ("70-erase-light", Screen::Erase, false, &|app| {
             app.set_asked(reset_asked());

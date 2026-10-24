@@ -188,16 +188,22 @@ impl SystemProps {
 /// earlier ones.
 const PROP_ORDER: [&str; 8] = ["system", "system_ext", "system_dlkm", "vendor", "vendor_dlkm", "odm_dlkm", "odm", "product"];
 
+/// What init names the properties the bootloader passes.
+const BOOT_PROPS: &str = "ro.boot.";
+
 /// The installed system's build properties from its mounted partitions, in
 /// init's order. Partitions init does not list, such as Xiaomi's mi_ext,
-/// come after the ones it does.
+/// come after the ones it does. Init has the properties the bootloader
+/// passes before it reads any of these, and a file may import another named
+/// after them, as Xiaomi's odm imports what each hardware version sets; so
+/// they come first here too, the same in a recovery as in the system.
 pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
     let base = |m: &skyward_vab::Mounted| -> String {
         m.partition.strip_suffix(slot.suffix()).expect("mounted partitions carry the slot suffix").to_string()
     };
     let mut parts = skyward_vab::mounted_partitions(slot)?;
     parts.sort_by_key(|m| PROP_ORDER.iter().position(|b| *b == base(m)).unwrap_or(PROP_ORDER.len()));
-    let mut props = HashMap::new();
+    let mut props: HashMap<String, String> = skyward_sys::props(BOOT_PROPS).into_iter().collect();
     for m in &parts {
         let files: &[&str] = match base(m).as_str() {
             "system" => &["system/build.prop"],

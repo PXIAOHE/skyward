@@ -6,7 +6,7 @@
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -17,7 +17,12 @@ const GATEKEEPER: &[u8] = b"user-gk-authentication";
 const SECRET_GATEKEEPER: &[u8] = b"sp-gk-authentication";
 const PROTECTOR_SECRET: &[u8] = b"application-id";
 const FILE_KEY: &[u8] = b"fbe-key";
+const WEAVER_KEY: &[u8] = b"weaver-key";
+const WEAVER_VALUE: &[u8] = b"weaver-pwd";
 const CONTEXT: &[u8] = b"android-synthetic-password-personalization-context";
+
+/// The only layout a phone writes the number of a weaver slot in.
+const WEAVER_SLOT_LAYOUT: u8 = 1;
 
 /// What stands in for a credential on a user who has set none.
 const NO_CREDENTIAL: &[u8] = b"default-password";
@@ -45,8 +50,9 @@ pub struct Protector {
     pub id: String,
     /// The blob itself, as the phone wrote it.
     pub blob: Vec<u8>,
-    /// The bytes whose erasure makes the blob unopenable.
-    pub secdiscardable: Vec<u8>,
+    /// What the secret that opens the blob takes besides what the user
+    /// knows.
+    pub bound: Bound,
     /// What the phone recorded about the screen lock the user set, where
     /// one is set. A user who has set none has nothing recorded.
     pub lock: Option<Lock>,
@@ -56,6 +62,29 @@ impl Protector {
     pub fn key_alias(&self) -> String {
         format!("synthetic_password_{}", self.id.trim_start_matches('0'))
     }
+}
+
+/// What a blob is bound to besides what the user knows. A phone with a
+/// weaver keeps a value in one of its slots for every user, with a screen
+/// lock or without; another phone keeps random bytes beside the blob.
+/// Erasing either makes the blob unopenable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bound {
+    Secdiscardable(Vec<u8>),
+    /// The number of the weaver's slot.
+    Weaver(u32),
+}
+
+/// The weaver slot a phone recorded for a blob: the layout, then the
+/// number in the order the network uses.
+pub fn weaver_slot(raw: &[u8]) -> Result<u32> {
+    let [layout, number @ ..] = raw else { bail!("the record of the blob's weaver slot is empty") };
+    ensure!(*layout == WEAVER_SLOT_LAYOUT, "the blob's weaver slot is recorded in layout {layout}, and Skyward reads layout {WEAVER_SLOT_LAYOUT}");
+    let Ok(number) = <[u8; 4]>::try_from(number) else {
+        bail!("the record of the blob's weaver slot is {} bytes, and one is 5", raw.len());
+    };
+    let slot = i32::from_be_bytes(number);
+    u32::try_from(slot).map_err(|_| anyhow::anyhow!("the blob's weaver slot is recorded as {slot}"))
 }
 
 /// What a phone recorded when the user set a screen lock: how much work it
@@ -165,10 +194,30 @@ pub fn stretched_without_credential() -> Vec<u8> {
     out
 }
 
-/// The secret that, with the key the secure world holds, opens the blob.
+/// The secret that, with the key the secure world holds, opens a blob
+/// bound to the bytes kept beside it.
 pub fn protector_secret(stretched: &[u8], secdiscardable: &[u8]) -> Vec<u8> {
     let mut out = stretched.to_vec();
     out.extend_from_slice(&personalized_hash(SECDISCARDABLE, &[secdiscardable]));
+    out
+}
+
+/// The key a blob's weaver slot gives its value back for: the stretched
+/// credential hashed under its own name, cut to the length the weaver
+/// keeps keys at.
+pub fn weaver_key(stretched: &[u8], key_bytes: usize) -> Result<Vec<u8>> {
+    let mut key = personalized_hash(WEAVER_KEY, &[stretched]);
+    ensure!(key_bytes <= key.len(), "the weaver keeps keys of {key_bytes} bytes, longer than the {} a hash gives", key.len());
+    key.truncate(key_bytes);
+    Ok(key)
+}
+
+/// The secret that, with the key the secure world holds, opens a blob
+/// bound to a weaver slot: the stretched credential, and the hash of the
+/// value the slot gave back.
+pub fn weaver_protector_secret(stretched: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = stretched.to_vec();
+    out.extend_from_slice(&personalized_hash(WEAVER_VALUE, &[value]));
     out
 }
 
@@ -278,8 +327,41 @@ mod tests {
 
     #[test]
     fn the_key_the_secure_world_holds_is_named_after_the_protector() {
-        let p = Protector { id: "08a692c0f39d97c6".into(), blob: Vec::new(), secdiscardable: Vec::new(), lock: None };
+        let p = Protector { id: "08a692c0f39d97c6".into(), blob: Vec::new(), bound: Bound::Weaver(0), lock: None };
         assert_eq!(p.key_alias(), "synthetic_password_8a692c0f39d97c6");
+    }
+
+    #[test]
+    fn a_weaver_slot_is_recorded_as_its_layout_and_its_number() {
+        assert_eq!(weaver_slot(&[1, 0, 0, 0, 5]).unwrap(), 5);
+        assert_eq!(weaver_slot(&[1, 0, 0, 1, 0]).unwrap(), 256, "the number in the order the network uses");
+        assert!(weaver_slot(&[2, 0, 0, 0, 5]).is_err(), "another layout");
+        assert!(weaver_slot(&[1, 0, 0, 5]).is_err(), "cut short");
+        assert!(weaver_slot(&[1, 0xFF, 0xFF, 0xFF, 0xFF]).is_err(), "the number of no slot");
+        assert!(weaver_slot(&[]).is_err());
+    }
+
+    /// Checked against SHA-512 taken outside this code, of the name padded
+    /// to a whole block and then what a user with no screen lock has.
+    #[test]
+    fn the_weaver_key_is_the_named_hash_cut_to_the_weavers_length() {
+        let stretched = stretched_without_credential();
+        let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(hex(&weaver_key(&stretched, 16).unwrap()), "ee43b0c0aadc31e0b8ba2843de4910b3");
+        assert_eq!(hex(&weaver_key(&stretched, 32).unwrap()), "ee43b0c0aadc31e0b8ba2843de4910b3ce7b4781a9a8c41050c4cbee46354321");
+        assert!(weaver_key(&stretched, 65).is_err(), "longer than a hash");
+    }
+
+    #[test]
+    fn the_secret_under_a_weaver_is_the_stretched_credential_and_the_values_hash() {
+        let secret = weaver_protector_secret(b"stretched", &[0xAB; 16]);
+        assert_eq!(&secret[..9], b"stretched");
+        assert_eq!(
+            secret[9..].iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "3ab55b85fd690fe840566368f54c22c3a1bd7d6ac11d75c3174b7be7dd49414e\
+             a59a34c8ca70e5f2ef564d1ef8ff02bd47650f8fd34738185f9bd179ab1135fe"
+        );
+        assert_ne!(weaver_protector_secret(b"stretched", &[0xAB; 16]), protector_secret(b"stretched", &[0xAB; 16]));
     }
 
     /// The record as a phone writes it: the kind, the three powers of two

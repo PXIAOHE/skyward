@@ -19,8 +19,8 @@ const LOOK_EVERY: Duration = Duration::from_secs(2);
 /// and follow it to its end, `each` told how every look at it went.
 /// /metadata is writable while it runs, and read-only again after.
 pub fn run(slot: Slot, start: bool, each: &mut dyn FnMut(&Merge)) -> Result<Merge> {
-    let binder = Binder::hardware()?;
-    let control = BootControl::open(&binder)?;
+    let (binder, hardware) = (Binder::open()?, Binder::hardware()?);
+    let control = BootControl::open(&binder, &hardware)?;
     let tell = |status| control.set_merge_status(status);
     skyward_vab::metadata_writable(true).context("make /metadata writable to merge the update")?;
     let merged = (|| -> Result<Merge> {

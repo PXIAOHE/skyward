@@ -149,14 +149,14 @@ fn partition_size(stock: &Path) -> Result<usize> {
     Ok(usize::try_from(size)?)
 }
 
-/// What a recovery image says about the build it is: the version of its own
-/// ramdisk, which is older than the system installed beside it whenever the
-/// phone has taken an update. The phone's secure services read these to tell
-/// the secure world which build is running, and keys the installed system
-/// made are refused when they say the wrong one, so they are left out here
-/// for the recovery to fill in from the installed system once it has that
-/// mounted.
-const BUILD_VERSION: [&str; 2] = ["ro.build.version.release", "ro.build.version.security_patch"];
+/// What a recovery image says about the build it is: the version and patch
+/// levels of its own ramdisk's system and vendor partition, which are older
+/// than those installed beside it whenever the phone has taken an update.
+/// The phone's secure services read these to tell the secure world which
+/// build is running, and keys the installed system made are refused when
+/// they say the wrong one, so they are left out here for the recovery to
+/// fill in from the installed system once it has that mounted.
+const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
 
 /// The scheduling profiles a recovery's programs look up by name. A
 /// recovery's cgroup setup mounts no controllers, so of all a system's
@@ -219,11 +219,14 @@ mod tests {
 
     #[test]
     fn the_lines_that_set_a_name_are_the_only_ones_left_out() {
-        let props = b"ro.build.id=TQ\nro.build.version.release=13\nro.build.version.release_or_codename=13\nro.product.name=ishtar\n";
+        let props = b"ro.build.id=TQ\nro.build.version.release=13\nro.build.version.release_or_codename=13\nro.product.name=ishtar\n\
+ro.vendor.build.security_patch=2026-10-01\nro.vendor.build.security_patch_level=1\n";
         let out = without(props, &BUILD_VERSION);
         let text = String::from_utf8(out).expect("property files are text");
         assert!(!text.contains("ro.build.version.release=13"));
+        assert!(!text.contains("ro.vendor.build.security_patch=2026-10-01"), "the vendor partition's patch level is left out too");
         assert!(text.contains("ro.build.version.release_or_codename=13"), "a longer name is left alone");
+        assert!(text.contains("ro.vendor.build.security_patch_level=1"), "a longer name is left alone");
         assert!(text.contains("ro.build.id=TQ") && text.contains("ro.product.name=ishtar"));
     }
 
