@@ -9,6 +9,8 @@ pub mod fsck;
 pub mod fstab;
 pub mod loopdev;
 pub mod mount;
+pub mod probe;
+pub mod tools;
 pub mod usb;
 
 pub const BY_NAME: &str = "/dev/block/by-name";

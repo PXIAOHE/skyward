@@ -230,7 +230,7 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Discard { device } => skyward_block::erase::discard(&device),
         #[cfg(target_os = "android")]
-        Cmd::Mkfs { device, filesystem } => skyward_block::erase::make(&device, &filesystem, &[]),
+        Cmd::Mkfs { device, filesystem } => skyward_block::erase::make(&device, &filesystem, &[], false),
         Cmd::Lp { super_dev, slot } => lp(&super_dev, slot),
         Cmd::Update => update(),
         #[cfg(target_os = "android")]

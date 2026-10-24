@@ -477,7 +477,7 @@ pub fn remake(entry: &Entry) -> Result<()> {
     if mount::is_mount_point(at)? {
         mount::umount(at)?;
     }
-    erase::make(Path::new(&fstab::device(entry)?), &entry.filesystem, &entry.extras)
+    erase::make(Path::new(&fstab::device(entry)?), &entry.filesystem, &entry.extras, false)
 }
 
 /// Let go of the data partition: every program but this one holding what is
@@ -994,7 +994,7 @@ mod tests {
         // Held open throughout, so nothing lets the device go before the
         // test does.
         let held = fs::File::open(&device).unwrap();
-        erase::make(Path::new(&device), "ext4", &[]).unwrap();
+        erase::make(Path::new(&device), "ext4", &[], false).unwrap();
         let at = root.join("mnt");
         fs::create_dir(&at).unwrap();
         let entry = Entry {
