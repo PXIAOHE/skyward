@@ -103,29 +103,54 @@ pub struct Opened {
 /// until that user's key is let in as well. A partition that does not
 /// mount leaves no device behind.
 fn open(service: &KeyMint) -> Result<Opened> {
-    let known = skyward_block::fstab::read(MOUNT)?;
-    let entry = known.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
-    let encryption = Encryption::of(entry)?;
-    let device = skyward_block::fstab::device(entry)?;
-    let key = storage_key(service, entry, &encryption)?;
-    let sectors = skyward_block::size_bytes(&device)? / 512;
-    let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
-    let mounted = (|| -> Result<Option<Checked>> {
+    let (entries, mapped) = map(service)?;
+    let mounted = (|| -> Result<(Option<Checked>, String)> {
+        // A phone that names the partition once per filesystem it might
+        // hold mounts it with the entry of the one it holds.
+        let holds = skyward_block::probe::filesystem(&mapped)?;
+        let entry = entries.iter().find(|e| holds.as_ref() == Some(&e.filesystem)).unwrap_or(&entries[0]);
         let checked = match entry.extras.iter().any(|e| e == "check") {
             true => Some(skyward_block::fsck::check(&mapped, &entry.filesystem)?),
             false => None,
         };
         std::fs::create_dir_all(MOUNT).with_context(|| format!("make {MOUNT}"))?;
         mount::mount(&mapped, Path::new(MOUNT), &entry.filesystem, &entry.options)?;
-        Ok(checked)
+        Ok((checked, entry.filesystem.clone()))
     })();
     match mounted {
-        Ok(checked) => Ok(Opened { mapped, filesystem: entry.filesystem.clone(), checked }),
+        Ok((checked, filesystem)) => Ok(Opened { mapped, filesystem, checked }),
         Err(e) => match dm::remove(MAPPED) {
             Ok(()) => Err(e),
             Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
         },
     }
+}
+
+/// Map the data partition decrypted, under the key the phone keeps for it,
+/// and give its table's entries, the first the one the key is found by,
+/// and the device the filesystem is read and written through.
+fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
+    let entries = skyward_block::fstab::read(MOUNT)?;
+    let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+    let encryption = Encryption::of(entry)?;
+    let device = skyward_block::fstab::device(entry)?;
+    let key = storage_key(service, entry, &encryption)?;
+    let sectors = skyward_block::size_bytes(&device)? / 512;
+    let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
+    Ok((entries, mapped))
+}
+
+/// Map the data partition decrypted without mounting it, for its
+/// filesystem to be repaired, and give the device it is reached through;
+/// [`unmap`] takes it away again. The partition is to be closed.
+pub fn map_unmounted(service: &KeyMint) -> Result<PathBuf> {
+    anyhow::ensure!(dm::status(MAPPED)?.is_none(), "the data partition is open");
+    map(service).map(|(_, mapped)| mapped)
+}
+
+/// Take away the mapping [`map_unmounted`] made.
+pub fn unmap() -> Result<()> {
+    dm::remove(MAPPED)
 }
 
 /// Show the owner's shared storage at /sdcard; shown already, it stays.
