@@ -5,6 +5,8 @@ use jiff::Timestamp;
 use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
+use skyward_net::supplicant::Security;
+use skyward_net::wlan::{Bands, Joined, Power, Stage as WlanStage, Wlan};
 use skyward_vab::{Hold, Slot, SnapshotState, Standing};
 use std::sync::OnceLock;
 
@@ -598,6 +600,81 @@ pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
             Source::File(_) => ("文件在读取过程中被修改，请重新选择。".into(), None),
         },
         Failure::Error(detail) => ("发生意外错误。".into(), Some(detail.clone())),
+    }
+}
+
+/// How many of a WLAN fan's three arcs a signal of `dbm` lights.
+pub fn signal_level(dbm: i32) -> u8 {
+    match dbm {
+        d if d >= -60 => 3,
+        d if d >= -70 => 2,
+        d if d >= -80 => 1,
+        _ => 0,
+    }
+}
+
+/// A signal's strength in words, as the stock network details say it.
+pub fn signal(dbm: i32) -> &'static str {
+    match signal_level(dbm) {
+        3 => "极佳",
+        2 => "良好",
+        1 => "一般",
+        _ => "微弱",
+    }
+}
+
+/// The bands a network is on, as the tag after its name: none for 2.4 GHz
+/// alone, as the stock WLAN page shows it.
+pub fn band_tag(b: Bands) -> Option<String> {
+    let names: Vec<&str> = [(b.ghz2, "2.4G"), (b.ghz5, "5G"), (b.ghz6, "6G")].into_iter().filter_map(|(on, n)| on.then_some(n)).collect();
+    (names != ["2.4G"] && !names.is_empty()).then(|| names.join("/"))
+}
+
+/// The bands a network is on, in full.
+pub fn bands(b: Bands) -> String {
+    [(b.ghz2, "2.4 GHz"), (b.ghz5, "5 GHz"), (b.ghz6, "6 GHz")].into_iter().filter_map(|(on, n)| on.then_some(n)).collect::<Vec<_>>().join("、")
+}
+
+/// A generation of Wi-Fi, as the stock network details say it.
+pub fn generation(n: u8) -> String {
+    format!("第{n}代")
+}
+
+/// How a network is protected, as the system's network details name it.
+pub fn security(s: Security) -> &'static str {
+    match s {
+        Security::Open => "无",
+        Security::Owe => "增强型开放式",
+        Security::Wep => "WEP",
+        Security::Psk => "WPA/WPA2-Personal",
+        Security::Sae => "WPA3-Personal",
+        Security::PskSae => "WPA2/WPA3-Personal",
+        Security::Enterprise => "WPA/WPA2-Enterprise",
+    }
+}
+
+/// What the home page says beside its WLAN entry: the network joined, or
+/// how the WLAN stands.
+pub fn wlan_value(w: &Wlan) -> &str {
+    match (&w.power, &w.joined) {
+        (Power::Off | Power::Failed(_), _) => "已关闭",
+        (Power::Starting, _) => "正在开启",
+        (Power::On, Some(Joined { stage: WlanStage::Connected(_), name, .. })) => name,
+        (Power::On, Some(_)) => "正在连接",
+        (Power::On, None) => "未连接",
+    }
+}
+
+/// How joining the network chosen goes, under its name.
+pub fn joining(stage: &WlanStage) -> &'static str {
+    match stage {
+        WlanStage::Joining => "正在连接",
+        WlanStage::Addressing => "正在获取 IP 地址",
+        WlanStage::Connected(_) => "已连接",
+        WlanStage::WrongPassword => "密码错误",
+        WlanStage::NotFound => "未找到该网络",
+        WlanStage::Failed => "连接失败",
+        WlanStage::NoAddress(_) => "无法获取 IP 地址",
     }
 }
 

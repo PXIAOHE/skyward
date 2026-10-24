@@ -7,8 +7,10 @@ use crate::input::{monotonic_ms, Event, Inputs};
 use crate::merge;
 use crate::pty;
 use crate::readings::{Reading, Readings};
+use crate::secure;
 use crate::services;
 use crate::wipe::{self, Eraser, Step};
+use crate::wlan;
 use anyhow::{anyhow, ensure, Context, Result};
 use skyward_config::{DeviceConfig, Service};
 use skyward_crypto::data::{Closed, Opened};
@@ -18,6 +20,8 @@ use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
 use skyward_files::Ownership;
 use skyward_block::usb::{self, Drive};
+use skyward_net::http::Servers;
+use skyward_net::wlan::{Power as WlanPower, Wlan};
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, Effect, EraseStop, FileKind, FileOp, FileRow,
     FileTask, Held, JobEnd, Keys, MountFailure, Part, Place, RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe,
@@ -30,6 +34,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long init may take to hand the USB port to another function: the
@@ -739,6 +744,13 @@ fn install_options(app: &App) -> Options {
     Options { keep: app.state.keep_recovery && app.state.recovery_partitions, signed: app.state.check_signature }
 }
 
+/// How often the WLAN page scans while it shows.
+const SCAN_EVERY: Duration = Duration::from_secs(10);
+
+fn wlan_worker(w: &Option<wlan::Worker>) -> Result<&wlan::Worker> {
+    w.as_ref().context("the phone's WLAN is not brought up")
+}
+
 /// Wait until a device, the installer or the recovery socket has something,
 /// or `timeout_ms` passes.
 fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
@@ -911,6 +923,24 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         app.set_update(standing);
     }
+    // The DNS servers the network joined gave, for looking names up.
+    let servers: Servers = Arc::new(Mutex::new(Vec::new()));
+    // The WLAN, on a phone whose driver the recovery brings up; it starts
+    // off. Without the bundle of the vendor interface's libraries the
+    // supplicant does not start, and the WLAN page says why.
+    let wlan = match &cfg.wlan {
+        Some(w) => {
+            app.state.wlan = Some(Wlan::default());
+            let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
+            let libraries = secure::libraries().unwrap_or_else(|e| {
+                let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
+                None
+            });
+            Some(wlan::Worker::start(w.clone(), modules, libraries, servers.clone())?)
+        }
+        None => None,
+    };
+    let mut scanned_at = Instant::now();
     // The USB drive plugged in, looked for each second.
     let mut plugged: Option<Plugged> = None;
     let mut seen: Option<String> = None;
@@ -1033,6 +1063,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(d) = &decryptor {
             fds.push(d.fd());
+        }
+        if let Some(w) = &wlan {
+            fds.push(w.fd());
         }
         fds.push(readings.fd());
         wait(&fds, timeout)?;
@@ -1209,6 +1242,16 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 info = skyward_info::collect(cfg)?;
                 app.refresh();
             }
+        }
+        if let Some(told) = wlan.as_ref().and_then(wlan::Worker::told) {
+            app.set_wlan(told);
+        }
+        // The WLAN page scans again now and then while it shows, as the
+        // stock settings do.
+        let wlan_on = app.state.wlan.as_ref().is_some_and(|w| w.power == WlanPower::On);
+        if app.screen() == Screen::Wlan && wlan_on && scanned_at.elapsed() >= SCAN_EVERY {
+            scanned_at = Instant::now();
+            wlan_worker(&wlan)?.send(wlan::Command::Scan);
         }
         if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
             decryptor = None;
@@ -1532,6 +1575,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         skyward_sys::kmsg("merging the update, as the update page asked")?;
                         merger = Some(merge::Merger::start(slot, true)?);
                     }
+                    Effect::Wlan(on) => wlan_worker(&wlan)?.send(if on { wlan::Command::On } else { wlan::Command::Off }),
+                    Effect::ScanWlan => {
+                        scanned_at = Instant::now();
+                        wlan_worker(&wlan)?.send(wlan::Command::Scan);
+                    }
+                    Effect::JoinWlan { ssid, name, security, password } => {
+                        wlan_worker(&wlan)?.send(wlan::Command::Join { ssid, name, security, password: password.0 })
+                    }
+                    Effect::LeaveWlan => wlan_worker(&wlan)?.send(wlan::Command::Leave),
                     // Logs that cannot be saved are the page's to report;
                     // the recovery carries on.
                     Effect::ExportLogs { recovery, kernel, storage } => {

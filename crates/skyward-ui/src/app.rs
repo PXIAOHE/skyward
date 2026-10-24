@@ -16,6 +16,8 @@ use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Stage};
+use skyward_net::supplicant::Security;
+use skyward_net::wlan::{Network, Power, Stage as Joining, Wlan};
 use skyward_vab::{BootSlots, Hold, Slot, SnapshotState, Standing};
 
 /// The pages of the recovery.
@@ -98,6 +100,33 @@ pub enum Screen {
     Clash,
     /// Copying, moving or deleting under way, and how it ended.
     FileJob,
+    /// The WLAN switch, the network chosen and how joining it goes, and
+    /// the networks in range.
+    Wlan,
+    /// The password of the network chosen, typed on the screen's keyboard.
+    WlanPassword,
+    /// The network joined, and the address and the rest it gave.
+    WlanNetwork,
+}
+
+/// A password typed, which what is printed of it leaves out: the recovery
+/// prints each effect the pages ask for.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Secret({} characters)", self.0.chars().count())
+    }
+}
+
+/// What turns down a password the protection `security` cannot take.
+fn refused(security: Security, password: &str) -> Option<&'static str> {
+    match security {
+        Security::Psk | Security::PskSae if !(8..=63).contains(&password.len()) => Some("请输入 8 到 63 位密码"),
+        _ if password.is_empty() => Some("请输入密码"),
+        _ => None,
+    }
 }
 
 /// Where a file to install is chosen from, and where backups go and are
@@ -226,6 +255,9 @@ pub enum Switch {
     /// Write Skyward back into the recovery partitions an install writes
     /// over.
     KeepRecovery,
+    Wlan,
+    /// Show the password typed rather than a dot for each character.
+    ShowPassword,
 }
 
 /// What a backup can take, in the order the backup page lists it.
@@ -862,6 +894,19 @@ pub enum Action {
     StopRelabel,
     /// Stop copying, moving or deleting.
     StopJob,
+    /// Join the network at this place in the list of those in range, or
+    /// open the page of the one joined.
+    JoinNetwork(usize),
+    /// Open the details of the network at this place in the list of those
+    /// in range.
+    NetworkDetails(usize),
+    /// The network chosen: its password again once refused, its details
+    /// otherwise.
+    OpenJoined,
+    /// Leave the network joined, and forget it.
+    LeaveNetwork,
+    /// Look for the networks in range again.
+    Rescan,
     /// A control whose work is not wired up yet; touching it says so.
     Unavailable(&'static str),
 }
@@ -1137,6 +1182,15 @@ pub struct State {
     /// Where an update the system installed stands, as the runtime last
     /// read it.
     pub update: Standing,
+    /// The WLAN, as the runtime last told it; none on a phone whose WLAN the
+    /// recovery does not bring up.
+    pub wlan: Option<Wlan>,
+    /// The network the password page is for, and what is typed there.
+    pub joining: Option<Network>,
+    /// The network the details page is of, as it was found.
+    pub details: Option<Network>,
+    pub password: String,
+    pub show_password: bool,
 }
 
 impl Default for State {
@@ -1197,6 +1251,11 @@ impl Default for State {
             job: None,
             relabel: None,
             update: Standing::None,
+            wlan: None,
+            joining: None,
+            details: None,
+            password: String::new(),
+            show_password: false,
         }
     }
 }
@@ -1368,6 +1427,12 @@ pub enum Effect {
     StopBackup,
     /// Read where the update stands, telling it with [`App::set_update`].
     ReadUpdate,
+    /// Turn the WLAN on or off; how it stands comes back with
+    /// [`App::set_wlan`].
+    Wlan(bool),
+    ScanWlan,
+    JoinWlan { ssid: Vec<u8>, name: String, security: Security, password: Secret },
+    LeaveWlan,
     /// Merge the update that waits in the slot the phone runs from,
     /// telling how it goes with [`App::set_update`].
     Merge,
@@ -2535,6 +2600,26 @@ impl App {
         self.refresh();
     }
 
+    /// How the WLAN stands, as the runtime last told it.
+    pub fn set_wlan(&mut self, w: Wlan) {
+        if self.state.wlan.as_ref() == Some(&w) {
+            return;
+        }
+        self.state.wlan = Some(w);
+        if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork) {
+            self.refresh();
+        }
+    }
+
+    /// Open the password page for `network`, empty.
+    fn ask_password(&mut self, network: Network) {
+        self.state.joining = Some(network);
+        self.state.password.clear();
+        self.state.show_password = false;
+        self.state.layer = Layer::Letters;
+        self.open(Screen::WlanPassword);
+    }
+
     /// How renaming the entry the file page shows went: done, the folder
     /// comes back with the entry under its new name; refused, why.
     pub fn renamed(&mut self, outcome: Result<(), RenameRefused>, now: u64) {
@@ -3556,6 +3641,11 @@ impl App {
             // Turning the choice down leaves the entry picked, for another
             // folder.
             Screen::Clash => self.state.clash = None,
+            Screen::WlanPassword => {
+                self.state.joining = None;
+                self.state.password.clear();
+            }
+            Screen::WlanNetwork => self.state.details = None,
             Screen::FileJob => {
                 if self.state.job.as_ref().is_some_and(|j| j.outcome.is_none()) {
                     self.say("请等待完成或停止后再返回", now);
@@ -3729,6 +3819,7 @@ impl App {
             }
             Screen::Decrypt if matches!(self.state.data, Data::Closed | Data::Failed(_)) => self.open_data(),
             Screen::Update => vec![Effect::ReadUpdate],
+            Screen::Wlan if self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On) => vec![Effect::ScanWlan],
             _ => Vec::new(),
         }
     }
@@ -3778,6 +3869,15 @@ impl App {
                     self.refresh();
                 }
             }
+            // The switch moves at once; the runtime then tells how the WLAN
+            // came up, or went off.
+            Action::Toggle(Switch::Wlan) => {
+                let w = self.state.wlan.as_mut().expect("the WLAN switch shows on a phone whose WLAN is brought up");
+                let on = matches!(w.power, Power::Off | Power::Failed(_));
+                *w = Wlan { power: if on { Power::Starting } else { Power::Off }, ..Wlan::default() };
+                self.refresh();
+                return vec![Effect::Wlan(on)];
+            }
             Action::Toggle(switch) => {
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
@@ -3786,6 +3886,8 @@ impl App {
                     Switch::Verify => &mut self.state.verify,
                     Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
+                    Switch::ShowPassword => &mut self.state.show_password,
+                    Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                 };
                 *on = !*on;
                 let now_on = *on;
@@ -4075,6 +4177,59 @@ impl App {
                     }];
                 }
             }
+            Action::JoinNetwork(i) => {
+                let w = self.state.wlan.as_ref().expect("networks show on a phone whose WLAN is brought up");
+                // A scan may have changed the list since the page was drawn.
+                let Some(network) = w.networks.get(i).cloned() else { return Vec::new() };
+                if w.joined.as_ref().is_some_and(|j| j.ssid == network.ssid) {
+                    return self.act(Action::OpenJoined, now);
+                }
+                match network.security {
+                    Security::Wep => self.say("暂不支持 WEP 加密的网络", now),
+                    Security::Enterprise => self.say("暂不支持需要账号登录的网络", now),
+                    s if s.password() => self.ask_password(network),
+                    _ => {
+                        return vec![Effect::JoinWlan {
+                            ssid: network.ssid,
+                            name: network.name,
+                            security: network.security,
+                            password: Secret::default(),
+                        }]
+                    }
+                }
+            }
+            Action::NetworkDetails(i) => {
+                let w = self.state.wlan.as_ref().expect("networks show on a phone whose WLAN is brought up");
+                let Some(network) = w.networks.get(i).cloned() else { return Vec::new() };
+                self.state.details = Some(network);
+                self.open(Screen::WlanNetwork);
+            }
+            Action::OpenJoined => {
+                let w = self.state.wlan.as_ref().expect("a network is chosen on a phone whose WLAN is brought up");
+                let Some(j) = w.joined.clone() else { return Vec::new() };
+                // As found, where it still is; as it was chosen otherwise.
+                let found = w.networks.iter().find(|n| n.ssid == j.ssid).cloned();
+                let network = found.unwrap_or(Network {
+                    ssid: j.ssid,
+                    name: j.name,
+                    signal: 0,
+                    frequency: 0,
+                    bands: Default::default(),
+                    security: j.security,
+                });
+                if j.stage == Joining::WrongPassword {
+                    self.ask_password(network);
+                } else {
+                    self.state.details = Some(network);
+                    self.open(Screen::WlanNetwork);
+                }
+            }
+            Action::LeaveNetwork => {
+                let mut fx = self.back(now);
+                fx.push(Effect::LeaveWlan);
+                return fx;
+            }
+            Action::Rescan => return vec![Effect::ScanWlan],
             Action::Unavailable(text) => self.say(text, now),
         }
         Vec::new()
@@ -4086,6 +4241,7 @@ impl App {
             Screen::Search => &mut self.state.search,
             Screen::Decrypt => &mut self.state.code,
             Screen::Rename => &mut self.state.new_name,
+            Screen::WlanPassword => &mut self.state.password,
             s => panic!("{s:?} has no text field"),
         }
     }
@@ -4248,7 +4404,7 @@ impl App {
             Cap::Show(layer) => self.state.layer = layer,
             Cap::Enter => match self.screen() {
                 Screen::Search => {
-                    if let Some(first) = search::find(&self.state.search).first() {
+                    if let Some(first) = search::find_on(&self.state.search, self.state.wlan.is_some()).first() {
                         return self.act(Action::Open(first.screen), now);
                     }
                 }
@@ -4270,6 +4426,21 @@ impl App {
                         _ if name == *current => return self.back(now),
                         _ if taken => self.say_taken(now),
                         _ => return vec![Effect::Rename { path: self.entry_path(), name }],
+                    }
+                }
+                // A password the network's protection cannot take is turned
+                // down here; one it can goes, and the WLAN page shows how
+                // joining goes.
+                Screen::WlanPassword => {
+                    let network = self.state.joining.clone().expect("the password page is for a network");
+                    match refused(network.security, &self.state.password) {
+                        Some(why) => self.say(why, now),
+                        None => {
+                            let password = Secret(std::mem::take(&mut self.state.password));
+                            let mut fx = self.back(now);
+                            fx.push(Effect::JoinWlan { ssid: network.ssid, name: network.name, security: network.security, password });
+                            return fx;
+                        }
                     }
                 }
                 other => unreachable!("{other:?} shows no keyboard"),
@@ -8063,6 +8234,124 @@ mod tests {
         tap_at(&mut app, &f, &i, Action::Back, 2000);
         assert_eq!(app.screen(), Screen::Advanced);
         assert_eq!(app.state.relabel, None);
+    }
+
+    fn network(name: &str, signal: i32, security: Security) -> Network {
+        let bands = skyward_net::wlan::Bands::of(5805);
+        Network { ssid: name.as_bytes().to_vec(), name: name.into(), signal, frequency: 5805, bands, security }
+    }
+
+    fn joined(name: &str, stage: Joining) -> Wlan {
+        let n = network(name, -34, Security::Psk);
+        Wlan {
+            power: Power::On,
+            networks: vec![n.clone()],
+            joined: Some(skyward_net::wlan::Joined { ssid: n.ssid, name: n.name, security: n.security, stage }),
+        }
+    }
+
+    fn connected(name: &str) -> Wlan {
+        use std::net::Ipv4Addr;
+        joined(
+            name,
+            Joining::Connected(skyward_net::wlan::Link {
+                address: Ipv4Addr::new(192, 168, 1, 23),
+                mask: Ipv4Addr::new(255, 255, 255, 0),
+                router: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                dns: vec![Ipv4Addr::new(192, 168, 1, 1)],
+                signal: -40,
+                frequency: 5805,
+                speed: Some(866),
+                generation: Some(5),
+                mac: "02:00:00:00:00:04".into(),
+            }),
+        )
+    }
+
+    #[test]
+    fn the_wlan_page_joins_a_network_with_its_password_and_leaves_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let entry = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Open(Screen::Wlan));
+        assert!(!entry(&mut app), "a phone whose WLAN is not brought up has no WLAN");
+        app.state.wlan = Some(Wlan::default());
+        app.refresh();
+        assert!(entry(&mut app));
+        assert!(app.act(Action::Open(Screen::Wlan), 0).is_empty(), "a WLAN that is off is not scanned");
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(true)]);
+        assert_eq!(app.state.wlan.as_ref().unwrap().power, Power::Starting, "the switch moves at once");
+        let nearby = vec![network("Skyward", -34, Security::Psk), network("cafe", -72, Security::Open), network("old", -60, Security::Wep)];
+        app.set_wlan(Wlan { power: Power::On, networks: nearby, joined: None });
+        tap(&mut app, &f, &i, Action::JoinNetwork(2));
+        assert_eq!(toast(&app), Some("暂不支持 WEP 加密的网络"));
+        let cafe = Effect::JoinWlan { ssid: b"cafe".to_vec(), name: "cafe".into(), security: Security::Open, password: Secret::default() };
+        assert_eq!(tap(&mut app, &f, &i, Action::JoinNetwork(1)), vec![cafe], "an open network is joined at once");
+        tap(&mut app, &f, &i, Action::JoinNetwork(0));
+        assert_eq!(app.screen(), Screen::WlanPassword);
+        let type_in = |app: &mut App, text: &str| {
+            for ch in text.chars() {
+                tap(app, &f, &i, Action::Type(Cap::Char(ch)));
+            }
+        };
+        type_in(&mut app, "secret");
+        assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty());
+        assert_eq!(toast(&app), Some("请输入 8 到 63 位密码"));
+        tap(&mut app, &f, &i, Action::Type(Cap::Show(Layer::Digits)));
+        type_in(&mut app, "12");
+        let fx = tap(&mut app, &f, &i, Action::Type(Cap::Enter));
+        let join = Effect::JoinWlan { ssid: b"Skyward".to_vec(), name: "Skyward".into(), security: Security::Psk, password: Secret("secret12".into()) };
+        assert_eq!(format!("{join:?}"), r#"JoinWlan { ssid: [83, 107, 121, 119, 97, 114, 100], name: "Skyward", security: Psk, password: Secret(8 characters) }"#, "what is printed leaves the password out");
+        assert_eq!(fx, vec![join]);
+        assert_eq!(app.screen(), Screen::Wlan, "the WLAN page shows how joining goes");
+        assert_eq!((app.state.password.as_str(), app.state.joining.as_ref()), ("", None), "the password is not kept");
+        app.set_wlan(connected("Skyward"));
+        assert_eq!(fmt::wlan_value(app.state.wlan.as_ref().unwrap()), "Skyward");
+        tap(&mut app, &f, &i, Action::OpenJoined);
+        assert_eq!(app.screen(), Screen::WlanNetwork);
+        assert_eq!(tap(&mut app, &f, &i, Action::LeaveNetwork), vec![Effect::LeaveWlan]);
+        assert_eq!(app.screen(), Screen::Wlan);
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(false)]);
+        assert_eq!(app.state.wlan, Some(Wlan::default()));
+    }
+
+    #[test]
+    fn a_refused_password_is_asked_for_again_from_the_networks_row() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.wlan = Some(joined("Skyward", Joining::WrongPassword));
+        app.act(Action::Open(Screen::Wlan), 0);
+        tap(&mut app, &f, &i, Action::OpenJoined);
+        assert_eq!(app.screen(), Screen::WlanPassword);
+        assert_eq!(app.state.joining.as_ref().map(|n| n.name.as_str()), Some("Skyward"));
+        app.key(Key::Back, 0);
+        app.set_wlan(joined("Skyward", Joining::Joining));
+        tap(&mut app, &f, &i, Action::OpenJoined);
+        assert_eq!(app.screen(), Screen::WlanNetwork, "a network being joined shows how that goes");
+        assert_eq!(app.state.details.as_ref().map(|n| n.name.as_str()), Some("Skyward"));
+        app.key(Key::Back, 0);
+        assert_eq!(app.state.details, None);
+    }
+
+    #[test]
+    fn a_networks_round_button_opens_its_details_and_its_row_joins_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let nearby = vec![network("Skyward", -34, Security::Psk), network("cafe", -72, Security::Open)];
+        app.state.wlan = Some(Wlan { power: Power::On, networks: nearby, joined: None });
+        app.act(Action::Open(Screen::Wlan), 0);
+        assert_eq!(tap(&mut app, &f, &i, Action::Rescan), vec![Effect::ScanWlan]);
+        tap(&mut app, &f, &i, Action::NetworkDetails(1));
+        assert_eq!(app.screen(), Screen::WlanNetwork);
+        assert_eq!(app.state.details.as_ref().map(|n| n.name.as_str()), Some("cafe"));
+        assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::LeaveNetwork), "a network not chosen has nothing to forget");
+        app.key(Key::Back, 0);
+        // The round button sits on its row, and is what a touch on it finds.
+        let fr = app.frame(&f, &i);
+        let row = fr.hits.iter().find(|h| h.action == Action::JoinNetwork(1)).expect("the row").rect;
+        let round = fr.hits.iter().find(|h| h.action == Action::NetworkDetails(1)).expect("its round button").rect;
+        assert!(row.contains(round.x + round.w / 2.0, round.y + round.h / 2.0));
+        assert_eq!(fr.hit(round.x + round.w / 2.0, round.y + round.h / 2.0).map(|h| h.action), Some(Action::NetworkDetails(1)));
+        assert_eq!(fr.hit(row.x + row.w / 3.0, row.y + row.h / 2.0).map(|h| h.action), Some(Action::JoinNetwork(1)));
     }
 
     #[test]

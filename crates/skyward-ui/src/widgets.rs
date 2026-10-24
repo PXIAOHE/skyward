@@ -39,6 +39,8 @@ pub enum Icon {
     Log,
     /// A shield with a tick: security labels set right.
     Shield,
+    /// The WLAN's fan: a dot and three arcs over it.
+    Wlan,
 }
 
 /// White solid glyph centred on `(cx, cy)` inside a tile of size `tile`.
@@ -208,7 +210,37 @@ pub fn glyph(c: &mut Canvas, icon: Icon, cx: f32, cy: f32, tile: f32, fg: Rgba, 
             c.line(a.0, a.1, b.0, b.1, sw, bg);
             c.line(b.0, b.1, d.0, d.1, sw, bg);
         }
+        Icon::Wlan => wlan_fan(c, cx, cy, 0.5 * g, 3, fg, fg),
     }
+}
+
+/// The WLAN's fan centred on `(cx, cy)`, its widest arc reaching `r` from
+/// the dot the arcs open up from: the first `level` arcs in `lit`, the
+/// rest in `unlit`.
+pub fn wlan_fan(c: &mut Canvas, cx: f32, cy: f32, r: f32, level: u8, lit: Rgba, unlit: Rgba) {
+    let w = 0.17 * r;
+    let dot = 0.13 * r;
+    // From the top of the widest arc to the foot of the dot.
+    let apex = cy + (r - dot) / 2.0;
+    for (k, reach) in [0.42f32, 0.71, 1.0].into_iter().enumerate() {
+        let color = if (k as u8) < level { lit } else { unlit };
+        c.stroke_arc(cx, apex, r * reach - w / 2.0, -135f32.to_radians(), 90f32.to_radians(), w, color);
+    }
+    c.fill_circle(cx, apex, dot, lit);
+}
+
+/// A padlock `h` tall centred on `(cx, cy)`: its body, and the shackle
+/// over it.
+pub fn padlock(c: &mut Canvas, cx: f32, cy: f32, h: f32, color: Rgba) {
+    let (bw, bh) = (0.84 * h, 0.6 * h);
+    let sw = 0.13 * h;
+    let shackle = 0.25 * h;
+    let top = cy - h / 2.0;
+    let body = top + h - bh;
+    c.stroke_arc(cx, top + shackle + sw / 2.0, shackle, -180f32.to_radians(), 180f32.to_radians(), sw, color);
+    c.line(cx - shackle, top + shackle + sw / 2.0, cx - shackle, body, sw, color);
+    c.line(cx + shackle, top + shackle + sw / 2.0, cx + shackle, body, sw, color);
+    c.fill_round_rect(cx - bw / 2.0, body, bw, bh, 0.12 * h, color);
 }
 
 pub fn tile(c: &mut Canvas, t: &Theme, x: f32, y: f32, color: Rgba, icon: Icon) {
@@ -227,17 +259,50 @@ pub struct Tone {
     pub value: Rgba,
     pub chevron: Rgba,
     pub caption: Rgba,
+    /// The arcs of a WLAN fan its signal does not light.
+    pub faint: Rgba,
+    /// The round button at the end of a WLAN network's row, and its arrow.
+    pub round: Rgba,
+    pub round_mark: Rgba,
 }
 
 impl Tone {
     pub fn page(t: &Theme) -> Tone {
         let p = &t.pal;
-        Tone { card: p.card, text: p.text, sub: p.subtitle, value: p.value, chevron: p.chevron, caption: p.spec_label }
+        Tone {
+            card: p.card,
+            text: p.text,
+            sub: p.subtitle,
+            value: p.value,
+            chevron: p.chevron,
+            caption: p.spec_label,
+            faint: p.chevron,
+            round: p.round,
+            round_mark: p.round_mark,
+        }
     }
 
     pub fn hero(t: &Theme) -> Tone {
         let h = &t.hero;
-        Tone { card: h.card, text: h.title, sub: h.value, value: h.value, chevron: h.chevron, caption: h.value }
+        Tone {
+            card: h.card,
+            text: h.title,
+            sub: h.value,
+            value: h.value,
+            chevron: h.chevron,
+            caption: h.value,
+            faint: h.chevron,
+            round: t.pal.round,
+            round_mark: t.pal.round_mark,
+        }
+    }
+
+    /// White on the accent, as the network joined stands out on the WLAN
+    /// page: what is not the title at 60%, the round button at 18%.
+    pub fn lit(t: &Theme) -> Tone {
+        let (accent, white) = (t.pal.accent, Rgba::rgb(255, 255, 255));
+        let at = |k: f32| crate::color::mix(accent, white, k);
+        Tone { card: accent, text: white, sub: at(0.6), value: at(0.6), chevron: white, caption: at(0.6), faint: at(0.35), round: at(0.18), round_mark: white }
     }
 }
 
@@ -1076,12 +1141,20 @@ pub enum Trail<'a> {
     Switch(bool),
     Badge(&'a str),
     Check(bool),
+    /// A WLAN network's padlock, where joining it takes a password, and the
+    /// round button that opens its details.
+    Network { locked: bool },
 }
 
 #[derive(Clone, Copy)]
 pub struct Row<'a> {
     pub icon: Option<(Rgba, Icon)>,
+    /// A WLAN fan before the title in place of an icon, lit to this many
+    /// arcs of three.
+    pub fan: Option<u8>,
     pub title: &'a str,
+    /// A word in an outline after the title, such as a network's bands.
+    pub tag: Option<&'a str>,
     pub sub: Option<&'a str>,
     pub trail: Trail<'a>,
     pub tint: Option<Rgba>,
@@ -1089,10 +1162,18 @@ pub struct Row<'a> {
 
 impl<'a> Row<'a> {
     pub fn new(title: &'a str) -> Self {
-        Row { icon: None, title, sub: None, trail: Trail::Arrow, tint: None }
+        Row { icon: None, fan: None, title, tag: None, sub: None, trail: Trail::Arrow, tint: None }
     }
     pub fn icon(mut self, color: Rgba, icon: Icon) -> Self {
         self.icon = Some((color, icon));
+        self
+    }
+    pub fn fan(mut self, level: u8) -> Self {
+        self.fan = Some(level);
+        self
+    }
+    pub fn tag(mut self, tag: &'a str) -> Self {
+        self.tag = Some(tag);
         self
     }
     pub fn subtitle(mut self, sub: &'a str) -> Self {
@@ -1119,7 +1200,11 @@ struct Layout {
 fn layout(c: &Canvas, t: &Theme, f: &Fonts, r: &Row) -> Layout {
     let m = &t.m;
     let card_w = m.w as f32 - m.margin * 2.0;
-    let text_x = m.inner + if r.icon.is_some() { m.icon + m.icon_gap } else { 0.0 };
+    let text_x = match (r.fan, r.icon) {
+        (Some(_), _) => m.dp(FAN_TEXT_X),
+        (None, Some(_)) => m.inner + m.icon + m.icon_gap,
+        (None, None) => m.inner,
+    };
     let trail_w = match r.trail {
         Trail::None => m.inner,
         Trail::Arrow => m.chevron_inset + m.chevron_w + m.value_gap,
@@ -1128,11 +1213,18 @@ fn layout(c: &Canvas, t: &Theme, f: &Fonts, r: &Row) -> Layout {
         Trail::Switch(_) => m.inner + m.switch_w + m.value_gap,
         Trail::Badge(_) => m.inner + m.badge_w + m.value_gap,
         Trail::Check(_) => m.inner + m.dp(24.0) + m.value_gap,
+        Trail::Network { locked } => {
+            m.inner + m.dp(ROUND_D) + m.value_gap + if locked { m.dp(LOCK_GAP + LOCK_W) } else { 0.0 }
+        }
     };
     let text_max = card_w - text_x - trail_w;
     let sub_lines = r.sub.map(|s| wrap(c, &f.body, s, m.sub_px, text_max)).unwrap_or_default();
     let h = if sub_lines.is_empty() {
-        m.row_h
+        if r.fan.is_some() {
+            m.dp(FAN_ROW_H)
+        } else {
+            m.row_h
+        }
     } else {
         let (tt, tb) = f.heading.ink(m.row_title_px);
         let (st, sb) = f.body.ink(m.sub_px);
@@ -1150,21 +1242,40 @@ fn draw_row(c: &mut Canvas, t: &Theme, f: &Fonts, r: &Row, lay: &Layout, top: f3
     if let Some((color, icon)) = r.icon {
         tile(c, t, card_x + m.inner, cy - m.icon / 2.0, color, icon);
     }
+    if let Some(level) = r.fan {
+        wlan_fan(c, card_x + m.dp(FAN_CX), cy, m.dp(FAN_R), level, tone.text, tone.faint);
+    }
     let tx = card_x + lay.text_x;
     let color = r.tint.unwrap_or(tone.text);
-    if lay.sub_lines.is_empty() {
-        c.text_vc(&f.heading, r.title, tx, cy, m.row_title_px, color, Some(lay.text_max));
+    // A tag takes its room from the title's.
+    let tag_w = r.tag.map_or(0.0, |tag| c.text_width(&f.body, tag, m.dp(TAG_PX)) + m.dp(TAG_PAD * 2.0 + TAG_GAP));
+    let title_room = (lay.text_max - tag_w).max(0.0);
+    let title_max = Some(title_room);
+    let (tt, tb) = f.heading.ink(m.row_title_px);
+    let title_cy = if lay.sub_lines.is_empty() {
+        c.text_vc(&f.heading, r.title, tx, cy, m.row_title_px, color, title_max);
+        cy
     } else {
-        let (tt, tb) = f.heading.ink(m.row_title_px);
         let (st, sb) = f.body.ink(m.sub_px);
         let block = (tb - tt) + m.sub_gap + (lay.sub_lines.len() as f32 - 1.0) * m.sub_pitch + (sb - st);
         let ink_top = cy - block / 2.0;
-        c.text_top(&f.heading, r.title, tx, ink_top, m.row_title_px, color, Some(lay.text_max));
+        c.text_top(&f.heading, r.title, tx, ink_top, m.row_title_px, color, title_max);
         let mut st_top = ink_top + (tb - tt) + m.sub_gap;
         for line in &lay.sub_lines {
             c.text_top(&f.body, line, tx, st_top, m.sub_px, tone.sub, None);
             st_top += m.sub_pitch;
         }
+        ink_top + (tb - tt) / 2.0
+    };
+    if let Some(tag) = r.tag {
+        let title_w = c.text_width(&f.heading, r.title, m.row_title_px).min(title_room);
+        let x = tx + title_w + m.dp(TAG_GAP);
+        let w = c.text_width(&f.body, tag, m.dp(TAG_PX)) + m.dp(TAG_PAD * 2.0);
+        let h = m.dp(TAG_H);
+        let (stroke, radius) = (m.dp(TAG_STROKE), m.dp(TAG_RADIUS));
+        c.fill_round_rect(x, title_cy - h / 2.0, w, h, radius, tone.value);
+        c.fill_round_rect(x + stroke, title_cy - h / 2.0 + stroke, w - stroke * 2.0, h - stroke * 2.0, radius - stroke, tone.card);
+        c.text_center(&f.body, tag, x + w / 2.0, title_cy, m.dp(TAG_PX), tone.value);
     }
     match r.trail {
         Trail::None => {}
@@ -1198,8 +1309,49 @@ fn draw_row(c: &mut Canvas, t: &Theme, f: &Fonts, r: &Row, lay: &Layout, top: f3
                 c.stroke_circle(ccx, cy, d / 2.0 - m.dp(1.0), m.dp(2.0), t.pal.switch_off);
             }
         }
+        Trail::Network { locked } => {
+            let round = round_button(t, Rect::new(card_x, top, right - card_x, lay.h));
+            let (rcx, rcy, rr) = (round.x + round.w / 2.0, round.y + round.h / 2.0, round.w / 2.0);
+            c.fill_circle(rcx, rcy, rr, tone.round);
+            let (w, h, sw) = (m.dp(ROUND_MARK_W), m.dp(ROUND_MARK_H), m.dp(ROUND_MARK_STROKE));
+            let x0 = rcx - w / 2.0 + sw / 2.0;
+            let x1 = rcx + w / 2.0 - sw / 2.0;
+            c.line(x0, rcy - h / 2.0 + sw / 2.0, x1, rcy, sw, tone.round_mark);
+            c.line(x1, rcy, x0, rcy + h / 2.0 - sw / 2.0, sw, tone.round_mark);
+            if locked {
+                padlock(c, round.x - m.dp(LOCK_GAP + LOCK_W / 2.0), cy, m.dp(LOCK_H), tone.value);
+            }
+        }
     }
 }
+
+/// The round button at the end of a WLAN network's row `row`, which opens
+/// the network's details apart from the row.
+pub fn round_button(t: &Theme, row: Rect) -> Rect {
+    let d = t.m.dp(ROUND_D);
+    Rect::new(row.x + row.w - t.m.inner - d, row.y + row.h / 2.0 - d / 2.0, d, d)
+}
+
+// What a WLAN network's row holds, as the stock WLAN page lays it out, in
+// dp: the fan's centre from the card's edge and its reach, where the name
+// starts, the tag after the name, the padlock and the round button.
+const FAN_CX: f32 = 27.3;
+const FAN_R: f32 = 13.5;
+const FAN_TEXT_X: f32 = 54.7;
+const FAN_ROW_H: f32 = 52.2;
+const TAG_PX: f32 = 11.0;
+const TAG_H: f32 = 13.6;
+const TAG_PAD: f32 = 4.0;
+const TAG_GAP: f32 = 5.0;
+const TAG_STROKE: f32 = 0.7;
+const TAG_RADIUS: f32 = 3.5;
+const LOCK_W: f32 = 10.0;
+const LOCK_H: f32 = 11.5;
+const LOCK_GAP: f32 = 16.0;
+const ROUND_D: f32 = 25.3;
+const ROUND_MARK_W: f32 = 4.0;
+const ROUND_MARK_H: f32 = 7.5;
+const ROUND_MARK_STROKE: f32 = 1.7;
 
 /// A flat settings card holding `rows`.
 pub fn list(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row]) -> Block {
@@ -1506,7 +1658,7 @@ pub fn code_dots(c: &mut Canvas, t: &Theme, cx: f32, cy: f32, typed: usize) {
 }
 
 /// Grey line icons of the parameters page, drawn on a 24 dp grid.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Outline {
     Phone,
     Battery,
@@ -1516,13 +1668,33 @@ pub enum Outline {
     Screen,
     Storage,
     Tag,
+    /// An i in a ring: how a network stands.
+    Info,
+    /// A WLAN fan in lines: which generation of Wi-Fi.
+    Wifi,
+    /// A dial: how fast a link is.
+    Speed,
+    /// Bars rising: how strong a signal is.
+    Signal,
+    /// A shield with a keyhole: how a network is protected.
+    Shield,
+    /// A pin: an address.
+    Address,
+    /// A box over two: a network's mask.
+    Mask,
+    /// A router with its antennas.
+    Router,
 }
 
 pub fn outline(c: &mut Canvas, t: &Theme, icon: Outline, cx: f32, cy: f32) {
+    outline_in(c, t, icon, cx, cy, t.pal.outline);
+}
+
+/// [`outline`] in `col`.
+pub fn outline_in(c: &mut Canvas, t: &Theme, icon: Outline, cx: f32, cy: f32, col: Rgba) {
     let m = &t.m;
     let d = |v: f32| m.dp(v);
     let sw = d(1.7);
-    let col = t.pal.outline;
     // Rounded box whose outer edge spans (x, y, w, h) in dp from the centre.
     let boxed = |c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, r: f32| {
         c.stroke_round_rect(cx + d(x) + sw / 2.0, cy + d(y) + sw / 2.0, d(w) - sw, d(h) - sw, d(r) - sw / 2.0, sw, col);
@@ -1583,7 +1755,118 @@ pub fn outline(c: &mut Canvas, t: &Theme, icon: Outline, cx: f32, cy: f32) {
             ring(c, &[(-8.6, 0.0), (-4.3, -5.95), (8.65, -5.95), (8.65, 5.95), (-4.3, 5.95)]);
             c.fill_circle(cx - d(3.3), cy, d(1.6), col);
         }
+        Outline::Info => {
+            c.stroke_circle(cx, cy, d(8.6), sw, col);
+            c.fill_circle(cx, cy - d(3.7), d(1.15), col);
+            seg(c, 0.0, -0.7, 0.0, 4.3);
+        }
+        Outline::Wifi => {
+            let apex = cy + d(5.6);
+            for r in [3.6f32, 6.8, 10.0] {
+                c.stroke_arc(cx, apex, d(r), -135f32.to_radians(), 90f32.to_radians(), sw, col);
+            }
+            c.fill_circle(cx, apex, d(1.25), col);
+        }
+        Outline::Speed => {
+            c.stroke_circle(cx, cy, d(8.6), sw, col);
+            seg(c, 0.0, 1.2, 3.8, -3.4);
+            c.fill_circle(cx, cy + d(1.2), d(1.5), col);
+        }
+        Outline::Signal => {
+            for (k, h) in [3.0f32, 6.4, 9.8, 13.2].into_iter().enumerate() {
+                let x = -6.3 + k as f32 * 4.2;
+                seg(c, x, 6.6, x, 6.6 - h);
+            }
+        }
+        Outline::Shield => {
+            ring(c, &[(0.0, -9.2), (7.6, -6.1), (7.4, 0.6), (5.1, 5.4), (0.0, 9.2), (-5.1, 5.4), (-7.4, 0.6), (-7.6, -6.1)]);
+            c.fill_circle(cx, cy - d(1.3), d(1.5), col);
+            seg(c, 0.0, -1.3, 0.0, 3.0);
+        }
+        Outline::Address => {
+            let (ccy, r) = (cy - d(2.4), d(7.0));
+            let (left, right) = (150f32.to_radians(), 30f32.to_radians());
+            c.stroke_arc(cx, ccy, r, left, 240f32.to_radians(), sw, col);
+            c.line(cx + r * left.cos(), ccy + r * left.sin(), cx, cy + d(9.4), sw, col);
+            c.line(cx + r * right.cos(), ccy + r * right.sin(), cx, cy + d(9.4), sw, col);
+            c.stroke_circle(cx, ccy, d(2.4), sw, col);
+        }
+        Outline::Mask => {
+            boxed(c, -3.6, -9.3, 7.2, 6.2, 1.6);
+            boxed(c, -9.3, 3.1, 7.2, 6.2, 1.6);
+            boxed(c, 2.1, 3.1, 7.2, 6.2, 1.6);
+            seg(c, 0.0, -3.1, 0.0, 0.0);
+            seg(c, -5.7, 0.0, 5.7, 0.0);
+            seg(c, -5.7, 0.0, -5.7, 3.1);
+            seg(c, 5.7, 0.0, 5.7, 3.1);
+        }
+        Outline::Router => {
+            boxed(c, -9.6, -0.6, 19.2, 9.6, 2.6);
+            for x in [-4.2f32, 0.0, 4.2] {
+                seg(c, x, -0.6, x, -8.2);
+            }
+            for x in [-5.0f32, -1.8] {
+                c.fill_circle(cx + d(x), cy + d(4.2), d(1.0), col);
+            }
+        }
     }
+}
+
+/// A box of [`detail_grid`].
+pub struct Detail<'a> {
+    pub icon: Outline,
+    pub title: &'a str,
+    pub value: String,
+}
+
+/// Two-column grid of icon, title and the value under it, as the stock
+/// network details lay them out; values keep their own line breaks and
+/// wrap to their column.
+pub fn detail_grid(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, items: &[Detail]) -> f32 {
+    let m = &t.m;
+    let (card_x, right) = (m.margin, m.w as f32 - m.margin);
+    let cols = [card_x + m.inner, card_x + (right - card_x) * 0.5];
+    let widths = [cols[1] - cols[0] - m.inner, right - m.inner - cols[1]];
+    let (to_title, to_value, after, pitch) = (m.dp(30.0), m.dp(23.3), m.dp(44.0), m.dp(18.7));
+    let cells: Vec<Vec<String>> = items
+        .iter()
+        .enumerate()
+        .map(|(i, d)| d.value.split('\n').flat_map(|l| wrap(c, &f.body, l, m.sub_px, widths[i % 2])).collect())
+        .collect();
+    let mut centres = Vec::new();
+    let mut icy = top + m.dp(28.0);
+    let mut last = icy;
+    for pair in cells.chunks(2) {
+        centres.push(icy);
+        let lines = pair.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        last = icy + to_title + to_value + pitch * (lines - 1) as f32;
+        icy = last + after;
+    }
+    let bottom = last + to_value;
+    c.fill_round_rect(card_x, top, right - card_x, bottom - top, m.card_radius, t.pal.card);
+    for (i, (d, lines)) in items.iter().zip(&cells).enumerate() {
+        let (x, icy) = (cols[i % 2], centres[i / 2]);
+        outline_in(c, t, d.icon, x + m.dp(10.0), icy, t.pal.spec_label);
+        let title_cy = icy + to_title;
+        c.text_vc(&f.heading, d.title, x, title_cy, m.row_title_px, t.pal.text, Some(widths[i % 2]));
+        for (k, l) in lines.iter().enumerate() {
+            c.text_vc(&f.body, l, x, title_cy + to_value + pitch * k as f32, m.sub_px, t.pal.spec_label, None);
+        }
+    }
+    bottom
+}
+
+/// [`section`] with a word at its right end that does something, such as
+/// the WLAN page's「刷新」: where the word can be touched.
+pub fn section_action(c: &mut Canvas, t: &Theme, f: &Fonts, prev_bottom: f32, label: &str, action: &str) -> (f32, Rect) {
+    let m = &t.m;
+    let y = section(c, t, f, prev_bottom, label);
+    let ink_top = prev_bottom + m.section_label_top;
+    let w = c.text_width(&f.label, action, m.label_px);
+    let x = m.w as f32 - m.margin - m.inner - w;
+    c.text_top(&f.label, action, x, ink_top, m.label_px, t.pal.accent, None);
+    let reach = m.dp(12.0);
+    (y, Rect::new(x - reach, ink_top - reach, w + reach + m.margin + m.inner, m.label_px + reach * 2.0))
 }
 
 /// Centred lettering with its cap line at `cap_top`, as ink whose colour
@@ -2073,6 +2356,44 @@ mod tests {
         assert!((x - 200.0).abs() <= 3.0 && (y - 200.0).abs() <= 3.0, "centred: ({x}, {y})");
         let tick = (200 * c.w + 215) * 4;
         assert_eq!(c.data[tick as usize], 0, "the tick is cut out of it");
+    }
+
+    #[test]
+    fn the_wlan_fan_stands_in_the_middle_of_its_tile_and_lights_as_many_arcs_as_the_signal() {
+        let (black, white, grey) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255), Rgba::rgb(0, 0, 255));
+        let mut c = Canvas::new(400, 400);
+        c.clear(black);
+        glyph(&mut c, Icon::Wlan, 200.0, 200.0, 400.0, white, black);
+        let (l, top, right, bottom) = ink_box(&c, Rect::new(0.0, 0.0, 400.0, 400.0), |p| p[0] > 0);
+        let (x, y) = ((l + right) / 2.0, (top + bottom) / 2.0);
+        assert!((x - 200.0).abs() <= 3.0 && (y - 200.0).abs() <= 3.0, "centred: ({x}, {y})");
+        let mut c = Canvas::new(400, 400);
+        c.clear(black);
+        wlan_fan(&mut c, 200.0, 200.0, 150.0, 1, white, grey);
+        let lit = ink_box(&c, Rect::new(0.0, 0.0, 400.0, 400.0), |p| p[0] > 0);
+        let unlit = ink_box(&c, Rect::new(0.0, 0.0, 400.0, 400.0), |p| p[2] > 0 && p[0] == 0);
+        assert!(lit.1 > unlit.1 + 60.0, "only the inner arc is lit: lit from {}, unlit from {}", lit.1, unlit.1);
+        let mut c = Canvas::new(400, 400);
+        c.clear(black);
+        padlock(&mut c, 200.0, 200.0, 300.0, white);
+        let (l, top, right, bottom) = ink_box(&c, Rect::new(0.0, 0.0, 400.0, 400.0), |p| p[0] > 0);
+        assert!(((l + right) / 2.0 - 200.0).abs() <= 2.0 && ((top + bottom) / 2.0 - 200.0).abs() <= 2.0, "the padlock is centred");
+        assert!((bottom - top - 300.0).abs() <= 3.0, "and as tall as asked: {}", bottom - top);
+    }
+
+    #[test]
+    fn the_network_details_icons_stand_in_the_middle_of_their_place() {
+        let t = Theme::light(1200, 2608, 3.0);
+        for icon in [Outline::Info, Outline::Wifi, Outline::Speed, Outline::Signal, Outline::Shield, Outline::Address, Outline::Mask, Outline::Router] {
+            let mut c = Canvas::new(200, 200);
+            c.clear(Rgba::rgb(255, 255, 255));
+            outline_in(&mut c, &t, icon, 100.0, 100.0, Rgba::rgb(0, 0, 0));
+            let (l, top, right, bottom) = ink_box(&c, Rect::new(0.0, 0.0, 200.0, 200.0), |p| p[0] < 200);
+            let (x, y) = ((l + right) / 2.0, (top + bottom) / 2.0);
+            // Within a dp of the place's centre, three pixels a dp.
+            assert!((x - 100.0).abs() <= 3.0 && (y - 100.0).abs() <= 3.0, "{icon:?} centred: ({x}, {y})");
+            assert!(right - l <= 66.0 && bottom - top <= 66.0, "{icon:?} within 22 dp: {}x{}", right - l, bottom - top);
+        }
     }
 
     #[test]

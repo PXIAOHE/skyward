@@ -16,6 +16,7 @@ const fn entry(title: &'static str, place: &'static str, screen: Screen, keys: &
 }
 
 pub const ENTRIES: &[Entry] = &[
+    entry("WLAN", "主页", Screen::Wlan, &["wuxianwangluo", "wxwl", "wangluo", "wl", "lianwang", "wifi"]),
     entry("安装", "主页", Screen::Install, &["anzhuang", "az", "install", "shuaji", "sj"]),
     entry("从内部存储安装", "安装", Screen::Install, &["congneibucunchuanzhuang", "cnbccaz", "neicun", "sdcard", "zip"]),
     entry("从 U 盘安装", "安装", Screen::Install, &["congupananzhuang", "cupaz", "upan", "usb", "otg"]),
@@ -88,6 +89,12 @@ pub fn find(query: &str) -> Vec<&'static Entry> {
     found.into_iter().map(|(_, _, e)| e).collect()
 }
 
+/// What [`find`] finds that the phone has: a phone whose WLAN the recovery
+/// does not bring up has no WLAN page.
+pub fn find_on(query: &str, wlan: bool) -> Vec<&'static Entry> {
+    find(query).into_iter().filter(|e| wlan || e.screen != Screen::Wlan).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +122,13 @@ mod tests {
     #[test]
     fn chinese_titles_match_as_typed() {
         assert_eq!(titles("挂载"), ["挂载"]);
+    }
+
+    #[test]
+    fn the_wlan_is_found_where_the_phone_has_it() {
+        assert_eq!(titles("wifi"), ["WLAN"]);
+        assert_eq!(find_on("wlan", true).iter().map(|e| e.title).collect::<Vec<_>>(), ["WLAN"]);
+        assert!(find_on("wlan", false).is_empty());
     }
 
     #[test]

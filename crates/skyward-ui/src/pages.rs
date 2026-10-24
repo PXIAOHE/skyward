@@ -13,9 +13,11 @@ use crate::geom::Rect;
 use crate::search;
 use crate::term::{self, Term};
 use crate::theme::Theme;
-use crate::widgets::{self, Fact, Icon, Outline, Row, Spec, Tone, Trail};
+use crate::widgets::{self, Detail, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DeviceInfo, VERSION};
 use skyward_install::{Outcome, Reflash, Stage};
+use skyward_net::supplicant::Security;
+use skyward_net::wlan::{Bands, Network, Power, Stage as Joining};
 use skyward_vab::{Slot, Standing};
 use std::path::Path;
 
@@ -91,6 +93,9 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Rename => rename(cx),
         Screen::Clash => clash(cx),
         Screen::FileJob => file_job(cx),
+        Screen::Wlan => wlan(cx),
+        Screen::WlanPassword => wlan_password(cx),
+        Screen::WlanNetwork => wlan_network(cx),
     }
 }
 
@@ -203,6 +208,13 @@ pub fn home(cx: &Ctx) -> Frame {
         out.push(Hit { rect, action: Action::Open(Screen::Update) });
     }
     y = card.bottom + t.m.card_gap;
+    // On a phone whose WLAN the recovery brings up, the WLAN comes first
+    // under the device, as on the stock settings home.
+    if let Some(w) = &cx.state.wlan {
+        let wlan = widgets::list(&mut c, t, f, y, &[Row::new("WLAN").icon(BLUE, Icon::Wlan).trail(Trail::Value(fmt::wlan_value(w)))]);
+        out.extend(hits(&wlan.rows, &[Action::Open(Screen::Wlan)]));
+        y = wlan.bottom + t.m.card_gap;
+    }
     let tools = widgets::list(&mut c, t, f, y, &[
         Row::new("安装").icon(GREEN, Icon::Install),
         Row::new("备份").icon(BLUE, Icon::Backup),
@@ -1141,7 +1153,7 @@ pub fn search(cx: &Ctx) -> Frame {
     if s.search.trim().is_empty() {
         widgets::footnote(&mut c, t, f, top, "输入功能或分区名称，支持拼音全拼和首字母，例如输入 bf 可找到「备份」。");
     } else {
-        let found = search::find(&s.search);
+        let found = search::find_on(&s.search, s.wlan.is_some());
         if found.is_empty() {
             let none = format!("未找到\"{}\"", s.search.trim());
             widgets::list(&mut c, t, f, top, &[Row::new(&none).trail(Trail::None)]);
@@ -1581,6 +1593,146 @@ pub fn update(cx: &Ctx) -> Frame {
         widgets::footnote(&mut c, t, f, track.y + track.h, "合并后无法回到更新前的系统。");
     }
     Frame::new(t, c, out, "系统更新", top)
+}
+
+/// The WLAN switch; then the network chosen and how joining it goes, and
+/// the networks in range, strongest first.
+pub fn wlan(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let w = s.wlan.as_ref().expect("the WLAN page shows on a phone whose WLAN is brought up");
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let on = !matches!(w.power, Power::Off | Power::Failed(_));
+    let switch = widgets::list(&mut c, t, f, top, &[Row::new("WLAN").trail(Trail::Switch(on))]);
+    out.extend(hits(&switch.rows, &[Action::Toggle(Switch::Wlan)]));
+    let mut y = switch.bottom;
+    match &w.power {
+        Power::Off => y = widgets::footnote(&mut c, t, f, y, "开启后，可连接 WLAN 下载系统更新。"),
+        Power::Failed(why) => y = widgets::footnote(&mut c, t, f, y, &format!("无法开启 WLAN：{why}")),
+        Power::Starting => y = widgets::footnote(&mut c, t, f, y, "正在开启 WLAN"),
+        Power::On => {
+            let locked = |s: Security| !matches!(s, Security::Open | Security::Owe);
+            // The network chosen stands out in the accent, as the stock
+            // page shows the one it is on.
+            if let Some(j) = &w.joined {
+                let found = w.networks.iter().find(|n| n.ssid == j.ssid);
+                let (signal, bands) = match (&j.stage, found) {
+                    (Joining::Connected(link), found) => (Some(link.signal), found.map_or(Bands::of(link.frequency), |n| n.bands)),
+                    (_, Some(n)) => (Some(n.signal), n.bands),
+                    (_, None) => (None, Bands::default()),
+                };
+                let tag = fmt::band_tag(bands);
+                let mut row = Row::new(&j.name).fan(signal.map_or(0, fmt::signal_level)).subtitle(fmt::joining(&j.stage));
+                row = row.trail(Trail::Network { locked: locked(j.security) });
+                if let Some(tag) = &tag {
+                    row = row.tag(tag);
+                }
+                let joined = widgets::list_toned(&mut c, t, f, y + t.m.card_gap, &[row], &Tone::lit(t));
+                out.extend(hits(&joined.rows, &[Action::OpenJoined]));
+                out.push(Hit { rect: widgets::round_button(t, joined.rows[0]), action: Action::OpenJoined });
+                y = joined.bottom;
+            }
+            let others: Vec<(usize, &Network)> =
+                w.networks.iter().enumerate().filter(|(_, n)| w.joined.as_ref().is_none_or(|j| j.ssid != n.ssid)).collect();
+            let (below, rescan) = widgets::section_action(&mut c, t, f, y, "选取附近的 WLAN", "刷新");
+            out.push(Hit { rect: rescan, action: Action::Rescan });
+            y = below;
+            if others.is_empty() {
+                y = widgets::footnote(&mut c, t, f, y - t.m.dp(10.0), "正在搜索附近的 WLAN");
+            } else {
+                let tags: Vec<Option<String>> = others.iter().map(|(_, n)| fmt::band_tag(n.bands)).collect();
+                let rows: Vec<Row> = others
+                    .iter()
+                    .zip(&tags)
+                    .map(|((_, n), tag)| {
+                        let row = Row::new(&n.name).fan(fmt::signal_level(n.signal)).trail(Trail::Network { locked: locked(n.security) });
+                        match tag {
+                            Some(tag) => row.tag(tag),
+                            None => row,
+                        }
+                    })
+                    .collect();
+                let list = widgets::list(&mut c, t, f, y, &rows);
+                let picks: Vec<Action> = others.iter().map(|(k, _)| Action::JoinNetwork(*k)).collect();
+                out.extend(hits(&list.rows, &picks));
+                // The round buttons come after the rows they sit on, and a
+                // touch finds the last control under it.
+                for (rect, (k, _)) in list.rows.iter().zip(&others) {
+                    out.push(Hit { rect: widgets::round_button(t, *rect), action: Action::NetworkDetails(*k) });
+                }
+                y = list.bottom;
+            }
+        }
+    }
+    Frame::new(t, fit(c, t, y), out, "WLAN", top)
+}
+
+/// The password of the network chosen: its name, what is typed, a switch
+/// to show it, and the keyboard.
+pub fn wlan_password(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let network = s.joining.as_ref().expect("the password page is for a network");
+    let mut c = page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let y = widgets::section_first(&mut c, t, f, top, &network.name);
+    let shown = if s.show_password { s.password.clone() } else { "•".repeat(s.password.chars().count()) };
+    let (y, caret) = widgets::text_field(&mut c, t, f, y, &shown);
+    let show = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new("显示密码").trail(Trail::Switch(s.show_password))]);
+    out.extend(hits(&show.rows, &[Action::Toggle(Switch::ShowPassword)]));
+    keyboard_hits(&mut c, t, f, s, "连接", &mut out);
+    Frame { caret: Some(caret), ..Frame::new(t, c, out, "输入密码", top) }
+}
+
+/// A network's details, in the stock page's grid: for the one chosen, how
+/// joining it goes and what it gave, and forgetting it; for any other, how
+/// strong and how protected it is.
+pub fn wlan_network(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let network = s.details.as_ref().expect("the details page is of a network");
+    let joined = s.wlan.as_ref().and_then(|w| w.joined.as_ref()).filter(|j| j.ssid == network.ssid);
+    let y = widgets::section_first(&mut c, t, f, top, &network.name);
+    let detail = |icon, title, value: String| Detail { icon, title, value };
+    let security = detail(Outline::Shield, "安全性", fmt::security(network.security).to_string());
+    let Some(j) = joined else {
+        let items = [
+            detail(Outline::Wifi, "频段", fmt::bands(network.bands)),
+            detail(Outline::Signal, "信号强度", fmt::signal(network.signal).to_string()),
+            security,
+        ];
+        let y = widgets::detail_grid(&mut c, t, f, y, &items);
+        return Frame::new(t, fit(c, t, y), out, "网络详情", top);
+    };
+    let mut items = vec![detail(Outline::Info, "状态信息", fmt::joining(&j.stage).to_string())];
+    match &j.stage {
+        Joining::Connected(link) => {
+            if let Some(n) = link.generation {
+                items.push(detail(Outline::Wifi, "技术标准", fmt::generation(n)));
+            }
+            if let Some(speed) = link.speed {
+                items.push(detail(Outline::Speed, "连接速度", format!("{speed} Mbps")));
+            }
+            items.push(detail(Outline::Signal, "信号强度", fmt::signal(link.signal).to_string()));
+            items.push(security);
+            items.push(detail(Outline::Address, "IP 地址", link.address.to_string()));
+            items.push(detail(Outline::Mask, "子网掩码", link.mask.to_string()));
+            if let Some(router) = link.router {
+                items.push(detail(Outline::Router, "路由器", router.to_string()));
+            }
+        }
+        _ => {
+            items.push(detail(Outline::Signal, "信号强度", fmt::signal(network.signal).to_string()));
+            items.push(security);
+        }
+    }
+    let y = widgets::detail_grid(&mut c, t, f, y, &items);
+    let forget = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new("删除网络").tint(t.pal.danger).trail(Trail::None)]);
+    out.extend(hits(&forget.rows, &[Action::LeaveNetwork]));
+    Frame::new(t, fit(c, t, forget.bottom), out, "网络详情", top)
 }
 
 /// The file manager, every entry of the folder shown, folders first.

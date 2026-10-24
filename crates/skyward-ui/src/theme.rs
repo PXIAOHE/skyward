@@ -37,6 +37,10 @@ pub struct Palette {
     /// Laid over the `<`, the search page's round button and the home
     /// page's search bar while a finger holds them down.
     pub button_press: Rgba,
+    /// The round button at the end of a WLAN network's row, and the arrow
+    /// in it.
+    pub round: Rgba,
+    pub round_mark: Rgba,
 }
 
 /// The status bar battery's inks, partly see-through as the stock status
@@ -262,6 +266,9 @@ const LIGHT: Palette = Palette {
     // to 219, the search field and its round button from 229 to 206.
     row_press: Rgba::rgb(0, 0, 0).with_alpha(30),
     button_press: Rgba::rgb(0, 0, 0).with_alpha(26),
+    // Sampled from the stock WLAN page.
+    round: Rgba::rgb(242, 242, 242),
+    round_mark: Rgba::rgb(169, 169, 169),
 };
 
 const DARK: Palette = Palette {
@@ -301,6 +308,9 @@ const DARK: Palette = Palette {
     // White as strong as the black in the light theme.
     row_press: Rgba::rgb(255, 255, 255).with_alpha(30),
     button_press: Rgba::rgb(255, 255, 255).with_alpha(26),
+    // As far from the card as the light theme's are from its own.
+    round: Rgba::rgb(41, 41, 41),
+    round_mark: Rgba::rgb(118, 118, 118),
 };
 
 // Sampled from the stock「我的设备」page: in light mode the cards are

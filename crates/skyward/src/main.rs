@@ -31,6 +31,8 @@ mod services;
 mod ui;
 #[cfg(target_os = "android")]
 mod wipe;
+#[cfg(target_os = "android")]
+mod wlan;
 
 #[derive(Parser)]
 #[command(name = "skyward", version, about = "Skyward recovery")]
@@ -440,8 +442,12 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         skyward_sys::kmsg("the directory for the phone's hardware services can run")?;
     }
     // Only a program that has to register with the service directory needs
-    // the directory to know the phone describes it.
-    let registering: Vec<String> = cfg.services.iter().filter_map(|s| s.ready_service.clone()).collect();
+    // the directory to know the phone describes it. The WLAN's supplicant
+    // registers whenever the WLAN is turned on, and the directory can no
+    // longer start again by then: the key service registers with it below,
+    // and nothing would register that again.
+    let mut registering: Vec<String> = cfg.services.iter().filter_map(|s| s.ready_service.clone()).collect();
+    registering.extend(cfg.wlan.iter().map(|w| w.service.clone()));
     if !registering.is_empty() {
         let described = secure::publish_descriptions(&registering)?;
         skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;

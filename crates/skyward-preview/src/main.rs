@@ -2,6 +2,8 @@ use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Reflash, Refusal, Stage};
+use skyward_net::supplicant::Security;
+use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Wlan};
 use skyward_ui::app::{
     Action, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, EraseStop, FileKind,
     FileOp, FileRow, FileTask, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow, Part, Pick, Place, Screen, Source, Touch,
@@ -295,7 +297,7 @@ fn main() -> Result<()> {
         app.state.script_output = said(failed);
     };
     let usb_page = Screen::Choose(Place::UsbDrive);
-    let pages: [PageShot; 107] = [
+    let pages: [PageShot; 121] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -484,6 +486,39 @@ fn main() -> Result<()> {
             app.relabel_progress(131_908, 131_908, 37);
             app.relabel_ended(JobEnd::Done, 0);
         }),
+        ("131-home-light-wlan", Screen::Home, false, &|app| app.state.wlan = Some(joined(Joining::Connected(router_link())))),
+        ("132-wlan-light-off", Screen::Wlan, false, &|app| app.state.wlan = Some(Wlan::default())),
+        ("133-wlan-dark-starting", Screen::Wlan, true, &|app| app.state.wlan = Some(Wlan { power: Power::Starting, ..Wlan::default() })),
+        ("134-wlan-light-nearby", Screen::Wlan, false, &|app| app.state.wlan = Some(Wlan { power: Power::On, networks: nearby(), joined: None })),
+        ("135-wlan-light-joined", Screen::Wlan, false, &|app| app.state.wlan = Some(joined(Joining::Connected(router_link())))),
+        ("136-wlan-dark-wrong-password", Screen::Wlan, true, &|app| app.state.wlan = Some(joined(Joining::WrongPassword))),
+        ("137-wlan-light-addressing", Screen::Wlan, false, &|app| app.state.wlan = Some(joined(Joining::Addressing))),
+        ("138-wlan-light-failed", Screen::Wlan, false, &|app| {
+            let why = "wpa_supplicant ended as it started: exit status: 255".into();
+            app.state.wlan = Some(Wlan { power: Power::Failed(why), ..Wlan::default() });
+        }),
+        ("139-wlan-password-light", Screen::WlanPassword, false, &|app| {
+            app.state.joining = Some(nearby()[0].clone());
+            app.state.password = "skyward2024".into();
+        }),
+        ("140-wlan-password-dark-shown", Screen::WlanPassword, true, &|app| {
+            app.state.joining = Some(nearby()[2].clone());
+            app.state.password = "skyward2024".into();
+            app.state.show_password = true;
+        }),
+        ("141-wlan-network-light", Screen::WlanNetwork, false, &|app| {
+            app.state.wlan = Some(joined(Joining::Connected(router_link())));
+            app.state.details = Some(nearby()[0].clone());
+        }),
+        ("142-wlan-network-dark", Screen::WlanNetwork, true, &|app| {
+            app.state.wlan = Some(joined(Joining::Connected(router_link())));
+            app.state.details = Some(nearby()[0].clone());
+        }),
+        ("152-wlan-network-light-nearby", Screen::WlanNetwork, false, &|app| {
+            app.state.wlan = Some(joined(Joining::Connected(router_link())));
+            app.state.details = Some(nearby()[7].clone());
+        }),
+        ("153-wlan-light-searching", Screen::Wlan, false, &|app| app.state.wlan = Some(Wlan { power: Power::On, ..Wlan::default() })),
         ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
             let (rows, cols) = app.term_size(&fonts);
             app.term_started(rows, cols);
@@ -977,6 +1012,56 @@ fn sample_bin() -> Vec<FileRow> {
     rest.sort_by_key(|r| r.name.to_lowercase());
     rows.extend(rest);
     rows
+}
+
+/// Networks in range, as the 13 Ultra's supplicant found them on
+/// 2026-10-22, the strongest of each.
+fn nearby() -> Vec<Network> {
+    let n = |name: &str, signal: i32, frequency: u32, also: Option<u32>, security: Security| {
+        let b = Bands::of(frequency);
+        let bands = match also.map(Bands::of) {
+            Some(o) => Bands { ghz2: b.ghz2 || o.ghz2, ghz5: b.ghz5 || o.ghz5, ghz6: b.ghz6 || o.ghz6 },
+            None => b,
+        };
+        Network { ssid: name.as_bytes().to_vec(), name: name.into(), signal, frequency, bands, security }
+    };
+    vec![
+        n("Skyward", -30, 2462, Some(5805), Security::Psk),
+        n("Skyward-Guest", -36, 2447, Some(5180), Security::Psk),
+        n("Skyward-IoT", -38, 2447, None, Security::Psk),
+        n("Skyward-Lab", -45, 2452, None, Security::Psk),
+        n("Skyward客厅", -50, 5180, None, Security::Psk),
+        n("Skyward-Mesh", -62, 2452, None, Security::Psk),
+        n("Skyward-Office", -68, 2412, None, Security::Psk),
+        n("Skyward-5G", -68, 5745, None, Security::Psk),
+        n("Skyward-Family", -71, 2462, None, Security::Sae),
+        n("Skyward-Garage", -77, 2437, None, Security::Psk),
+        n("Skyward书房", -80, 2437, None, Security::Psk),
+        n("Skyward-Open", -84, 2412, None, Security::Open),
+    ]
+}
+
+/// The first of [`nearby`] chosen, and how joining it goes.
+fn joined(stage: Joining) -> Wlan {
+    let n = nearby();
+    let j = Joined { ssid: n[0].ssid.clone(), name: n[0].name.clone(), security: n[0].security, stage };
+    Wlan { power: Power::On, networks: n, joined: Some(j) }
+}
+
+/// What a home router gave the 13 Ultra.
+fn router_link() -> Link {
+    use std::net::Ipv4Addr;
+    Link {
+        address: Ipv4Addr::new(192, 168, 1, 23),
+        mask: Ipv4Addr::new(255, 255, 255, 0),
+        router: Some(Ipv4Addr::new(192, 168, 1, 1)),
+        dns: vec![Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(114, 114, 114, 114)],
+        signal: -31,
+        frequency: 5805,
+        speed: Some(866),
+        generation: Some(5),
+        mac: "02:00:00:00:00:04".into(),
+    }
 }
 
 /// A page as most previews show it: on a phone whose data partition is
