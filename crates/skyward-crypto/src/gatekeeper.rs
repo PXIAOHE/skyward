@@ -161,6 +161,17 @@ impl<'a> Gatekeeper<'a> {
         }
     }
 
+    /// Which version of its interface the newer kind serves, which it
+    /// answers only once it has taken the call as one for that interface.
+    /// The older kind numbers its version in its own name, and has none to
+    /// answer.
+    pub fn version(&self) -> Result<Option<i32>> {
+        match self {
+            Gatekeeper::Newer(device) => skyward_binder::service::version(device, INTERFACE).map(Some),
+            Gatekeeper::Older(_) => Ok(None),
+        }
+    }
+
     /// Have the secure world check `password` against what it recognises
     /// in `slot`, and give back the note it writes for a right answer.
     /// `enrolled` is what the phone recorded when that slot was enrolled.

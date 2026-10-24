@@ -211,7 +211,7 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
     };
     open_shared(service)?;
     let mut closed = Vec::new();
-    let mut owner = None;
+    let mut owner = Note::default();
     for user in open_users(service)? {
         let protector = protector(user)?;
         match protector.lock {
@@ -224,7 +224,7 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
             Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
         }
     }
-    Ok(Opening { mounted, closed: open_made_up(service, closed, owner.as_ref()) })
+    Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
 }
 
 /// Open the own files of `user` with what they typed at their screen lock
@@ -234,22 +234,30 @@ pub fn unlock(service: &KeyMint, closed: &[Closed], user: u32, credential: &[u8]
     let note = open_user_files(service, user, Some(credential), None)?;
     let rest = closed.iter().filter(|c| c.user != user).cloned().collect();
     Ok(match user == OWNER {
-        true => open_made_up(service, rest, note.as_ref()),
+        true => open_made_up(service, rest, &note),
         false => rest,
     })
 }
 
 /// Open the own files of each of `closed` whose credential the phone made
 /// up, behind `owner`, the note the owner's own secret gave; give those
-/// still closed, a made-up one with why it did not open. With no note,
-/// none of them is tried.
-fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: Option<&Token>) -> Vec<Closed> {
-    let Some(owner) = owner else { return closed };
+/// still closed, a made-up one with why it did not open. Where the secure
+/// world wrote no note, none of them is tried and each is left with why.
+fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: &Note) -> Vec<Closed> {
+    let Some(token) = &owner.token else {
+        return closed
+            .into_iter()
+            .map(|c| match c.made_up {
+                true => Closed { why: owner.refused.clone(), ..c },
+                false => c,
+            })
+            .collect();
+    };
     closed
         .into_iter()
         .filter_map(|c| match c.made_up {
             false => Some(c),
-            true => match open_user_files(service, c.user, None, Some(owner)) {
+            true => match open_user_files(service, c.user, None, Some(token)) {
                 Ok(_) => None,
                 Err(e) => Some(Closed { why: Some(format!("{e:#}")), ..c }),
             },
@@ -436,7 +444,7 @@ const TAG_BYTES: usize = 16;
 /// none, and a user the phone made one up for needs `owner`, the note the
 /// owner's own secret gave. The owner's files open, their shared storage
 /// shows at /sdcard.
-fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Option<Token>> {
+fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Note> {
     let protector = protector(user)?;
     let stretched = match &protector.lock {
         Some(lock) => {
@@ -503,21 +511,35 @@ fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owne
     secret_note(user, &synthetic_password)
 }
 
+/// What the secure world wrote for a user's own secret, which is what the
+/// credentials the phone made up for other users are kept behind. A user
+/// whose secret the secure world knows nothing about has none, and so has
+/// one whose secure world would write none; the user's own files are open
+/// either way, and only the users kept behind this one stay closed.
+#[derive(Debug, Default)]
+struct Note {
+    token: Option<Token>,
+    /// Why the secure world wrote none, where it was asked and would not.
+    refused: Option<String>,
+}
+
 /// Have the secure world check the user's own secret, so the keys the
-/// phone keeps for that user can be used. A user whose secret the secure
-/// world knows nothing about has no note to give.
-fn secret_note(user: u32, synthetic_password: &[u8]) -> Result<Option<Token>> {
+/// phone keeps for that user can be used.
+fn secret_note(user: u32, synthetic_password: &[u8]) -> Result<Note> {
     let handle = blobs(user).join(SECRET_HANDLE);
     if !handle.is_file() {
-        return Ok(None);
+        return Ok(Note::default());
     }
     let enrolled = std::fs::read(&handle).with_context(|| format!("read {}", handle.display()))?;
     let (binder, hardware) = (Binder::open()?, Binder::hardware()?);
     let password = crate::user::secret_gatekeeper_password(synthetic_password);
-    let note = Gatekeeper::open(&binder, &hardware)?
-        .verify(user, &enrolled, &password)
-        .with_context(|| format!("have the secure world check the secret behind user {user}'s credential"))?;
-    Ok(Some(note))
+    let asked = Gatekeeper::open(&binder, &hardware)
+        .and_then(|gatekeeper| gatekeeper.verify(user, &enrolled, &password))
+        .with_context(|| format!("have the secure world check the secret behind user {user}'s credential"));
+    Ok(match asked {
+        Ok(token) => Note { token: Some(token), refused: None },
+        Err(e) => Note { token: None, refused: Some(format!("{e:#}")) },
+    })
 }
 
 /// Build the device-mapper target that reads the partition through the

@@ -58,6 +58,24 @@ const DEBUG_PID: u32 = u32::from_be_bytes(*b"_PID");
 /// same way.
 const INTERFACE: u32 = u32::from_be_bytes(*b"_NTF");
 
+/// Ask a service which version of its interface it serves. Every service
+/// of the newer kind answers this, numbered from the top of the range its
+/// own methods are numbered from the bottom of.
+const INTERFACE_VERSION: u32 = 0x00ff_ffff;
+
+/// Which version of `interface` a service serves. It answers this only
+/// once it has taken the call as one for that interface, so a service that
+/// will not answer it is one that turns the call away before reading
+/// anything of what it carries.
+#[cfg(target_os = "android")]
+pub fn version(service: &crate::driver::Handle, interface: &str) -> Result<i32> {
+    let what = format!("ask which version of {interface} is served");
+    let reply = service.transact(INTERFACE_VERSION, &Parcel::call(interface)).with_context(|| what.clone())?;
+    let mut read = reply.read();
+    status::ok(&mut read).with_context(|| what.clone())?;
+    read.i32().with_context(|| what)
+}
+
 /// The service registered under `name`, or `None` while nothing has
 /// registered it.
 #[cfg(target_os = "android")]

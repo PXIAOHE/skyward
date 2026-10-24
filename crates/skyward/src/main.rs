@@ -319,6 +319,10 @@ fn main() -> Result<()> {
                 for (tag, value) in service.authorizations(&held, &[])? {
                     println!("  tag {tag} = {value} ({value:#x})");
                 }
+                match service.usable(&held, &[]) {
+                    Ok(()) => println!("the key service unwraps it and will use it"),
+                    Err(e) => println!("the key service will not use it: {e:#}"),
+                }
                 return Ok(());
             }
             let stored = skyward_crypto::keystore::StoredKey::load(&key)?;
@@ -334,6 +338,19 @@ fn main() -> Result<()> {
             let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
             let gatekeeper = skyward_crypto::gatekeeper::Gatekeeper::open(&binder, &hardware)?;
             println!("the credential service answers for {}", gatekeeper.serves()?);
+            match gatekeeper.version() {
+                Ok(Some(version)) => println!("it serves version {version} of that interface"),
+                Ok(None) => println!("it numbers its version in its own name"),
+                Err(e) => println!("it will not say which version it serves: {e:#}"),
+            }
+            // A credential belonging to no one, which the secure world
+            // cannot recognise and counts against nobody. What comes back
+            // says whether the service takes a check at all, apart from
+            // whether it recognises what it is given.
+            match gatekeeper.verify(NOBODY, &[], &[]) {
+                Ok(_) => println!("it took a credential belonging to no one"),
+                Err(e) => println!("asked about a credential belonging to no one it says: {e:#}"),
+            }
             Ok(())
         }
         #[cfg(target_os = "android")]
@@ -494,6 +511,11 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     }
     services::start(&services, libraries.as_deref())
 }
+
+/// A slot of the credential service that belongs to no user, which the
+/// phone numbers its own from nothing upwards.
+#[cfg(target_os = "android")]
+const NOBODY: u32 = u32::MAX;
 
 /// The switch that has the kernel pass the firmware requests it cannot
 /// answer itself on to ueventd.

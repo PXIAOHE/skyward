@@ -26,6 +26,10 @@ const KIND_BYTES: i32 = -1_879_048_192;
 const KIND_BIGNUM: i32 = -2_147_483_648;
 const UPDATE: u32 = 2;
 const FINISH: u32 = 3;
+const ABORT: u32 = 4;
+
+/// How long the nonce of an AES-GCM key is here.
+const NONCE_BYTES: usize = 12;
 
 /// The key service's way of saying the key was made under an older build of
 /// the phone's own firmware and has to be renewed before it will be used.
@@ -316,5 +320,20 @@ impl<'a> KeyMint<'a> {
         let mut read = reply.read();
         status::ok(&mut read).context("close the decryption, which is where a wrong key is refused")?;
         read.blob().context("read what the decryption ended with")
+    }
+
+    fn abort(&self, operation: &Handle) -> Result<()> {
+        let reply = operation.transact(ABORT, &Parcel::call(OPERATION)).context("drop the decryption")?;
+        status::ok(&mut reply.read()).context("drop the decryption")
+    }
+
+    /// Whether the secure world will unwrap the key at all: a decryption is
+    /// opened on it under a nonce of nothing and dropped again, which reads
+    /// nothing and changes nothing. It tells a key the secure world cannot
+    /// unwrap, as one made under another build or bound to something not
+    /// given back to it is, apart from one that merely decrypts to nothing.
+    pub fn usable(&self, key_blob: &[u8], app_id: &[u8]) -> Result<()> {
+        let operation = self.begin(key_blob, app_id, &[0; NONCE_BYTES], None)?;
+        self.abort(&operation)
     }
 }
