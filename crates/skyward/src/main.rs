@@ -30,6 +30,8 @@ mod services;
 #[cfg(target_os = "android")]
 mod ui;
 #[cfg(target_os = "android")]
+mod updates;
+#[cfg(target_os = "android")]
 mod wipe;
 #[cfg(target_os = "android")]
 mod wlan;

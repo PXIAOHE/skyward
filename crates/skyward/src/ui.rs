@@ -9,6 +9,7 @@ use crate::pty;
 use crate::readings::{Reading, Readings};
 use crate::secure;
 use crate::services;
+use crate::updates;
 use crate::wipe::{self, Eraser, Step};
 use crate::wlan;
 use anyhow::{anyhow, ensure, Context, Result};
@@ -20,11 +21,14 @@ use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
 use skyward_files::Ownership;
 use skyward_block::usb::{self, Drive};
+use skyward_net::download::{self, Failure};
 use skyward_net::http::Servers;
+use skyward_net::release::{Installed, Release};
 use skyward_net::wlan::{Power as WlanPower, Wlan};
 use skyward_ui::app::{
-    App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, Effect, EraseStop, FileKind, FileOp, FileRow,
-    FileTask, Held, JobEnd, Keys, MountFailure, Part, Place, RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe,
+    App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
+    FileRow, FileTask, Have, Held, JobEnd, Keys, MountFailure, Part, Place, RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe,
+    DOWNLOADS,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
@@ -751,6 +755,46 @@ fn wlan_worker(w: &Option<wlan::Worker>) -> Result<&wlan::Worker> {
     w.as_ref().context("the phone's WLAN is not brought up")
 }
 
+/// The installed system, as the update server is told of it.
+fn installed(cfg: &DeviceConfig, info: &skyward_info::DeviceInfo) -> Result<Installed> {
+    let slot = info.slot.context("only an A/B phone is updated")?;
+    let props = skyward_info::installed_props(slot)?;
+    let prop = |name: &str| props.get(name).cloned().with_context(|| format!("the installed system says no {name}"));
+    Ok(Installed {
+        device: prop("ro.product.mod_device")?,
+        version: prop(&cfg.device.os_version_prop)?,
+        android: prop("ro.build.version.release")?,
+        unlocked: skyward_block::boot_param("androidboot.flash.locked")?.as_deref() == Some("0"),
+    })
+}
+
+/// Where `release`'s full package is downloaded to.
+fn downloaded(release: &Release) -> PathBuf {
+    Path::new(skyward_crypto::data::SDCARD).join(DOWNLOADS).join(&release.name)
+}
+
+/// What internal storage holds of `release`'s full package; nothing while it
+/// cannot be read.
+fn have(app: &App, release: &Release) -> Have {
+    if !app.state.data.storage_open() {
+        return Have::Nothing;
+    }
+    let path = downloaded(release);
+    let size = |p: &Path| match fs::metadata(p) {
+        Ok(m) => Some(m.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            let _ = skyward_sys::kmsg(&format!("read {}: {e}", p.display()));
+            None
+        }
+    };
+    match (size(&path), size(&download::partial(&path))) {
+        (Some(whole), _) => Have::Whole(whole),
+        (None, Some(part)) => Have::Part(part),
+        (None, None) => Have::Nothing,
+    }
+}
+
 /// Wait until a device, the installer or the recovery socket has something,
 /// or `timeout_ms` passes.
 fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
@@ -941,6 +985,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         None => None,
     };
     let mut scanned_at = Instant::now();
+    app.state.update_server = cfg.update.is_some();
+    // Asking the update server, and downloading the full package.
+    let mut checker: Option<updates::Worker> = None;
+    let mut downloader: Option<updates::Worker> = None;
     // The USB drive plugged in, looked for each second.
     let mut plugged: Option<Plugged> = None;
     let mut seen: Option<String> = None;
@@ -1066,6 +1114,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(w) = &wlan {
             fds.push(w.fd());
+        }
+        if let Some(c) = &checker {
+            fds.push(c.fd());
+        }
+        if let Some(d) = &downloader {
+            fds.push(d.fd());
         }
         fds.push(readings.fd());
         wait(&fds, timeout)?;
@@ -1257,6 +1311,44 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if app.screen() == Screen::Wlan && wlan_on && scanned_at.elapsed() >= SCAN_EVERY {
             scanned_at = Instant::now();
             wlan_worker(&wlan)?.send(wlan::Command::Scan);
+        }
+        let mut checked = false;
+        if let Some(c) = &checker {
+            for ev in c.events() {
+                let updates::Event::Checked(answer) = ev else { unreachable!("asking the server downloads nothing") };
+                let have = match &answer {
+                    Ok(Some(release)) => have(&app, release),
+                    _ => Have::Nothing,
+                };
+                app.update_checked(answer, have);
+                checked = true;
+            }
+        }
+        if checked {
+            checker = None;
+        }
+        let mut fetched = false;
+        if let Some(d) = &downloader {
+            for ev in d.events() {
+                match ev {
+                    updates::Event::Progress(progress, rate) => app.download_progress(progress, rate),
+                    updates::Event::Ended(end) => {
+                        let release = app.state.newest().context("a download is of the newest system")?.clone();
+                        let end = match end {
+                            updates::End::Downloaded => DownloadEnd::Downloaded,
+                            updates::End::Stopped => DownloadEnd::Stopped,
+                            updates::End::Failed(why) => DownloadEnd::Failed(why),
+                        };
+                        skyward_sys::kmsg(&format!("downloading {} ended: {end:?}", release.name))?;
+                        app.download_ended(end, have(&app, &release), now);
+                        fetched = true;
+                    }
+                    updates::Event::Checked(_) => unreachable!("a download asks nothing of its own"),
+                }
+            }
+        }
+        if fetched {
+            downloader = None;
         }
         if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
             decryptor = None;
@@ -1589,6 +1681,29 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         wlan_worker(&wlan)?.send(wlan::Command::Join { ssid, name, security, password: password.0 })
                     }
                     Effect::LeaveWlan => wlan_worker(&wlan)?.send(wlan::Command::Leave),
+                    // What the installed system is called is the page's to
+                    // report when it cannot be read.
+                    Effect::CheckUpdate => {
+                        ensure!(checker.is_none(), "the update server is being asked already");
+                        let server = cfg.update.as_ref().context("the phone's update server is not known")?.server.clone();
+                        match installed(cfg, &info) {
+                            Ok(installed) => checker = Some(updates::Worker::start(updates::Task::Check { server, installed }, servers.clone())?),
+                            Err(e) => app.update_checked(Err(format!("{e:#}")), Have::Nothing),
+                        }
+                    }
+                    Effect::Download(release) => {
+                        ensure!(downloader.is_none(), "the full package is being downloaded already");
+                        let server = cfg.update.as_ref().context("the phone's update server is not known")?.server.clone();
+                        let path = downloaded(&release);
+                        match installed(cfg, &info) {
+                            Ok(installed) => {
+                                let task = updates::Task::Download { server, installed, release, path };
+                                downloader = Some(updates::Worker::start(task, servers.clone())?);
+                            }
+                            Err(e) => app.download_ended(DownloadEnd::Failed(Failure::Other(format!("{e:#}"))), have(&app, &release), now),
+                        }
+                    }
+                    Effect::StopDownload => downloader.as_ref().context("there is no download to stop")?.stop(),
                     // Logs that cannot be saved are the page's to report;
                     // the recovery carries on.
                     Effect::ExportLogs { recovery, kernel, storage } => {

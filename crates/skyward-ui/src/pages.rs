@@ -1,7 +1,7 @@
 use crate::app::{
-    Action, BackupAt, BackupEnd, BackupJob, ClashChoice, Confirm, Damage, Data, Dock, EraseStop, Field, FileKind, FileOp, FileTask,
-    Folder, Frame, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe,
-    ADDABLE, BACKUP_PARTS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
+    Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
+    FileOp, FileTask, Folder, Frame, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen, Source, State, Switch, Target,
+    UsbDrive, UsbLink, Wipe, ADDABLE, BACKUP_PARTS, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -16,6 +16,7 @@ use crate::theme::Theme;
 use crate::widgets::{self, Detail, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DeviceInfo, VERSION};
 use skyward_install::{Outcome, Reflash, Stage};
+use skyward_net::download::Progress;
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Network, Power, Stage as Joining};
 use skyward_vab::{Slot, Standing};
@@ -245,6 +246,20 @@ pub fn home(cx: &Ctx) -> Frame {
         Action::Open(Screen::Reboot),
     ]));
     Frame { back: false, ..Frame::new(t, fit(c, t, system.bottom), out, HOME_TITLE, search_top) }
+}
+
+/// What the advanced page says beside its system update entry: a download
+/// under way, a newer system found, or where an update the system installed
+/// stands.
+fn update_value(cx: &Ctx) -> &'static str {
+    let s = cx.state;
+    if s.downloading() {
+        return "正在下载";
+    }
+    if s.newest().is_some_and(|r| cx.info.os_version.as_deref() != Some(r.version.as_str())) {
+        return "有新版本";
+    }
+    fmt::update_value(&s.update)
 }
 
 /// Preferences, opening with the stock「显示与亮度」theme previews.
@@ -1487,7 +1502,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new("终端").icon(SLATE, Icon::Terminal),
         Row::new("修复 SELinux 上下文").icon(PURPLE, Icon::Shield),
         Row::new("导出日志").icon(ORANGE, Icon::Log),
-        Row::new("系统更新").icon(GREEN, Icon::Layers).trail(Trail::Value(fmt::update_value(&cx.state.update))),
+        Row::new("系统更新").icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
     ]);
     let out = hits(&tools.rows, &[
         Action::Open(Screen::Files),
@@ -1557,19 +1572,30 @@ pub fn relabel(cx: &Ctx) -> Frame {
     Frame { back: job.outcome.is_some(), ..Frame::new(t, c, out, title, top) }
 }
 
-/// Where an update the system installed stands, and merging it into the
-/// slot it went to: how far a merge under way has come, and a swipe to
-/// merge one that waits there for the system to start it.
+/// The system on the phone now; the newest system the phone maker's
+/// server knows, and downloading its full package to install it; and
+/// where an update the system installed stands, merging it into the slot it
+/// went to: how far a merge under way has come, and a swipe to merge one
+/// that waits there for the system to start it.
 pub fn update(cx: &Ctx) -> Frame {
-    let (t, f, s) = (cx.t, cx.f, cx.state);
-    let mut c = page(cx);
+    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
+    let mut c = long_page(cx);
     let top = t.m.content_top;
     let mut out = Vec::new();
     if let Standing::Merging(done) = s.update {
         let share = done as f32;
         let y = widgets::progress_card(&mut c, t, f, top, "正在合并更新", &format!("已完成 {}%", percent(share)), Some(share));
-        widgets::footnote(&mut c, t, f, y, "合并完成前，暂不刷写 super 中的分区。返回后将继续合并。");
-        return Frame::new(t, c, out, "系统更新", top);
+        let y = widgets::footnote(&mut c, t, f, y, "合并完成前，暂不刷写 super 中的分区。返回后将继续合并。");
+        return Frame::new(t, fit(c, t, y), out, "系统更新", top);
+    }
+    let mut y = top;
+    if let Some(v) = &i.os_version {
+        y = widgets::section_first(&mut c, t, f, y, "本机");
+        y = widgets::info_card(&mut c, t, f, y, &[("当前版本", v.clone())]);
+    }
+    if s.update_server {
+        y = if y == top { widgets::section_first(&mut c, t, f, y, "在线更新") } else { widgets::section(&mut c, t, f, y, "在线更新") };
+        y = online(&mut c, cx, y, &mut out);
     }
     let next = match &s.boot_slots {
         Some(Ok(slots)) => Some(slots.active),
@@ -1586,14 +1612,105 @@ pub fn update(cx: &Ctx) -> Frame {
     if let Some(detail) = &detail {
         row = row.subtitle(detail);
     }
-    let y = widgets::list(&mut c, t, f, top, &[row]).bottom;
+    y = if y == top { widgets::section_first(&mut c, t, f, y, "更新合并") } else { widgets::section(&mut c, t, f, y, "更新合并") };
+    y = widgets::list(&mut c, t, f, y, &[row]).bottom;
     if s.update == Standing::Waiting {
         let (label, danger) = confirm_label(Confirm::Merge);
         let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::Merge) });
-        widgets::footnote(&mut c, t, f, track.y + track.h, "合并后无法回到更新前的系统。");
+        y = widgets::footnote(&mut c, t, f, track.y + track.h, "合并后无法回到更新前的系统。");
     }
-    Frame::new(t, c, out, "系统更新", top)
+    Frame::new(t, fit(c, t, y), out, "系统更新", top)
+}
+
+/// Asking the update server for the newest system, then its full package:
+/// downloading it, how far that has come, and installing it once it is
+/// whole; then what to note before installing it.
+fn online(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
+    let (t, f, s, i) = (cx.t, cx.f, cx.state, cx.info);
+    let release = match &s.check {
+        Check::Asking => return widgets::list(c, t, f, y, &[Row::new("正在检查更新").trail(Trail::None)]).bottom,
+        Check::Answered(Some(r)) => r,
+        other => {
+            let mut row = Row::new("检查更新");
+            if !s.online() {
+                row = row.subtitle("需先连接 WLAN");
+            }
+            let check = widgets::list(c, t, f, y, &[row]);
+            out.extend(hits(&check.rows, &[Action::CheckUpdate]));
+            return match other {
+                Check::Failed(why) => widgets::footnote(c, t, f, check.bottom, &format!("检查更新失败：{why}")),
+                Check::Answered(None) => widgets::footnote(c, t, f, check.bottom, "暂无本机的系统更新信息。"),
+                _ => check.bottom,
+            };
+        }
+    };
+    let newer = i.os_version.as_deref() != Some(release.version.as_str());
+    let title = if newer { format!("新版本 {}", release.version) } else { "已是最新版本".to_string() };
+    let size = match release.length {
+        Some(length) => fmt::file_size(length),
+        None => fmt::package_size(&release.size),
+    };
+    let package = format!("完整更新包 {size}");
+    let mut y = widgets::list(c, t, f, y, &[Row::new(&title).icon(GREEN, Icon::Layers).subtitle(&package).trail(Trail::None)]).bottom;
+    match (&s.download, s.have) {
+        (Some(job), _) if job.outcome.is_none() => {
+            let (heading, detail, share) = match job.progress {
+                None => ("正在准备", String::new(), None),
+                Some(Progress::Checking { done, total }) => {
+                    ("正在校验已下载的部分", format!("{} / {}", fmt::file_size(done), fmt::file_size(total)), Some(share(done, total)))
+                }
+                Some(Progress::Downloading { done, total }) => (
+                    "正在下载",
+                    format!("{} / {} · {}/s", fmt::file_size(done), fmt::file_size(total), fmt::file_size(job.rate)),
+                    Some(share(done, total)),
+                ),
+            };
+            y = widgets::progress_card(c, t, f, y + t.m.card_gap, heading, &detail, share);
+            let label = if job.stopping { "正在暂停" } else { "暂停" };
+            let stop = widgets::list(c, t, f, y + t.m.card_gap, &[Row::new(label).trail(Trail::None)]);
+            if !job.stopping {
+                out.extend(hits(&stop.rows, &[Action::StopDownload]));
+            }
+            y = stop.bottom;
+        }
+        (_, Have::Whole(_)) => {
+            let install = widgets::list(c, t, f, y + t.m.card_gap, &[Row::new("安装").subtitle("已下载到内部存储")]);
+            out.extend(hits(&install.rows, &[Action::InstallDownloaded]));
+            y = install.bottom;
+        }
+        (job, have) => {
+            match job.as_ref().and_then(|j| j.outcome.as_ref()) {
+                Some(DownloadEnd::Failed(why)) => y = widgets::footnote(c, t, f, y, &fmt::download_failure(why)),
+                Some(DownloadEnd::Stopped) => y = widgets::footnote(c, t, f, y, "已暂停下载。"),
+                _ => {}
+            }
+            let title = if matches!(have, Have::Part(_)) { "继续下载" } else { "下载" };
+            let had = match have {
+                Have::Part(done) => Some(format!("已下载 {}", fmt::file_size(done))),
+                _ => None,
+            };
+            let sub = if !s.data.storage_open() {
+                Some("需先完成「解密」")
+            } else if !s.online() {
+                Some("需先连接 WLAN")
+            } else {
+                had.as_deref()
+            };
+            let row = Row::new(title);
+            let download = widgets::list(c, t, f, y + t.m.card_gap, &[sub.map_or(row, |sub| row.subtitle(sub))]);
+            out.extend(hits(&download.rows, &[Action::Download]));
+            y = download.bottom;
+        }
+    }
+    let saved = format!("完整更新包将保存到\"/sdcard/{DOWNLOADS}\"中，安装后不会自动删除。");
+    let points = [
+        "安装系统更新不会删除用户数据，建议在安装前进行备份。",
+        saved.as_str(),
+        "下载中断后可继续下载，已下载的部分会保留。",
+        "更新后，系统会在后台进行一系列优化，期间可能出现发热、耗电增加等情况，1 ~ 3 天内将自行恢复。",
+    ];
+    widgets::notes(c, t, f, y + t.m.card_gap, "注意事项", &points)
 }
 
 /// The WLAN switch; then the network chosen and how joining it goes, and

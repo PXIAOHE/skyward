@@ -2082,6 +2082,47 @@ pub fn detail_grid(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, items: &[Deta
     bottom
 }
 
+/// A card of things to know: its heading, then each point after a dot,
+/// its lines kept clear of the dot, as the stock system update page ends.
+pub fn notes(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, heading: &str, points: &[&str]) -> f32 {
+    let m = &t.m;
+    let (card_x, right) = (m.margin, m.w as f32 - m.margin);
+    let x = card_x + m.inner;
+    let px = m.dp(NOTES_PX);
+    let indent = m.dp(NOTES_INDENT);
+    let width = right - m.inner - x - indent;
+    let lines: Vec<Vec<String>> = points.iter().map(|p| wrap(c, &f.body, p, px, width)).collect();
+    // Centre to centre: the heading to the first point and one point to the
+    // next, and a point's lines.
+    let (pad, step, pitch) = (m.dp(NOTES_PAD), m.dp(NOTES_STEP), m.dp(NOTES_PITCH));
+    let mut cy = top + pad;
+    let mut centres = Vec::new();
+    for point in &lines {
+        cy += step;
+        let first = cy;
+        cy += pitch * (point.len().max(1) - 1) as f32;
+        centres.push(first);
+    }
+    let bottom = cy + pad;
+    c.fill_round_rect(card_x, top, right - card_x, bottom - top, m.card_radius, t.pal.card);
+    c.text_vc(&f.body, heading, x, top + pad, px, t.pal.text, None);
+    for (point, first) in lines.iter().zip(centres) {
+        c.text_vc(&f.body, "·", x, first, px, t.pal.text, None);
+        for (k, l) in point.iter().enumerate() {
+            c.text_vc(&f.body, l, x + indent, first + pitch * k as f32, px, t.pal.text, None);
+        }
+    }
+    bottom
+}
+
+// The stock system update page's notes, in dp: their text, the room above
+// the heading and below the last line, and the steps between.
+const NOTES_PX: f32 = 15.0;
+const NOTES_INDENT: f32 = 6.7;
+const NOTES_PAD: f32 = 25.0;
+const NOTES_STEP: f32 = 38.0;
+const NOTES_PITCH: f32 = 18.0;
+
 /// [`section`] with a word at its right end that does something, such as
 /// the WLAN page's「刷新」: where the word can be touched.
 pub fn section_action(c: &mut Canvas, t: &Theme, f: &Fonts, prev_bottom: f32, label: &str, action: &str) -> (f32, Rect) {

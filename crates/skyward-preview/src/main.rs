@@ -2,12 +2,14 @@ use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Reflash, Refusal, Stage};
+use skyward_net::download::{Failure as DownloadFailure, Progress};
+use skyward_net::release::Release;
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_ui::app::{
-    Action, Adding, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, EraseStop,
-    Field, FileKind, FileOp, FileRow, FileTask, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow, Part, Pick, Place, Screen,
-    Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
+    Action, Adding, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, DownloadEnd,
+    DownloadJob, EraseStop, Field, FileKind, FileOp, FileRow, FileTask, Have, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow,
+    Part, Pick, Place, Screen, Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Cap, Layer};
 use skyward_ui::{editor, fmt, pages, Canvas, Ctx, Fonts, Theme};
@@ -300,7 +302,7 @@ fn main() -> Result<()> {
     let adding = |app: &mut App, name: &str, security: Security, field: Field, choosing: bool| {
         app.state.adding = Some(Adding { name: name.into(), security, field, choosing });
     };
-    let pages: [PageShot; 126] = [
+    let pages: [PageShot; 135] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -535,6 +537,53 @@ fn main() -> Result<()> {
         ("158-wlan-light-traffic", Screen::Wlan, false, &|app| {
             app.state.wlan = Some(joined(Joining::Connected(router_link())));
             app.state.traffic = Traffic { rx: 5000, tx: 2188 };
+        }),
+        ("143-update-light-offline", Screen::Update, false, &|app| {
+            app.state.update_server = true;
+            app.state.wlan = Some(Wlan::default());
+        }),
+        ("144-update-light-newer", Screen::Update, false, &|app| {
+            online(app);
+            app.update_checked(Ok(Some(newest())), Have::Nothing);
+        }),
+        ("145-update-dark-downloading", Screen::Update, true, &|app| {
+            online(app);
+            app.update_checked(Ok(Some(newest())), Have::Nothing);
+            app.state.download = Some(DownloadJob {
+                progress: Some(Progress::Downloading { done: 2_843_210_752, total: 7_572_375_802 }),
+                rate: 23_400_000,
+                outcome: None,
+                stopping: false,
+            });
+        }),
+        ("146-update-light-checking-part", Screen::Update, false, &|app| {
+            online(app);
+            app.update_checked(Ok(Some(newest())), Have::Part(2_843_210_752));
+            let progress = Some(Progress::Checking { done: 1_022_000_000, total: 2_843_210_752 });
+            app.state.download = Some(DownloadJob { progress, rate: 0, outcome: None, stopping: false });
+        }),
+        ("147-update-light-paused", Screen::Update, false, &|app| {
+            online(app);
+            app.update_checked(Ok(Some(newest())), Have::Part(2_843_210_752));
+            app.state.download = Some(DownloadJob { progress: None, rate: 0, outcome: Some(DownloadEnd::Stopped), stopping: false });
+        }),
+        ("148-update-light-no-room", Screen::Update, false, &|app| {
+            online(app);
+            app.update_checked(Ok(Some(newest())), Have::Nothing);
+            let full = DownloadFailure::NoRoom { needed: 7_572_375_802, free: 3_104_000_000 };
+            app.state.download = Some(DownloadJob { progress: None, rate: 0, outcome: Some(DownloadEnd::Failed(full)), stopping: false });
+        }),
+        ("149-update-dark-downloaded", Screen::Update, true, &|app| {
+            online(app);
+            app.update_checked(Ok(Some(newest())), Have::Whole(7_572_375_802));
+        }),
+        ("150-update-light-latest", Screen::Update, false, &|app| {
+            online(app);
+            app.update_checked(Ok(Some(Release { version: "OS4.0.4.0.XPACNXM".into(), ..newest() })), Have::Nothing);
+        }),
+        ("151-update-light-unanswered", Screen::Update, false, &|app| {
+            online(app);
+            app.update_checked(Err("ask https://update.miui.com/updates/miotaV3.php: io: the DNS server at 192.168.1.1:53 did not answer".into()), Have::Nothing);
         }),
         ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
             let (rows, cols) = app.term_size(&fonts);
@@ -1079,6 +1128,25 @@ fn router_link() -> Link {
         generation: Some(5),
         mac: "02:00:00:00:00:04".into(),
     }
+}
+
+/// A newer system than the 17 Ultra's own, as the update server tells of
+/// one.
+fn newest() -> Release {
+    Release {
+        version: "OS4.0.6.0.XPACNXM".into(),
+        name: "nezha-ota_full-OS4.0.6.0.XPACNXM-user-17.0-3f2a9c81d4.zip".into(),
+        urls: vec!["https://ultimateota.d.miui.com/OS4.0.6.0.XPACNXM/nezha-ota_full-OS4.0.6.0.XPACNXM-user-17.0-3f2a9c81d4.zip".into()],
+        md5: "3f2a9c81d4e05b7a6c1e9d2f8b7a6c5d".into(),
+        size: "7.1G".into(),
+        length: Some(7_572_375_802),
+    }
+}
+
+/// A phone whose update server is known, on a network joined.
+fn online(app: &mut App) {
+    app.state.update_server = true;
+    app.state.wlan = Some(joined(Joining::Connected(router_link())));
 }
 
 /// A page as most previews show it: on a phone whose data partition is

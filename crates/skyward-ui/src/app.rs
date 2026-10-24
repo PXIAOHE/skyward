@@ -17,6 +17,8 @@ use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer, WlanMark};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Stage};
+use skyward_net::download::{Failure, Progress};
+use skyward_net::release::Release;
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Joined, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_vab::{BootSlots, Hold, Slot, SnapshotState, Standing};
@@ -112,6 +114,53 @@ pub enum Screen {
     /// password, typed on the screen's keyboard.
     WlanAdd,
 }
+
+/// How far asking the update server for the newest system has come.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Check {
+    #[default]
+    Idle,
+    Asking,
+    Failed(String),
+    /// The newest system the server knows; none when it knows of none for
+    /// the installed one.
+    Answered(Option<Release>),
+}
+
+/// What internal storage holds of the newest system's full package.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Have {
+    #[default]
+    Nothing,
+    /// Part of it, this many bytes, from a download stopped before its end.
+    Part(u64),
+    /// All of it, checked, this many bytes.
+    Whole(u64),
+}
+
+/// Downloading the newest system's full package, as the update page shows
+/// it: how far it has come, how fast, and how it ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadJob {
+    /// None until the download has begun.
+    pub progress: Option<Progress>,
+    /// Bytes a second.
+    pub rate: u64,
+    pub outcome: Option<DownloadEnd>,
+    /// Stopping was asked for and is under way.
+    pub stopping: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownloadEnd {
+    Downloaded,
+    Stopped,
+    Failed(Failure),
+}
+
+/// Where the full packages downloaded go, from the top of internal
+/// storage: the folder the stock updater keeps them in.
+pub const DOWNLOADS: &str = "downloaded_rom";
 
 /// A password typed, which what is printed of it leaves out: the recovery
 /// prints each effect the pages ask for.
@@ -946,6 +995,14 @@ pub enum Action {
     PickSecurity(Security),
     /// Close the list open over the page, choosing nothing.
     CloseChoices,
+    /// Ask the update server for the newest system.
+    CheckUpdate,
+    /// Download the newest system's full package, or carry on downloading
+    /// it.
+    Download,
+    StopDownload,
+    /// Install the full package downloaded.
+    InstallDownloaded,
     /// A control whose work is not wired up yet; touching it says so.
     Unavailable(&'static str),
 }
@@ -1236,6 +1293,14 @@ pub struct State {
     /// network, and whether it shows.
     pub password: String,
     pub show_password: bool,
+    /// The phone maker's update server is known, and the update page asks
+    /// it.
+    pub update_server: bool,
+    pub check: Check,
+    pub have: Have,
+    /// Downloading the newest system's full package, or how that last
+    /// ended.
+    pub download: Option<DownloadJob>,
     /// How fast data went over the network joined in the last second.
     pub traffic: Traffic,
 }
@@ -1304,6 +1369,10 @@ impl Default for State {
             adding: None,
             password: String::new(),
             show_password: false,
+            update_server: false,
+            check: Check::Idle,
+            have: Have::Nothing,
+            download: None,
             traffic: Traffic::default(),
         }
     }
@@ -1345,6 +1414,24 @@ impl State {
             Place::Storage => self.data.storage_open(),
             Place::UsbDrive => self.usb_drive == Some(UsbDrive::Shown),
         }
+    }
+
+    /// Whether a network is joined and has given an address.
+    pub fn online(&self) -> bool {
+        matches!(&self.wlan, Some(Wlan { joined: Some(j), .. }) if matches!(j.stage, Joining::Connected(_)))
+    }
+
+    /// The newest system the update server told of.
+    pub fn newest(&self) -> Option<&Release> {
+        match &self.check {
+            Check::Answered(Some(r)) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Whether the full package is being downloaded.
+    pub fn downloading(&self) -> bool {
+        self.download.as_ref().is_some_and(|d| d.outcome.is_none())
     }
 }
 
@@ -1490,6 +1577,13 @@ pub enum Effect {
     ScanWlan,
     JoinWlan { ssid: Vec<u8>, name: String, security: Security, password: Secret },
     LeaveWlan,
+    /// Ask the update server for the newest system, telling what it
+    /// answered with [`App::update_checked`].
+    CheckUpdate,
+    /// Download `release`'s full package into [`DOWNLOADS`], telling how it
+    /// goes with [`App::download_progress`] and [`App::download_ended`].
+    Download(Release),
+    StopDownload,
     /// Merge the update that waits in the slot the phone runs from,
     /// telling how it goes with [`App::set_update`].
     Merge,
@@ -2663,7 +2757,7 @@ impl App {
             return;
         }
         self.state.wlan = Some(w);
-        if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork) {
+        if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork | Screen::Update) {
             self.refresh();
         }
         // The status bar shows the network joined over every page.
@@ -2686,6 +2780,41 @@ impl App {
         let t = self.state.traffic;
         let (speed, unit) = fmt::speed(t.rx + t.tx);
         Some(WlanMark { level: fmt::signal_level(link.signal), receiving: t.rx > 0, sending: t.tx > 0, speed, unit })
+    }
+
+    /// What the update server answered, and what internal storage holds of
+    /// the full package of the newest system it told of.
+    pub fn update_checked(&mut self, answer: Result<Option<Release>, String>, have: Have) {
+        self.state.check = match answer {
+            Ok(newest) => Check::Answered(newest),
+            Err(why) => Check::Failed(why),
+        };
+        self.state.have = have;
+        if matches!(self.screen(), Screen::Advanced | Screen::Update) {
+            self.refresh();
+        }
+    }
+
+    /// How far downloading the full package has come, and how fast it goes,
+    /// in bytes a second.
+    pub fn download_progress(&mut self, progress: Progress, rate: u64) {
+        let job = self.state.download.as_mut().expect("only a download under way moves on");
+        job.progress = Some(progress);
+        job.rate = rate;
+        if self.screen() == Screen::Update {
+            self.refresh();
+        }
+    }
+
+    /// Downloading the full package has ended, leaving `have` of it: the
+    /// update page says how, lit for the user to read.
+    pub fn download_ended(&mut self, end: DownloadEnd, have: Have, now: u64) {
+        let job = self.state.download.as_mut().expect("only a download under way ends");
+        job.stopping = false;
+        job.outcome = Some(end);
+        self.state.have = have;
+        self.wake(now);
+        self.refresh();
     }
 
     /// Open the password page for `network`, empty.
@@ -3905,7 +4034,16 @@ impl App {
                 }
             }
             Screen::Decrypt if matches!(self.state.data, Data::Closed | Data::Failed(_)) => self.open_data(),
-            Screen::Update => vec![Effect::ReadUpdate],
+            // As the stock updater does, the page asks the update server as
+            // it opens, once a network is joined and nothing has been heard.
+            Screen::Update => {
+                let mut fx = vec![Effect::ReadUpdate];
+                if self.state.update_server && matches!(self.state.check, Check::Idle | Check::Failed(_)) && self.state.online() {
+                    self.state.check = Check::Asking;
+                    fx.push(Effect::CheckUpdate);
+                }
+                fx
+            }
             Screen::Wlan if self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On) => vec![Effect::ScanWlan],
             _ => Vec::new(),
         }
@@ -4351,6 +4489,49 @@ impl App {
             Action::CloseChoices => {
                 self.state.adding.as_mut().expect("the protections open on the page that adds a network").choosing = false;
                 self.refresh();
+            }
+            // Asking takes a network, which the WLAN page joins.
+            Action::CheckUpdate => {
+                if !self.state.online() {
+                    self.open(Screen::Wlan);
+                    return self.arrive_at(Screen::Wlan);
+                }
+                if self.state.check != Check::Asking {
+                    self.state.check = Check::Asking;
+                    self.refresh();
+                    return vec![Effect::CheckUpdate];
+                }
+            }
+            // The package goes to internal storage, which the decrypt page
+            // opens, over a network the WLAN page joins.
+            Action::Download => {
+                let release = self.state.newest().expect("the download is offered for the newest system").clone();
+                if !self.state.data.storage_open() {
+                    self.open(Screen::Decrypt);
+                    return self.arrive_at(Screen::Decrypt);
+                }
+                if !self.state.online() {
+                    self.open(Screen::Wlan);
+                    return self.arrive_at(Screen::Wlan);
+                }
+                if !self.state.downloading() {
+                    self.state.download = Some(DownloadJob { progress: None, rate: 0, outcome: None, stopping: false });
+                    self.refresh();
+                    return vec![Effect::Download(release)];
+                }
+            }
+            Action::StopDownload => {
+                let job = self.state.download.as_mut().expect("only a download under way is stopped");
+                if job.outcome.is_none() && !job.stopping {
+                    job.stopping = true;
+                    self.refresh();
+                    return vec![Effect::StopDownload];
+                }
+            }
+            Action::InstallDownloaded => {
+                let name = self.state.newest().expect("the package installed is the newest system's").name.clone();
+                let Have::Whole(size) = self.state.have else { unreachable!("only a whole package is offered to install") };
+                return self.install_file(Place::Storage, format!("{DOWNLOADS}/{name}"), size, now);
             }
             Action::Unavailable(text) => self.say(text, now),
         }
@@ -8662,6 +8843,73 @@ mod tests {
         assert!(row.contains(round.x + round.w / 2.0, round.y + round.h / 2.0));
         assert_eq!(fr.hit(round.x + round.w / 2.0, round.y + round.h / 2.0).map(|h| h.action), Some(Action::NetworkDetails(1)));
         assert_eq!(fr.hit(row.x + row.w / 3.0, row.y + row.h / 2.0).map(|h| h.action), Some(Action::JoinNetwork(1)));
+    }
+
+    fn newest() -> Release {
+        Release {
+            version: "OS3.0.310.0.WMACNXM".into(),
+            name: "ishtar-ota_full-OS3.0.310.0.WMACNXM-user-16.0-0123456789.zip".into(),
+            urls: vec!["https://ultimateota.d.miui.com/OS3.0.310.0.WMACNXM/ishtar-ota_full.zip".into()],
+            md5: "0123456789abcdef0123456789abcdef".into(),
+            size: "7.1G".into(),
+            length: Some(7_572_375_802),
+        }
+    }
+
+    #[test]
+    fn the_update_page_asks_for_the_newest_system_and_downloads_its_full_package_to_install() {
+        let f = fonts();
+        let i = DeviceInfo { os_version: Some("OS3.0.308.0.WMACNXM".into()), ..info() };
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        app.state.update_server = true;
+        app.state.wlan = Some(Wlan::default());
+        app.refresh();
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate], "nothing is asked without a network");
+        assert!(tap(&mut app, &f, &i, Action::CheckUpdate).is_empty());
+        assert_eq!(app.screen(), Screen::Wlan, "asking takes a network, which the WLAN page joins");
+        app.key(Key::Back, 0);
+        app.set_wlan(connected("Skyward"));
+        assert_eq!(tap(&mut app, &f, &i, Action::CheckUpdate), vec![Effect::CheckUpdate]);
+        assert_eq!(app.state.check, Check::Asking);
+        app.update_checked(Ok(Some(newest())), Have::Nothing);
+        app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
+        app.refresh();
+        assert!(tap(&mut app, &f, &i, Action::Download).is_empty());
+        assert_eq!(app.screen(), Screen::Decrypt, "the package goes to internal storage, which opens with the owner's files");
+        app.state.data = Data::Open;
+        app.act(Action::Skip, 0);
+        assert_eq!(app.screen(), Screen::Update);
+        assert_eq!(tap(&mut app, &f, &i, Action::Download), vec![Effect::Download(newest())]);
+        app.download_progress(Progress::Checking { done: 0, total: 7_572_375_802 }, 0);
+        app.download_progress(Progress::Downloading { done: 1_000_000_000, total: 7_572_375_802 }, 12_000_000);
+        assert!(app.state.downloading());
+        assert_eq!(tap(&mut app, &f, &i, Action::StopDownload), vec![Effect::StopDownload]);
+        assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::StopDownload), "stopping, it is not asked again");
+        // An end lights the panel, and a touch just after only keeps it lit.
+        app.download_ended(DownloadEnd::Stopped, Have::Part(1_000_000_000), 0);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Download, 2000), vec![Effect::Download(newest())], "a download stopped carries on");
+        let damaged = skyward_net::download::Failure::Damaged;
+        app.download_ended(DownloadEnd::Failed(damaged.clone()), Have::Nothing, 3000);
+        assert_eq!(fmt::download_failure(&damaged), "完整更新包校验失败，已删除，请重新下载。");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Download, 5000), vec![Effect::Download(newest())]);
+        app.download_ended(DownloadEnd::Downloaded, Have::Whole(7_572_375_802), 6000);
+        let fx = tap_at(&mut app, &f, &i, Action::InstallDownloaded, 8000);
+        assert_eq!(fx, vec![Effect::InstallFile(Place::Storage, format!("downloaded_rom/{}", newest().name))]);
+        assert_eq!(app.screen(), Screen::Installing);
+    }
+
+    #[test]
+    fn the_update_page_asks_the_server_as_it_opens_once_a_network_is_joined() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        app.state.wlan = Some(connected("Skyward"));
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate], "a phone whose server is not known asks nothing");
+        app.key(Key::Back, 0);
+        app.state.update_server = true;
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate, Effect::CheckUpdate]);
+        app.update_checked(Err("update.miui.com did not answer".into()), Have::Nothing);
+        app.key(Key::Back, 0);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate, Effect::CheckUpdate], "a failed check is tried again");
     }
 
     #[test]

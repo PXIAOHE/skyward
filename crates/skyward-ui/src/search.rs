@@ -35,7 +35,12 @@ pub const ENTRIES: &[Entry] = &[
         &["xiufuselinuxshangxiawen", "xfsxw", "xiufu", "xf", "shangxiawen", "context", "restorecon", "label"],
     ),
     entry("导出日志", "高级", Screen::Logs, &["daochurizhi", "dcrz", "rizhi", "rz", "logs", "dmesg"]),
-    entry("系统更新", "高级", Screen::Update, &["xitonggengxin", "xtgx", "hebing", "hb", "update", "ota", "merge", "snapshot"]),
+    entry(
+        "系统更新",
+        "高级",
+        Screen::Update,
+        &["xitonggengxin", "xtgx", "hebing", "hb", "xiazai", "xz", "wanzhenggengxinbao", "wzgxb", "update", "ota", "merge", "snapshot", "download"],
+    ),
     entry("设置", "主页", Screen::Settings, &["shezhi", "sz", "settings"]),
     entry("深色模式", "设置", Screen::Settings, &["shensemoshi", "ssms", "dark", "theme"]),
     entry("屏幕亮度", "设置", Screen::Settings, &["pingmuliangdu", "pmld", "liangdu", "ld", "brightness"]),
@@ -129,6 +134,7 @@ mod tests {
         assert_eq!(titles("wifi"), ["WLAN"]);
         assert_eq!(find_on("wlan", true).iter().map(|e| e.title).collect::<Vec<_>>(), ["WLAN"]);
         assert!(find_on("wlan", false).is_empty());
+        assert_eq!(titles("xiazai"), ["系统更新"]);
     }
 
     #[test]

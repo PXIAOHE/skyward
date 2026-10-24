@@ -5,6 +5,7 @@ use jiff::Timestamp;
 use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
+use skyward_net::download::Failure as DownloadFailure;
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Joined, Power, Stage as WlanStage, Wlan};
 use skyward_vab::{Hold, Slot, SnapshotState, Standing};
@@ -691,6 +692,27 @@ pub fn joining(stage: &WlanStage) -> &'static str {
         WlanStage::NotFound => "未找到该网络",
         WlanStage::Failed => "连接失败",
         WlanStage::NoAddress(_) => "无法获取 IP 地址",
+    }
+}
+
+/// A size the update server gives, such as 7.1G, with its unit spelled
+/// out; one in another form shows as it came.
+pub fn package_size(size: &str) -> String {
+    match size.char_indices().last() {
+        Some((at, unit @ ('K' | 'M' | 'G' | 'T'))) if size[..at].parse::<f64>().is_ok() => format!("{} {unit}B", &size[..at]),
+        _ => size.to_string(),
+    }
+}
+
+/// Why downloading the full package did not end with it whole.
+pub fn download_failure(f: &DownloadFailure) -> String {
+    match f {
+        DownloadFailure::NoRoom { needed, free } => {
+            format!("内部存储空间不足，需 {} 可用空间，当前可用 {}。", file_size(*needed), file_size(*free))
+        }
+        DownloadFailure::Damaged => "完整更新包校验失败，已删除，请重新下载。".into(),
+        DownloadFailure::Changed => "服务器上的版本已更新，请重新检查更新。".into(),
+        DownloadFailure::Other(why) => format!("下载失败：{why}"),
     }
 }
 
