@@ -3,6 +3,7 @@ use crate::color::Rgba;
 use crate::editor::{self, Editor};
 use crate::files::{self, FileType};
 use crate::fling::{Fling, Tracker};
+use crate::fmt;
 use crate::focus::{self, Group, Spot, Stop};
 use crate::font::Fonts;
 use crate::geom::Rect;
@@ -13,11 +14,11 @@ use crate::sprite::{Blurs, Sprite};
 use crate::search;
 use crate::term::{self, Term, TermKey};
 use crate::theme::Theme;
-use crate::widgets::{self, Bar, Cap, Layer};
+use crate::widgets::{self, Bar, Cap, Layer, WlanMark};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Stage};
 use skyward_net::supplicant::Security;
-use skyward_net::wlan::{Network, Power, Stage as Joining, Wlan};
+use skyward_net::wlan::{Joined, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_vab::{BootSlots, Hold, Slot, SnapshotState, Standing};
 
 /// The pages of the recovery.
@@ -1235,6 +1236,8 @@ pub struct State {
     /// network, and whether it shows.
     pub password: String,
     pub show_password: bool,
+    /// How fast data went over the network joined in the last second.
+    pub traffic: Traffic,
 }
 
 impl Default for State {
@@ -1301,6 +1304,7 @@ impl Default for State {
             adding: None,
             password: String::new(),
             show_password: false,
+            traffic: Traffic::default(),
         }
     }
 }
@@ -2662,6 +2666,26 @@ impl App {
         if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork) {
             self.refresh();
         }
+        // The status bar shows the network joined over every page.
+        self.dirty = true;
+    }
+
+    /// How fast data went over the network joined in the last second, which
+    /// only the status bar shows.
+    pub fn set_traffic(&mut self, t: Traffic) {
+        if self.state.traffic != t {
+            self.state.traffic = t;
+            self.dirty = true;
+        }
+    }
+
+    /// What the status bar shows of the WLAN: the network joined, while it
+    /// has an address.
+    pub fn wlan_mark(&self) -> Option<WlanMark> {
+        let Some(Joined { stage: Joining::Connected(link), .. }) = self.state.wlan.as_ref()?.joined.as_ref() else { return None };
+        let t = self.state.traffic;
+        let (speed, unit) = fmt::speed(t.rx + t.tx);
+        Some(WlanMark { level: fmt::signal_level(link.signal), receiving: t.rx > 0, sending: t.tx > 0, speed, unit })
     }
 
     /// Open the password page for `network`, empty.
@@ -3267,7 +3291,7 @@ impl App {
         self.shown = Some(view);
 
         let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
-        widgets::status_bar(out, &t, f, &Bar { clock, battery }, t.pal.status);
+        widgets::status_bar(out, &t, f, &Bar { clock, battery, wlan: self.wlan_mark() }, t.pal.status);
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
         }
@@ -3534,7 +3558,7 @@ impl App {
         draw_faded(out, cross, 0.0, 0.0, t.pal.text, shown, blur);
         self.morph = Some(morph);
         let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
-        widgets::status_bar(out, &t, f, &Bar { clock, battery }, t.pal.status);
+        widgets::status_bar(out, &t, f, &Bar { clock, battery, wlan: self.wlan_mark() }, t.pal.status);
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
         }
@@ -8466,6 +8490,25 @@ mod tests {
         assert_eq!(app.state.details.as_ref().map(|n| n.name.as_str()), Some("Skyward"));
         app.key(Key::Back, 0);
         assert_eq!(app.state.details, None);
+    }
+
+    #[test]
+    fn the_status_bar_shows_the_network_joined_and_how_fast_data_goes_without_the_page_drawn_again() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.set_wlan(Wlan { power: Power::On, networks: Vec::new(), joined: None });
+        assert!(app.wlan_mark().is_none(), "no network joined");
+        app.set_wlan(joined("Skyward", Joining::Addressing));
+        assert!(app.wlan_mark().is_none(), "not while it has no address");
+        app.set_wlan(connected("Skyward"));
+        let mark = app.wlan_mark().unwrap();
+        assert_eq!((mark.level, mark.speed.as_str(), mark.unit, mark.receiving, mark.sending), (3, "0.00", "KB/s", false, false));
+        app.frame(&f, &i);
+        app.dirty = false;
+        app.set_traffic(Traffic { rx: 42_000, tx: 0 });
+        assert!(app.dirty && app.frame.is_some(), "the status bar is drawn again, and the page as it was");
+        let mark = app.wlan_mark().unwrap();
+        assert_eq!((mark.speed.as_str(), mark.receiving, mark.sending), ("41.0", true, false));
     }
 
     #[test]

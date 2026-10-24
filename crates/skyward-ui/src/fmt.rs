@@ -613,6 +613,22 @@ pub fn signal_level(dbm: i32) -> u8 {
     }
 }
 
+/// How fast data goes, `bytes` a second, as the stock status bar writes it
+/// over its unit: in KB/s up to 999 and in MB/s past that, to three
+/// figures, two of them after the point below 10 and one below 100.
+pub fn speed(bytes: u64) -> (String, &'static str) {
+    let kb = bytes as f64 / 1024.0;
+    let (v, unit) = if kb < 999.5 { (kb, "KB/s") } else { (kb / 1024.0, "MB/s") };
+    let figures = if v < 9.995 {
+        format!("{v:.2}")
+    } else if v < 99.95 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.0}")
+    };
+    (figures, unit)
+}
+
 /// A signal's strength in words, as the stock network details say it.
 pub fn signal(dbm: i32) -> &'static str {
     match signal_level(dbm) {
@@ -933,5 +949,22 @@ mod tests {
             "the system's updater has not had slot A start next yet"
         );
         assert_eq!(update(&installed, None).1.unwrap(), "从槽位 A 启动新系统后将自动合并", "the boot control could not tell");
+    }
+
+    #[test]
+    fn a_speed_is_written_to_three_figures_over_its_unit() {
+        let s = |bytes| {
+            let (figures, unit) = speed(bytes);
+            format!("{figures} {unit}")
+        };
+        // As the 17 Ultra's status bar showed slow ones.
+        assert_eq!(s(0), "0.00 KB/s");
+        assert_eq!(s(61), "0.06 KB/s");
+        assert_eq!(s(7188), "7.02 KB/s");
+        assert_eq!(s(12_800), "12.5 KB/s");
+        assert_eq!(s(512_000), "500 KB/s");
+        assert_eq!(s(1_023_000), "999 KB/s");
+        assert_eq!(s(1_024_000), "0.98 MB/s", "past 999 KB/s the unit grows");
+        assert_eq!(s(42_772_090), "40.8 MB/s");
     }
 }

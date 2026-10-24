@@ -3,7 +3,7 @@ use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Reflash, Refusal, Stage};
 use skyward_net::supplicant::Security;
-use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Wlan};
+use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_ui::app::{
     Action, Adding, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, EraseStop,
     Field, FileKind, FileOp, FileRow, FileTask, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow, Part, Pick, Place, Screen,
@@ -300,7 +300,7 @@ fn main() -> Result<()> {
     let adding = |app: &mut App, name: &str, security: Security, field: Field, choosing: bool| {
         app.state.adding = Some(Adding { name: name.into(), security, field, choosing });
     };
-    let pages: [PageShot; 125] = [
+    let pages: [PageShot; 126] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -531,6 +531,10 @@ fn main() -> Result<()> {
         ("157-wlan-add-dark-choosing", Screen::WlanAdd, true, &|app| {
             adding(app, "attic", Security::Open, Field::Name, true);
             app.state.held = Some(Action::PickSecurity(Security::Sae));
+        }),
+        ("158-wlan-light-traffic", Screen::Wlan, false, &|app| {
+            app.state.wlan = Some(joined(Joining::Connected(router_link())));
+            app.state.traffic = Traffic { rx: 5000, tx: 2188 };
         }),
         ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
             let (rows, cols) = app.term_size(&fonts);
@@ -788,7 +792,7 @@ fn battery_states(f: &Fonts, t: &Theme) -> Canvas {
     for (k, &battery) in states.iter().enumerate() {
         let mut bar = Canvas::new(t.m.w, row);
         bar.clear(t.pal.bg);
-        widgets::status_bar(&mut bar, t, f, &Bar { clock: CLOCK, battery: Some(battery) }, t.pal.status);
+        widgets::status_bar(&mut bar, t, f, &Bar { clock: CLOCK, battery: Some(battery), wlan: None }, t.pal.status);
         sheet.put(&bar, (row as usize * k) as i32);
     }
     sheet
@@ -1110,7 +1114,7 @@ fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo) -> Canvas {
         c.put(&d.canvas, (c.h - d.canvas.h) as i32);
     }
     let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
-    widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery }, t.pal.status);
+    widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery, wlan: app.wlan_mark() }, t.pal.status);
     c
 }
 

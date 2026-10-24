@@ -118,6 +118,14 @@ impl Link {
     }
 }
 
+/// How fast data went over the network joined in the last second, in and
+/// out, in bytes a second.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Traffic {
+    pub rx: u64,
+    pub tx: u64,
+}
+
 /// The networks the access points found make, strongest first.
 pub fn networks(found: &[Bss]) -> Vec<Network> {
     let mut out: Vec<Network> = Vec::new();

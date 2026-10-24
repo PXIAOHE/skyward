@@ -743,6 +743,29 @@ impl Canvas {
         }
     }
 
+    /// The part of the ring about (`cx`, `cy`) from radius `r0` out to `r1`
+    /// that lies within `half` radians either side of straight up, cut
+    /// square along those two lines; with `r0` 0, a slice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_sector(&mut self, cx: f32, cy: f32, r0: f32, r1: f32, half: f32, color: Rgba) {
+        let (s, k) = (half.sin(), half.cos());
+        let (x0, x1) = self.columns((cx - r1 * s - 1.0).floor() as i32, (cx + r1 * s + 1.0).ceil() as i32);
+        let (y0, y1) = self.rows((cy - r1 - 1.0).floor() as i32, (cy + 1.0).ceil() as i32);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
+                let r = dx.hypot(dy);
+                // How far out past the ring's edges or the cut on its side,
+                // whichever is furthest.
+                let d = (r - r1).max(r0 - r).max(dx.abs() * k + dy * s);
+                let cov = (0.5 - d).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.blend(px, py, color, cov);
+                }
+            }
+        }
+    }
+
     /// Round-capped arc stroke. Angles are in radians in screen space (0 points
     /// right, positive turns clockwise because y grows downward); the arc runs
     /// from `start` through `sweep` radians.

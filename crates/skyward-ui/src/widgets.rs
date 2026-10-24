@@ -394,31 +394,151 @@ pub(crate) fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> 
 pub struct Bar<'a> {
     pub clock: &'a str,
     pub battery: Option<(u8, bool)>,
+    /// The network joined, while it has an address.
+    pub wlan: Option<WlanMark>,
+}
+
+/// What the status bar shows of the network joined: how many of the fan's
+/// three arcs its signal lights, whether data came in and went out in the
+/// last second, and how fast in all, in figures over their unit.
+pub struct WlanMark {
+    pub level: u8,
+    pub receiving: bool,
+    pub sending: bool,
+    pub speed: String,
+    pub unit: &'static str,
 }
 
 /// Below this level the battery fills red while the cable is out.
 pub const LOW_BATTERY: u8 = 20;
 
 /// Clock on the left; on the right the battery as the stock status bar draws
-/// it, with a bolt past it while the cable is in. `ink` colours the clock.
+/// it, with a bolt past it while the cable is in, and before it the network
+/// joined and how fast data goes over it. `ink` colours the clock and the
+/// network's marks.
 pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) {
     let m = &t.m;
     let cy = m.status_cy;
     // Digits carry no descender, so centre on half their height (≈0.72 em).
     c.text(&f.status, bar.clock, m.status_x, cy + m.status_px * 0.36, m.status_px, ink, None);
-    let Some((level, plugged)) = bar.battery else { return };
     let mut right = m.w as f32 - m.status_right;
-    if plugged {
-        let x = m.w as f32 - m.status_bolt_right - m.dp(BOLT_W_DP);
-        let (art, ox, oy) = bolt(t, x, cy);
+    if let Some((level, plugged)) = bar.battery {
+        if plugged {
+            let x = m.w as f32 - m.status_bolt_right - m.dp(BOLT_W_DP);
+            let (art, ox, oy) = bolt(t, x, cy);
+            c.lay(&art, ox, oy, 1.0);
+            right = x - m.dp(2.75);
+        }
+        let (art, ox, oy) = battery(t, f, level, plugged, right, cy);
         c.lay(&art, ox, oy, 1.0);
-        right = x - m.dp(2.75);
+        right -= m.dp(BATTERY_W_DP + BATTERY_CAP_DP);
     }
-    let (art, ox, oy) = battery(t, f, level, plugged, right, cy);
-    c.lay(&art, ox, oy, 1.0);
+    if let Some(w) = &bar.wlan {
+        let left = wlan_mark(c, t, w, right, cy, ink);
+        speed(c, t, f, &w.speed, w.unit, left - m.dp(SPEED_GAP_DP), cy, ink);
+    }
+}
+
+// The network's marks in the status bar, as the stock one draws them, in
+// dp: the arrows' middle in from what is right of them, the fan's point
+// left of the arrows and below the bar's middle, and the speed's room
+// before the fan; the fan's slice and its inner and outer arc's edges from
+// its point, either side of straight up; and the arrows' tips and bases
+// from the fan's point, either half of their width, and how round their
+// tips and other corners are.
+const ARROWS_IN_DP: f32 = 5.57;
+const FAN_LEFT_OF_ARROWS_DP: f32 = 7.0;
+const FAN_POINT_DP: f32 = 6.06;
+const SPEED_GAP_DP: f32 = 4.0;
+const FAN_SLICE_DP: f32 = 3.81;
+const FAN_INNER_DP: (f32, f32) = (5.49, 7.83);
+const FAN_OUTER_DP: (f32, f32) = (9.51, 11.83);
+const FAN_HALF: f32 = std::f32::consts::FRAC_PI_4;
+const ARROW_UP_DP: (f32, f32) = (-5.46, -2.84);
+const ARROW_DOWN_DP: (f32, f32) = (-2.09, 0.58);
+const ARROW_HALF_DP: f32 = 1.83;
+const ARROW_ROUND_DP: (f32, f32) = (0.63, 0.33);
+
+/// The network joined, left of `right` and on the bar's middle `cy`: the
+/// fan, its arcs lit as far as the signal reaches, and the arrows out and
+/// in, each lit while data goes that way. Returns where it starts.
+fn wlan_mark(c: &mut Canvas, t: &Theme, w: &WlanMark, right: f32, cy: f32, ink: Rgba) -> f32 {
+    let m = &t.m;
+    let dim = t.pal.battery.empty;
+    let ax = right - m.dp(ARROWS_IN_DP);
+    let (fx, point) = (ax - m.dp(FAN_LEFT_OF_ARROWS_DP), cy + m.dp(FAN_POINT_DP));
+    // The slice is lit whenever a network is joined.
+    c.fill_sector(fx, point, 0.0, m.dp(FAN_SLICE_DP), FAN_HALF, ink);
+    for (arc, from) in [(FAN_INNER_DP, 2), (FAN_OUTER_DP, 3)] {
+        c.fill_sector(fx, point, m.dp(arc.0), m.dp(arc.1), FAN_HALF, if w.level >= from { ink } else { dim });
+    }
+    let half = m.dp(ARROW_HALF_DP);
+    let (tip, corner) = (m.dp(ARROW_ROUND_DP.0), m.dp(ARROW_ROUND_DP.1));
+    let (up, up_base) = (point + m.dp(ARROW_UP_DP.0), point + m.dp(ARROW_UP_DP.1));
+    let (down_base, down) = (point + m.dp(ARROW_DOWN_DP.0), point + m.dp(ARROW_DOWN_DP.1));
+    let out = [(ax, up), (ax + half, up_base), (ax - half, up_base)];
+    round_triangle(c, out, [tip, corner, corner], if w.sending { ink } else { dim });
+    let into = [(ax, down), (ax - half, down_base), (ax + half, down_base)];
+    round_triangle(c, into, [tip, corner, corner], if w.receiving { ink } else { dim });
+    fx - m.dp(FAN_OUTER_DP.1) * FAN_HALF.sin()
+}
+
+/// A triangle with each corner rounded to its own radius in `radii`.
+fn round_triangle(c: &mut Canvas, corners: [(f32, f32); 3], radii: [f32; 3], color: Rgba) {
+    let centre = ((corners[0].0 + corners[1].0 + corners[2].0) / 3.0, (corners[0].1 + corners[1].1 + corners[2].1) / 3.0);
+    // The normal of the edge from `p` to `q` that points away from the
+    // middle.
+    let outward = |p: (f32, f32), q: (f32, f32)| {
+        let (ex, ey) = (q.0 - p.0, q.1 - p.1);
+        let len = ex.hypot(ey);
+        let n = (ey / len, -ex / len);
+        let mid = ((p.0 + q.0) / 2.0 - centre.0, (p.1 + q.1) / 2.0 - centre.1);
+        if n.0 * mid.0 + n.1 * mid.1 < 0.0 {
+            (-n.0, -n.1)
+        } else {
+            n
+        }
+    };
+    let mut outline = Vec::new();
+    for (i, r) in radii.into_iter().enumerate() {
+        let (p, v, q) = (corners[(i + 2) % 3], corners[i], corners[(i + 1) % 3]);
+        let (a, b) = (outward(p, v), outward(v, q));
+        // The corner's circle sits `r` in from both its edges.
+        let (sx, sy) = (a.0 + b.0, a.1 + b.1);
+        let k = 2.0 * r / (sx * sx + sy * sy);
+        let (ox, oy) = (v.0 - sx * k, v.1 - sy * k);
+        let (from, to) = (a.1.atan2(a.0), b.1.atan2(b.0));
+        let turn = (to - from + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        for s in 0..=4 {
+            let at = from + turn * s as f32 / 4.0;
+            outline.push((ox + r * at.cos(), oy + r * at.sin()));
+        }
+    }
+    c.fill_convex(&outline, color);
+}
+
+// How fast data goes, as the stock status bar writes it, in dp: the size
+// of its figures and of their unit, and their baselines from the bar's
+// middle.
+const SPEED_PX_DP: f32 = 6.9;
+const SPEED_UNIT_PX_DP: f32 = 6.23;
+const SPEED_BASES_DP: (f32, f32) = (-2.03, 5.97);
+
+/// How fast data goes, its figures over their unit, the two lines centred
+/// on one another and ending at `right`.
+#[allow(clippy::too_many_arguments)]
+fn speed(c: &mut Canvas, t: &Theme, f: &Fonts, figures: &str, unit: &str, right: f32, cy: f32, ink: Rgba) {
+    let m = &t.m;
+    let (px, unit_px) = (m.dp(SPEED_PX_DP), m.dp(SPEED_UNIT_PX_DP));
+    let (w, unit_w) = (c.text_width(&f.speed, figures, px), c.text_width(&f.speed, unit, unit_px));
+    let mid = right - w.max(unit_w) / 2.0;
+    c.text(&f.speed, figures, mid - w / 2.0, cy + m.dp(SPEED_BASES_DP.0), px, ink, None);
+    c.text(&f.speed, unit, mid - unit_w / 2.0, cy + m.dp(SPEED_BASES_DP.1), unit_px, ink, None);
 }
 
 const BOLT_W_DP: f32 = 5.67;
+const BATTERY_W_DP: f32 = 21.75;
+const BATTERY_CAP_DP: f32 = 1.3;
 
 /// The bolt from `x`, centred on `cy`, as its own canvas and where it goes.
 fn bolt(t: &Theme, x: f32, cy: f32) -> (Canvas, i32, i32) {
@@ -446,7 +566,7 @@ fn bolt(t: &Theme, x: f32, cy: f32) -> (Canvas, i32, i32) {
 fn battery(t: &Theme, f: &Fonts, level: u8, plugged: bool, right: f32, cy: f32) -> (Canvas, i32, i32) {
     let m = &t.m;
     let ink = t.pal.battery;
-    let (bw, bh, cap_w, cap_h) = (m.dp(21.75), m.dp(12.1), m.dp(1.3), m.dp(4.25));
+    let (bw, bh, cap_w, cap_h) = (m.dp(BATTERY_W_DP), m.dp(12.1), m.dp(BATTERY_CAP_DP), m.dp(4.25));
     let left = right - bw - cap_w;
     let (ox, oy) = ((left - 1.0).floor(), (cy - bh / 2.0 - 1.0).floor());
     let (w, h) = ((right - ox + 1.0).ceil() as u32, (cy + bh / 2.0 - oy + 1.0).ceil() as u32);
@@ -2500,6 +2620,44 @@ mod tests {
             assert!((x - 100.0).abs() <= 3.0 && (y - 100.0).abs() <= 3.0, "{icon:?} centred: ({x}, {y})");
             assert!(right - l <= 66.0 && bottom - top <= 66.0, "{icon:?} within 22 dp: {}x{}", right - l, bottom - top);
         }
+    }
+
+    #[test]
+    fn the_network_joined_shows_in_the_status_bar_where_the_stock_one_does() {
+        // The 17 Ultra's bar over its grey page, three pixels a dp, charging:
+        // its fan's ink from 930 to 968 and 59 to 94, its arrows' rows across
+        // 970..979, and the speed's lines from 54 to 71 and 80 to 95, ending
+        // 13 pixels short of the fan.
+        let t = Theme::light(1200, 2608, 3.0);
+        let f = crate::font::bundled();
+        let draw = |mark: WlanMark| {
+            let mut c = Canvas::filled(1200, 160, t.pal.bg);
+            status_bar(&mut c, &t, &f, &Bar { clock: "01:27", battery: Some((40, true)), wlan: Some(mark) }, t.pal.status);
+            c
+        };
+        let full = WlanMark { level: 3, receiving: true, sending: true, speed: "7.02".into(), unit: "KB/s" };
+        let c = draw(full);
+        let inked = |p: &[u8]| p[0] < 220;
+        let fan = ink_box(&c, Rect::new(920.0, 40.0, 49.0, 70.0), inked);
+        assert!((fan.0 - 930.0).abs() <= 1.0 && (fan.1 - 59.0).abs() <= 1.0 && (fan.3 - 95.0).abs() <= 1.0, "fan {fan:?}");
+        for row in [85.0, 90.0] {
+            let arrow = ink_box(&c, Rect::new(965.0, row, 20.0, 1.0), |p| p[0] < 200);
+            assert!((arrow.0 - 970.0).abs() <= 1.0 && (arrow.2 - 980.0).abs() <= 1.0, "arrow row {row}: {arrow:?}");
+        }
+        let figures = ink_box(&c, Rect::new(840.0, 45.0, 85.0, 30.0), inked);
+        let unit = ink_box(&c, Rect::new(840.0, 76.0, 85.0, 24.0), inked);
+        assert!((figures.1 - 54.0).abs() <= 1.0 && (figures.3 - 72.0).abs() <= 1.0, "figures {figures:?}");
+        assert!((unit.1 - 80.0).abs() <= 1.0 && (unit.3 - 96.0).abs() <= 1.0, "unit {unit:?}");
+        assert!((fan.0 - figures.2.max(unit.2) - 13.0).abs() <= 1.5, "the speed ends short of the fan: {figures:?} {unit:?}");
+        // A weak signal lights the slice alone, and data going neither way
+        // leaves both arrows dim, in the battery's empty grey.
+        let c = draw(WlanMark { level: 1, receiving: false, sending: false, speed: "0.00".into(), unit: "KB/s" });
+        let dim = over(t.pal.battery.empty, t.pal.bg);
+        let at = |x: u32, y: u32| Rgba::rgb(c.data[((y * 1200 + x) * 4) as usize], c.data[((y * 1200 + x) * 4 + 1) as usize], c.data[((y * 1200 + x) * 4 + 2) as usize]);
+        assert_eq!(at(954, 62), dim, "the outer arc");
+        assert_eq!(at(954, 75), dim, "the inner arc");
+        assert_eq!(at(954, 88), t.pal.status, "the slice");
+        assert_eq!((at(975, 84), at(975, 91)), (dim, dim), "the arrows");
     }
 
     #[test]

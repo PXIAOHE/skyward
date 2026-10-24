@@ -9,7 +9,7 @@ use skyward_net::dhcp::{self, Kept, Lease};
 use skyward_net::http::Servers;
 use skyward_net::iface;
 use skyward_net::supplicant::{self, Bss, Control, Event as Told, Security};
-use skyward_net::wlan::{self, Joined, Link, Next, Power, Stage, Wlan};
+use skyward_net::wlan::{self, Joined, Link, Next, Power, Stage, Traffic, Wlan};
 use std::fs;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
@@ -48,6 +48,10 @@ const END_WAIT: Duration = Duration::from_secs(3);
 /// How often a network joined is read for its signal.
 const POLL: Duration = Duration::from_secs(5);
 
+/// How often what went over the interface is counted, for how fast it
+/// goes.
+const TRAFFIC: Duration = Duration::from_secs(1);
+
 /// How long after the network gave no address it is asked again.
 const RETRY: Duration = Duration::from_secs(10);
 
@@ -73,11 +77,18 @@ enum Asked {
     Kept(Kept),
 }
 
+/// What the thread tells the screen: how the WLAN stands, or how fast data
+/// went over it in the last second.
+enum Report {
+    Wlan(Wlan),
+    Traffic(Traffic),
+}
+
 pub struct Worker {
     inbox: Sender<Inbox>,
     /// Written to wake the thread when something is in its inbox.
     poke: Arc<OwnedFd>,
-    told: Receiver<Wlan>,
+    told: Receiver<Report>,
     /// Readable while the screen has something to be told.
     wake: OwnedFd,
     thread: Option<JoinHandle<()>>,
@@ -115,10 +126,10 @@ impl Worker {
         let thread = thread::Builder::new()
             .name("wlan".into())
             .spawn(move || {
-                let tell = move |w: Wlan| {
+                let tell = move |r: Report| {
                     // The screen only stops listening once it has let the
                     // worker go.
-                    let _ = told_tx.send(w);
+                    let _ = told_tx.send(r);
                     signal(&rung);
                 };
                 let mut s = Station { cfg, modules, libraries, servers, state: Wlan::default(), running: None, back, tell: Box::new(tell) };
@@ -137,10 +148,18 @@ impl Worker {
         self.wake.as_raw_fd()
     }
 
-    /// How the WLAN stands now, if that changed since the last call.
-    pub fn told(&self) -> Option<Wlan> {
+    /// How the WLAN stands now, and how fast data went over it in the last
+    /// second, each if told since the last call.
+    pub fn told(&self) -> (Option<Wlan>, Option<Traffic>) {
         drain(&self.wake);
-        self.told.try_iter().last()
+        let (mut wlan, mut traffic) = (None, None);
+        for report in self.told.try_iter() {
+            match report {
+                Report::Wlan(w) => wlan = Some(w),
+                Report::Traffic(t) => traffic = Some(t),
+            }
+        }
+        (wlan, traffic)
     }
 }
 
@@ -177,6 +196,17 @@ struct Running {
     /// When to ask for an address again after the network gave none.
     retry_at: Option<Instant>,
     polled_at: Instant,
+    /// What had gone over the interface when last counted, while it has an
+    /// address.
+    counted: Option<Counted>,
+}
+
+/// The interface's totals in and out, in bytes, and when they were read.
+#[derive(Clone, Copy)]
+struct Counted {
+    at: Instant,
+    rx: u64,
+    tx: u64,
 }
 
 /// A lease, when it was given, and how far keeping it has come: 0 asks its
@@ -207,7 +237,7 @@ struct Station {
     state: Wlan,
     running: Option<Running>,
     back: Back,
-    tell: Box<dyn Fn(Wlan) + Send>,
+    tell: Box<dyn Fn(Report) + Send>,
 }
 
 impl Station {
@@ -235,7 +265,7 @@ impl Station {
             self.timers();
             if self.state != told {
                 told = self.state.clone();
-                (self.tell)(told.clone());
+                (self.tell)(Report::Wlan(told.clone()));
             }
         }
     }
@@ -244,7 +274,8 @@ impl Station {
     fn next(&self) -> Option<Instant> {
         let r = self.running.as_ref()?;
         let poll = matches!(self.state.joined, Some(Joined { stage: Stage::Connected(_), .. })).then(|| r.polled_at + POLL);
-        [r.lease.as_ref().filter(|_| r.asking.is_none()).map(Held::due), r.retry_at, poll].into_iter().flatten().min()
+        let count = r.lease.as_ref().map(|_| r.counted.map_or_else(Instant::now, |c| c.at + TRAFFIC));
+        [r.lease.as_ref().filter(|_| r.asking.is_none()).map(Held::due), r.retry_at, poll, count].into_iter().flatten().min()
     }
 
     fn command(&mut self, c: Command) {
@@ -286,7 +317,7 @@ impl Station {
             return;
         }
         self.state.power = Power::Starting;
-        (self.tell)(self.state.clone());
+        (self.tell)(Report::Wlan(self.state.clone()));
         match self.start() {
             Ok(r) => {
                 self.running = Some(r);
@@ -319,7 +350,19 @@ impl Station {
             }
         };
         let mac = iface::hardware_address(&self.cfg.interface)?;
-        Ok(Running { child, control, monitor, mac, found: Vec::new(), lease: None, asking: None, asked: 0, retry_at: None, polled_at: Instant::now() })
+        Ok(Running {
+            child,
+            control,
+            monitor,
+            mac,
+            found: Vec::new(),
+            lease: None,
+            asking: None,
+            asked: 0,
+            retry_at: None,
+            polled_at: Instant::now(),
+            counted: None,
+        })
     }
 
     fn off(&mut self) {
@@ -495,6 +538,11 @@ impl Station {
                 let _ = skyward_sys::kmsg(&format!("{e:#}"));
             }
         }
+        // Nothing goes over a network left, and counting starts afresh on
+        // the next one.
+        if r.counted.take().is_some() {
+            (self.tell)(Report::Traffic(Traffic::default()));
+        }
         self.servers.lock().expect("the DNS servers are not held by a thread that panicked").clear();
     }
 
@@ -522,6 +570,33 @@ impl Station {
         if now >= r.polled_at + POLL {
             self.poll_link();
         }
+        if let Some(r) = &self.running {
+            if r.lease.is_some() && r.counted.is_none_or(|c| now >= c.at + TRAFFIC) {
+                self.count(now);
+            }
+        }
+    }
+
+    /// Read what has gone over the interface, and tell how fast it went
+    /// since the last reading.
+    fn count(&mut self, now: Instant) {
+        let stats = Path::new("/sys/class/net").join(&self.cfg.interface).join("statistics");
+        let read = |name: &str| -> Result<u64> {
+            let path = stats.join(name);
+            let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            text.trim().parse().with_context(|| format!("{} holds no count", path.display()))
+        };
+        let (rx, tx) = match (read("rx_bytes"), read("tx_bytes")) {
+            (Ok(rx), Ok(tx)) => (rx, tx),
+            (Err(e), _) | (_, Err(e)) => return self.lost(e),
+        };
+        let Some(r) = &mut self.running else { return };
+        if let Some(c) = r.counted {
+            let secs = now.duration_since(c.at).as_secs_f64();
+            let rate = |total: u64, before: u64| (total.saturating_sub(before) as f64 / secs).round() as u64;
+            (self.tell)(Report::Traffic(Traffic { rx: rate(rx, c.rx), tx: rate(tx, c.tx) }));
+        }
+        r.counted = Some(Counted { at: now, rx, tx });
     }
 
     /// Read the network joined for its signal and speed.

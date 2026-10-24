@@ -1243,8 +1243,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 app.refresh();
             }
         }
-        if let Some(told) = wlan.as_ref().and_then(wlan::Worker::told) {
-            app.set_wlan(told);
+        if let Some((told, traffic)) = wlan.as_ref().map(wlan::Worker::told) {
+            if let Some(w) = told {
+                app.set_wlan(w);
+            }
+            if let Some(t) = traffic {
+                app.set_traffic(t);
+            }
         }
         // The WLAN page scans again now and then while it shows, as the
         // stock settings do.

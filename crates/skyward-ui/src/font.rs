@@ -146,6 +146,7 @@ pub struct Weights {
     pub badge: f32,
     pub status: f32,
     pub strong: f32,
+    pub speed: f32,
     pub display: f32,
 }
 
@@ -158,6 +159,7 @@ pub const STOCK_WEIGHTS: Weights = Weights {
     badge: 505.0,
     status: 485.0,
     strong: 545.0,
+    speed: 680.0,
     display: 480.0,
 };
 
@@ -176,6 +178,8 @@ pub struct Fonts {
     pub status: Face,
     /// Digits inside the battery pill.
     pub strong: Face,
+    /// How fast data goes, in the status bar.
+    pub speed: Face,
     /// The About page wordmark.
     pub display: Face,
     /// The terminal's monospaced face, for the characters it has.
@@ -242,6 +246,7 @@ impl Fonts {
             badge: face(w.badge)?,
             status: face(w.status)?,
             strong: face(w.strong)?,
+            speed: face(w.speed)?,
             display: face(w.display)?,
             // A single-weight file: the coordinate asks for the weight it is.
             mono: Face::new(mono_data, 0, 400.0)?,
