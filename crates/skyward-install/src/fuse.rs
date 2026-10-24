@@ -102,7 +102,7 @@ impl Source for LocalFile {
 
 /// The block size for a file of `size` bytes: the usual one, or a bigger
 /// one when the file has more blocks of it than the package may.
-fn file_block(size: u64) -> u32 {
+pub(crate) fn file_block(size: u64) -> u32 {
     let fits = size.div_ceil(MAX_BLOCKS).next_power_of_two();
     u32::try_from(fits).map_or(u32::MAX, |b| b.max(FILE_BLOCK))
 }

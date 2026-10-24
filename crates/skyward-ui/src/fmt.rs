@@ -548,6 +548,7 @@ pub fn refusal(r: &Refusal, codename: &str, source: Source, zone: usize) -> Stri
     let give = give(source);
     match r {
         Refusal::Unknown => format!("无法识别该文件，请{give} A/B 完整更新包、刷机包或分区镜像。"),
+        Refusal::Image => format!("无法安装分区镜像，请{give} A/B 完整更新包或刷机包。"),
         Refusal::NotAb(kind) if kind.is_empty() => format!("该更新包未注明类型，请{give} A/B 完整更新包。"),
         Refusal::NotAb(kind) => format!("该更新包的类型为 {kind}，请{give} A/B 完整更新包。"),
         Refusal::OtherDevice(devices) => format!("该更新包适用于 {devices}，本机为 {codename}。"),
@@ -566,6 +567,8 @@ pub fn refusal(r: &Refusal, codename: &str, source: Source, zone: usize) -> Stri
         Refusal::OldHost => "电脑上的 adb 版本过低，请更新 Android SDK Platform-Tools 后重试。".into(),
         Refusal::Unsigned => "该刷机包未签名，请关闭「验证刷机包签名」后重试。".into(),
         Refusal::Unverified => "该刷机包未通过签名验证，请关闭「验证刷机包签名」后重试。".into(),
+        Refusal::Panicked => "暂无法安装该更新，请重启到系统后重试。".into(),
+        Refusal::NotBrick(_) | Refusal::NoSerial => unreachable!("only a request to erase partitions is refused as {r:?}"),
     }
 }
 

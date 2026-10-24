@@ -3950,7 +3950,12 @@ impl App {
             }
             return;
         }
-        if matches!(ev, Event::Image { .. } | Event::Ready { .. } | Event::Script | Event::Finished(_)) {
+        // In rescue, erasing all user data and leaving are the runtime's to
+        // carry out, which tells the page of them itself.
+        if matches!(ev, Event::Wipe | Event::Reboot(_)) {
+            return;
+        }
+        if matches!(ev, Event::Image { .. } | Event::Ready { .. } | Event::Script | Event::Done(_) | Event::Finished(_)) {
             self.wake(now);
         }
         let install = &mut self.state.install;
@@ -3987,7 +3992,8 @@ impl App {
                 _ => {}
             },
             Event::Reflashed(reflash) => self.state.reflash = Some(reflash),
-            Event::Finished(outcome) => {
+            Event::Wipe | Event::Reboot(_) => unreachable!("the runtime carries out what rescue asks of it"),
+            Event::Done(outcome) | Event::Finished(outcome) => {
                 let damage = match (&outcome, &*install) {
                     (Outcome::Failed(_), Install::Updating { overwriting: true, .. }) => Some(Damage::System),
                     (Outcome::Failed(_), Install::Flashing { partition, stage: Some(Stage::Flashing { done, .. }) }) if *done > 0 => {

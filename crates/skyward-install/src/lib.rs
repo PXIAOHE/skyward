@@ -4,6 +4,8 @@
 //! script inside them, and partition images, which are written here.
 
 pub mod adb;
+pub mod asked;
+pub mod blockmap;
 pub mod fuse;
 pub mod image;
 pub mod keep;
@@ -11,6 +13,7 @@ pub mod ota;
 pub mod package;
 pub mod script;
 pub mod signature;
+pub mod wipe;
 
 #[cfg(target_os = "android")]
 mod ffs;
@@ -77,6 +80,16 @@ pub enum Event {
     /// The install wrote over this recovery in the recovery partitions,
     /// which the screen asked to keep: how writing it back went.
     Reflashed(Reflash),
+    /// In rescue, the computer asked for all user data to be erased: the
+    /// screen erases it and says how that went with [`Command::Wiped`].
+    Wipe,
+    /// In rescue, the computer asked for the phone to leave for `target`:
+    /// empty for the system, or `bootloader`, `fastboot`, `recovery` or
+    /// `rescue`. The installer finishes after it.
+    Reboot(String),
+    /// In rescue, what the computer asked for last ended this way; the
+    /// computer may ask for more.
+    Done(Outcome),
     Finished(Outcome),
 }
 
@@ -134,8 +147,21 @@ pub enum Outcome {
 pub enum Refusal {
     /// A file this recovery cannot install.
     Unknown,
+    /// A partition image, where the system asked for a package that
+    /// installs itself.
+    Image,
     /// An update package that is not for A/B phones; the type it names.
     NotAb(String),
+    /// A package in misc that does not say it erases the phone for good;
+    /// the type it names.
+    NotBrick(String),
+    /// A package that erases the phone for good and names no phone, where
+    /// the system is signed with the keys its maker keeps.
+    NoSerial,
+    /// The phone came to the recovery after its kernel stopped: an install
+    /// the system asked for before that is not started, as Android's own
+    /// recovery does not start one.
+    Panicked,
     /// Made for other devices: the ones it names.
     OtherDevice(String),
     /// Made for particular phones, not this one.
@@ -196,6 +222,9 @@ pub enum Command {
     /// Install the update held in [`Event::Ready`], or run the script held
     /// in [`Event::Script`].
     Install,
+    /// The user data the computer asked to be erased in [`Event::Wipe`]
+    /// was erased, or was not.
+    Wiped(bool),
     /// Stop without installing anything.
     Cancel,
 }

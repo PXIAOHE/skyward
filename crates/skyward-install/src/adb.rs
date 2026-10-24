@@ -26,8 +26,11 @@ pub const MAX_PAYLOAD: u32 = 1024 * 1024;
 pub const HEADER_LEN: usize = 24;
 
 /// Sent in place of a block number once the package has been read; the
-/// computer then reports how much it sent and exits.
+/// computer then reports how much it sent and exits. In rescue, where the
+/// computer stays for another command, the other is sent for work that
+/// failed.
 pub const DONE: &[u8; 8] = b"DONEDONE";
+pub const FAILED: &[u8; 8] = b"FAILFAIL";
 
 /// The most taken from the USB endpoint in one read.
 const READ_CHUNK: usize = 16 * 1024;
@@ -146,10 +149,15 @@ pub fn checksum(data: &[u8]) -> u32 {
     data.iter().fold(0u32, |sum, &b| sum.wrapping_add(u32::from(b)))
 }
 
-/// What the phone answers the computer's CNXN with: it is in sideload
-/// mode, and which product it is.
-pub fn banner(name: &str, model: &str, device: &str) -> Vec<u8> {
-    format!("sideload::ro.product.name={name};ro.product.model={model};ro.product.device={device};features=").into_bytes()
+/// The modes the phone tells the computer it is in: waiting for `adb
+/// sideload`, or for `adb rescue`.
+pub const SIDELOAD: &str = "sideload";
+pub const RESCUE: &str = "rescue";
+
+/// What the phone answers the computer's CNXN with: the mode it is in, and
+/// which product it is.
+pub fn banner(mode: &str, name: &str, model: &str, device: &str) -> Vec<u8> {
+    format!("{mode}::ro.product.name={name};ro.product.model={model};ro.product.device={device};features=").into_bytes()
 }
 
 /// What the computer offers to send: the package's size and the block size
@@ -194,24 +202,96 @@ pub enum Service {
     /// `sideload:<size>`: send the whole package in one go, as adb did
     /// before Android 4.4.
     Sideload,
+    /// `rescue-install:<size>:<block size>`: send a package block by
+    /// block, the computer staying on for another command after it.
+    RescueInstall(Offer),
+    /// `rescue-getprop:<name>`: what the phone says of itself under that
+    /// name, or all of it that rescue answers for an empty name.
+    RescueGetprop(String),
+    /// `rescue-wipe:<target>:<size>`: erase what `target` names, the
+    /// answer padded to `size` bytes.
+    RescueWipe { target: String, size: usize },
+    /// `reboot:<target>`: leave for that target, or for the system where
+    /// it is empty.
+    Reboot(String),
     Other(String),
 }
 
 pub fn service(payload: &[u8]) -> Service {
     let name = String::from_utf8_lossy(payload.strip_suffix(&[0]).unwrap_or(payload)).into_owned();
     if let Some(args) = name.strip_prefix("sideload-host:") {
-        let offer = args.split_once(':').and_then(|(size, block)| {
-            Some(Offer { size: size.parse().ok()?, block_size: block.parse().ok()? })
-        });
-        return match offer {
-            Some(offer) => Service::SideloadHost(offer),
-            None => Service::Other(name),
-        };
+        return offered(args).map_or(Service::Other(name), Service::SideloadHost);
+    }
+    if let Some(args) = name.strip_prefix("rescue-install:") {
+        return offered(args).map_or(Service::Other(name), Service::RescueInstall);
+    }
+    if let Some(prop) = name.strip_prefix("rescue-getprop:") {
+        return Service::RescueGetprop(prop.to_string());
+    }
+    if let Some(args) = name.strip_prefix("rescue-wipe:") {
+        let asked = args
+            .split_once(':')
+            .and_then(|(target, size)| Some(Service::RescueWipe { target: target.to_string(), size: size.parse().ok()? }));
+        return asked.unwrap_or(Service::Other(name));
+    }
+    if let Some(target) = name.strip_prefix("reboot:") {
+        return Service::Reboot(target.to_string());
     }
     if name.starts_with("sideload:") {
         return Service::Sideload;
     }
     Service::Other(name)
+}
+
+/// What `adb rescue getprop` may ask of the phone, in the order all of it
+/// is given: its charge, under a name of rescue's own, and what its build
+/// says of itself.
+pub const RESCUE_PROPERTIES: [&str; 10] = [
+    BATTERY_LEVEL,
+    "ro.build.date.utc",
+    "ro.build.fingerprint",
+    "ro.build.flavor",
+    "ro.build.id",
+    "ro.build.product",
+    "ro.build.tags",
+    "ro.build.version.incremental",
+    "ro.product.device",
+    "ro.product.vendor.device",
+];
+pub const BATTERY_LEVEL: &str = "rescue.battery_level";
+
+/// The answer to `rescue-getprop:<asked>`, given what `read` says of each
+/// name: the value and a line's end, or for an empty name every value
+/// there is as `[name]: [value]` lines. A name rescue does not answer for,
+/// or one with no value, is answered with an empty line.
+pub fn rescue_getprop(asked: &str, read: impl Fn(&str) -> Option<String>) -> String {
+    let answer = match asked {
+        "" => RESCUE_PROPERTIES
+            .iter()
+            .filter_map(|name| read(name).filter(|v| !v.is_empty()).map(|v| format!("[{name}]: [{v}]\n")))
+            .collect(),
+        name if RESCUE_PROPERTIES.contains(&name) => read(name).map(|v| v + "\n").unwrap_or_default(),
+        _ => String::new(),
+    };
+    if answer.is_empty() {
+        "\n".to_string()
+    } else {
+        answer
+    }
+}
+
+/// What `rescue-wipe` answers, padded with NULs to the `size` the computer
+/// reads.
+pub fn rescue_wiped(erased: bool, size: usize) -> Vec<u8> {
+    let mut answer = if erased { DONE } else { FAILED }.to_vec();
+    answer.resize(size.max(answer.len()), 0);
+    answer
+}
+
+/// What a service's `<size>:<block size>` offers to send.
+fn offered(args: &str) -> Option<Offer> {
+    let (size, block_size) = args.split_once(':')?;
+    Some(Offer { size: size.parse().ok()?, block_size: block_size.parse().ok()? })
 }
 
 /// The USB endpoints the protocol runs over. A read fails with
@@ -309,6 +389,25 @@ impl<L: Link> Connection<L> {
     /// the computer to come back.
     pub fn accept(&mut self) -> Result<Offer, Error> {
         loop {
+            match self.accept_service()? {
+                (Service::SideloadHost(offer), remote) => {
+                    self.stream = Some(Stream { remote, writable: true });
+                    self.send(&Packet::new(OKAY, LOCAL_ID, remote, []))?;
+                    return Ok(offer);
+                }
+                (Service::Sideload, remote) => {
+                    self.send(&Packet::new(CLSE, 0, remote, []))?;
+                    return Err(Error::OldHost);
+                }
+                (_, remote) => self.send(&Packet::new(CLSE, 0, remote, []))?,
+            }
+        }
+    }
+
+    /// Answer the computer until it opens a service, and give it with the
+    /// stream the computer opened it on.
+    pub fn accept_service(&mut self) -> Result<(Service, u32), Error> {
+        loop {
             let p = match self.receive() {
                 Ok(p) => p,
                 Err(Error::Io(e)) if e.kind() == io::ErrorKind::ConnectionAborted => {
@@ -320,23 +419,32 @@ impl<L: Link> Connection<L> {
             };
             match p.command {
                 CNXN => self.connect(&p)?,
-                OPEN => match service(&p.payload) {
-                    Service::SideloadHost(offer) => {
-                        self.stream = Some(Stream { remote: p.arg0, writable: true });
-                        self.send(&Packet::new(OKAY, LOCAL_ID, p.arg0, []))?;
-                        return Ok(offer);
-                    }
-                    Service::Sideload => {
-                        self.send(&Packet::new(CLSE, 0, p.arg0, []))?;
-                        return Err(Error::OldHost);
-                    }
-                    Service::Other(_) => self.send(&Packet::new(CLSE, 0, p.arg0, []))?,
-                },
+                OPEN => return Ok((service(&p.payload), p.arg0)),
                 // Streams this side never opened, and keys it never asked
                 // for.
                 _ => {}
             }
         }
+    }
+
+    /// Take the stream a service was opened on, so what the service says
+    /// goes over it.
+    pub fn take(&mut self, remote: u32) -> Result<(), Error> {
+        self.stream = Some(Stream { remote, writable: true });
+        self.send(&Packet::new(OKAY, LOCAL_ID, remote, []))
+    }
+
+    /// Say `data` on the stream and close it, which is how a service that
+    /// answers in one go ends.
+    pub fn answer(&mut self, data: &[u8]) -> Result<(), Error> {
+        self.write_stream(data)?;
+        self.end()
+    }
+
+    /// Close the stream, the service on it done.
+    pub fn end(&mut self) -> Result<(), Error> {
+        let Some(stream) = self.stream.take() else { return Ok(()) };
+        self.send(&Packet::new(CLSE, LOCAL_ID, stream.remote, []))
     }
 
     /// The next thing the computer says on the stream: data, which is
@@ -412,7 +520,13 @@ impl<L: Link> Connection<L> {
     /// Tell the computer the package has been read and close the stream,
     /// once it has taken the message.
     pub fn finish(&mut self) -> Result<(), Error> {
-        self.write_stream(DONE)?;
+        self.finish_with(DONE)
+    }
+
+    /// End the serving of a package with `message`: [`DONE`], or [`FAILED`]
+    /// for one the recovery could not install in rescue.
+    pub fn finish_with(&mut self, message: &[u8; 8]) -> Result<(), Error> {
+        self.write_stream(message)?;
         loop {
             match self.incoming()? {
                 Incoming::Ready => break,
@@ -455,11 +569,12 @@ mod tests {
     }
 
     #[test]
-    fn the_banner_names_the_product_like_adbd_does() {
+    fn the_banner_names_the_mode_and_the_product_like_adbd_does() {
         assert_eq!(
-            banner("ishtar", "2304FPN6DC", "ishtar"),
+            banner(SIDELOAD, "ishtar", "2304FPN6DC", "ishtar"),
             b"sideload::ro.product.name=ishtar;ro.product.model=2304FPN6DC;ro.product.device=ishtar;features=".to_vec()
         );
+        assert!(banner(RESCUE, "ishtar", "2304FPN6DC", "ishtar").starts_with(b"rescue::"));
     }
 
     #[test]
@@ -471,6 +586,47 @@ mod tests {
         assert_eq!(service(b"sideload:123456\0"), Service::Sideload);
         assert_eq!(service(b"shell:ls\0"), Service::Other("shell:ls".into()));
         assert_eq!(service(b"sideload-host:x:1\0"), Service::Other("sideload-host:x:1".into()));
+    }
+
+    #[test]
+    fn the_services_of_rescue_are_read_too() {
+        assert_eq!(service(b"rescue-install:4096:4096\0"), Service::RescueInstall(Offer { size: 4096, block_size: 4096 }));
+        assert_eq!(service(b"rescue-getprop:ro.build.fingerprint\0"), Service::RescueGetprop("ro.build.fingerprint".into()));
+        assert_eq!(service(b"rescue-getprop:\0"), Service::RescueGetprop(String::new()), "all that rescue answers for");
+        assert_eq!(service(b"rescue-wipe:userdata:8\0"), Service::RescueWipe { target: "userdata".into(), size: 8 });
+        assert_eq!(service(b"rescue-wipe:userdata\0"), Service::Other("rescue-wipe:userdata".into()));
+        assert_eq!(service(b"reboot:bootloader\0"), Service::Reboot("bootloader".into()));
+        assert_eq!(service(b"reboot:\0"), Service::Reboot(String::new()));
+    }
+
+    fn props(name: &str) -> Option<String> {
+        match name {
+            BATTERY_LEVEL => Some("76".into()),
+            "ro.product.device" => Some("ishtar".into()),
+            "ro.build.tags" => Some(String::new()),
+            "ro.serialno" => Some("2674dc3e".into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn rescue_answers_only_for_what_it_may_tell() {
+        assert_eq!(rescue_getprop("ro.product.device", props), "ishtar\n");
+        assert_eq!(rescue_getprop(BATTERY_LEVEL, props), "76\n");
+        assert_eq!(rescue_getprop("ro.serialno", props), "\n", "the serial is not rescue's to give");
+        assert_eq!(rescue_getprop("ro.build.id", props), "\n", "a name with no value");
+    }
+
+    #[test]
+    fn rescue_gives_all_it_may_tell_for_an_empty_name() {
+        assert_eq!(rescue_getprop("", props), "[rescue.battery_level]: [76]\n[ro.product.device]: [ishtar]\n");
+        assert_eq!(rescue_getprop("", |_| None), "\n");
+    }
+
+    #[test]
+    fn a_wipe_is_answered_padded_to_what_the_computer_reads() {
+        assert_eq!(rescue_wiped(true, 8), b"DONEDONE");
+        assert_eq!(rescue_wiped(false, 10), b"FAILFAIL\0\0");
     }
 
     #[test]

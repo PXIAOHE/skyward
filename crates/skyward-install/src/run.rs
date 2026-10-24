@@ -1,9 +1,12 @@
 //! The installer: a thread that installs one package, telling the screen
-//! how it goes. A package from the computer comes over USB, taken over for
-//! sideload and handed back to adb after; a file on the phone is read
-//! where it is.
+//! how it goes, or serves `adb rescue` command after command. A package
+//! from the computer comes over USB, taken over for sideload or rescue and
+//! handed back to adb after; a file on the phone is read where it is, and
+//! a package the system left on a partition through the map of its blocks.
 
-use crate::adb::{self, Connection, Offer};
+use crate::adb::{self, Connection, Offer, Service};
+use crate::asked::Asked;
+use crate::blockmap::BlockMap;
 use crate::ffs::{Endpoints, Shared, Usb};
 use crate::fuse::{self, Fault, LocalFile, Mount};
 use crate::image::{self, ImageKind};
@@ -41,6 +44,7 @@ const METADATA: &str = "/metadata";
 /// it, and the version of the interface the script is told it runs under.
 const BINARY: &str = "/tmp/update-binary";
 const API_VERSION: &str = "3";
+const RETRY: &str = "retry";
 
 /// Scripts written for other recoveries start with the shell they find
 /// here, and look for programs where those recoveries keep them.
@@ -82,6 +86,27 @@ impl Installer {
     /// `options` as for [`Installer::start`].
     pub fn open(path: PathBuf, detach: Detach, options: Options) -> Result<Installer> {
         Installer::spawn(Origin::File, detach, options, move |ctx| run_file(ctx, &path))
+    }
+
+    /// Install the package the system asked for, from a thread of its own,
+    /// with no one at the screen to agree to it: an update package or a zip
+    /// with an install script, as Android's own recovery installs one.
+    /// `retry` when the install started before and a restart cut it off;
+    /// `detach` and `options` as for [`Installer::start`].
+    pub fn asked(package: Asked, retry: bool, detach: Detach, options: Options) -> Result<Installer> {
+        Installer::spawn(Origin::Asked { retry }, detach, options, move |ctx| match &package {
+            Asked::File(path) => run_file(ctx, path),
+            Asked::Mapped(map) => run_mapped(ctx, map),
+        })
+    }
+
+    /// Take USB over and wait for `adb rescue`, from a thread of its own:
+    /// packages it sends are installed as for [`Installer::start`], what
+    /// the phone is is answered, and erasing all user data is asked of the
+    /// screen with [`Event::Wipe`]. The computer stays on for command after
+    /// command, until it asks the phone to leave or the screen cancels.
+    pub fn rescue(detach: Detach, options: Options) -> Result<Installer> {
+        Installer::spawn(Origin::Computer, detach, options, rescue)
     }
 
     fn spawn(
@@ -130,6 +155,12 @@ impl Installer {
         let _ = self.commands.send(Command::Install);
     }
 
+    /// Tell rescue whether the user data the computer asked to be erased
+    /// was.
+    pub fn wiped(&self, erased: bool) {
+        let _ = self.commands.send(Command::Wiped(erased));
+    }
+
     /// Stop waiting for the computer, for where an image goes, or for an
     /// update to be agreed to.
     pub fn cancel(&self) -> Result<()> {
@@ -155,10 +186,14 @@ impl Drop for Installer {
 /// Where the package comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Origin {
-    /// The computer, with `adb sideload`.
+    /// The computer, with `adb sideload` or `adb rescue`.
     Computer,
     /// A file on the phone.
     File,
+    /// The system, which asked before the recovery started for a package
+    /// on the phone to be installed; `retry` when the install started
+    /// before and a restart cut it off.
+    Asked { retry: bool },
 }
 
 struct Context {
@@ -187,17 +222,17 @@ fn run(ctx: &mut Context) -> Outcome {
         Err(e) => return failed(e.context("set USB up for sideload")),
     };
     ctx.send(Event::Waiting);
-    let mut conn = Connection::new(endpoints, banner());
+    let mut conn = Connection::new(endpoints, banner(adb::SIDELOAD));
     ctx.shared.accepting(true);
     let accepted = conn.accept();
     ctx.shared.accepting(false);
     let (outcome, conn) = match accepted {
         // Cancelled as the computer started sending.
         Ok(_) if ctx.shared.cancelled() => {
-            finish(&mut conn);
+            finish(&mut conn, adb::DONE);
             (Outcome::Cancelled, conn)
         }
-        Ok(offer) => receive(ctx, conn, offer),
+        Ok(offer) => receive(ctx, conn, offer, false),
         Err(adb::Error::Interrupted) => (Outcome::Cancelled, conn),
         Err(adb::Error::OldHost) => (Outcome::Refused(Refusal::OldHost), conn),
         Err(e) => (failed(anyhow!(e).context("wait for adb sideload")), conn),
@@ -223,25 +258,35 @@ enum Done {
     Error(anyhow::Error),
 }
 
-fn receive(ctx: &mut Context, mut conn: Connection<Endpoints>, offer: Offer) -> (Outcome, Connection<Endpoints>) {
+/// Install the package the computer offers. `rescue` tells the computer
+/// how the install went, as rescue does, where sideload only says the
+/// package was read.
+fn receive(ctx: &mut Context, mut conn: Connection<Endpoints>, offer: Offer, rescue: bool) -> (Outcome, Connection<Endpoints>) {
     let _ = kmsg(&format!("install: {} bytes offered in blocks of {}", offer.size, offer.block_size));
+    let ending = |outcome: &Outcome| match (rescue, outcome) {
+        (true, Outcome::Installed { .. } | Outcome::Flashed { .. } | Outcome::Ran { .. }) | (false, _) => adb::DONE,
+        (true, _) => adb::FAILED,
+    };
     if let Err(e) = offer.check() {
-        finish(&mut conn);
-        return (failed(anyhow!(e)), conn);
+        let outcome = failed(anyhow!(e));
+        finish(&mut conn, ending(&outcome));
+        return (outcome, conn);
     }
     ctx.send(Event::Checking { size: offer.size });
     let mounted = match fuse::mount(offer) {
         Ok(mounted) => mounted,
         Err(e) => {
-            finish(&mut conn);
-            return (failed(e), conn);
+            let outcome = failed(e);
+            finish(&mut conn, ending(&outcome));
+            return (outcome, conn);
         }
     };
     let mount = mounted.serve(conn);
     let done = install(ctx, &mount, offer.size).unwrap_or_else(Done::Error);
     let (mut conn, served) = mount.unmount();
-    finish(&mut conn);
-    (conclude(done, served, ctx.origin), conn)
+    let outcome = conclude(done, served, ctx.origin);
+    finish(&mut conn, ending(&outcome));
+    (outcome, conn)
 }
 
 /// Install the file at `path`, read where it is.
@@ -251,6 +296,22 @@ fn run_file(ctx: &mut Context, path: &Path) -> Outcome {
         Err(e) => return Outcome::Failed(Failure::Unreadable(format!("{e:#}"))),
     };
     let _ = kmsg(&format!("install: {}, {} bytes", path.display(), offer.size));
+    serve_local(ctx, file, offer, path)
+}
+
+/// Install the package the system left on a partition, read through the
+/// map of its blocks at `map`.
+fn run_mapped(ctx: &mut Context, map: &Path) -> Outcome {
+    let (blocks, offer) = match BlockMap::read(map).and_then(|m| m.open()) {
+        Ok(opened) => opened,
+        Err(e) => return Outcome::Failed(Failure::Unreadable(format!("{e:#}"))),
+    };
+    let _ = kmsg(&format!("install: the package {} maps, {} bytes", map.display(), offer.size));
+    serve_local(ctx, blocks, offer, map)
+}
+
+/// Serve a package the phone holds, which `path` names, and install it.
+fn serve_local<S: fuse::Source + Send + 'static>(ctx: &mut Context, source: S, offer: Offer, path: &Path) -> Outcome {
     if offer.size == 0 {
         return Outcome::Refused(Refusal::Unknown);
     }
@@ -262,17 +323,98 @@ fn run_file(ctx: &mut Context, path: &Path) -> Outcome {
         Ok(mounted) => mounted,
         Err(e) => return failed(e),
     };
-    let mount = mounted.serve(file);
+    let mount = mounted.serve(source);
     let done = install(ctx, &mount, offer.size).unwrap_or_else(Done::Error);
     let (_, served) = mount.unmount();
     conclude(done, served, ctx.origin)
 }
 
-/// Tell the computer the package has been read, so `adb sideload` ends.
-fn finish(conn: &mut Connection<Endpoints>) {
-    if let Err(e) = conn.finish() {
+/// Tell the computer the package has been read, so `adb sideload` ends; in
+/// rescue, how installing it went.
+fn finish(conn: &mut Connection<Endpoints>, message: &[u8; 8]) {
+    if let Err(e) = conn.finish_with(message) {
         let _ = kmsg(&format!("install: the computer did not take the end of the transfer: {e}"));
     }
+}
+
+/// Serve `adb rescue` until the computer asks the phone to leave, the cable
+/// is pulled for good, or the screen cancels: each command is carried out
+/// and answered, and the screen hears how each install ended. Gives how
+/// the last install ended, or that none was made.
+fn rescue(ctx: &mut Context) -> Outcome {
+    let (usb, endpoints) = match Usb::open(ctx.shared.clone()) {
+        Ok(usb) => usb,
+        Err(e) => return failed(e.context("set USB up for rescue")),
+    };
+    ctx.send(Event::Waiting);
+    let mut conn = Connection::new(endpoints, banner(adb::RESCUE));
+    let mut last = Outcome::Cancelled;
+    let ended = loop {
+        ctx.shared.accepting(true);
+        let accepted = conn.accept_service();
+        ctx.shared.accepting(false);
+        let (service, remote) = match accepted {
+            Ok(opened) => opened,
+            Err(adb::Error::Interrupted) => break Ok(()),
+            Err(e) => break Err(anyhow!(e).context("wait for adb rescue")),
+        };
+        let _ = kmsg(&format!("rescue: the computer asks for {service:?}"));
+        let served = match service {
+            Service::RescueInstall(offer) => match conn.take(remote) {
+                Ok(()) => {
+                    let (outcome, back) = receive(ctx, conn, offer, true);
+                    conn = back;
+                    ctx.send(Event::Done(outcome.clone()));
+                    last = outcome;
+                    // The screen may have left the page meanwhile.
+                    if ctx.shared.cancelled() {
+                        break Ok(());
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
+            Service::RescueGetprop(name) => conn.take(remote).and_then(|()| conn.answer(rescue_answer(&name).as_bytes())),
+            Service::RescueWipe { target, size } if target == "userdata" => {
+                ctx.send(Event::Wipe);
+                let erased = match ctx.commands.recv() {
+                    Ok(Command::Wiped(erased)) => erased,
+                    Ok(Command::Cancel) | Err(_) => break Ok(()),
+                    Ok(other) => break Err(anyhow!("rescue waiting for user data to be erased was told {other:?}")),
+                };
+                conn.take(remote).and_then(|()| conn.answer(&adb::rescue_wiped(erased, size)))
+            }
+            Service::Reboot(target) => {
+                // Taken and closed at once, as the phone leaves.
+                if let Err(e) = conn.take(remote).and_then(|()| conn.end()) {
+                    let _ = kmsg(&format!("rescue: the computer's reboot was not answered: {e}"));
+                }
+                ctx.send(Event::Reboot(target));
+                break Ok(());
+            }
+            // What rescue does not serve is refused, as minadbd refuses it.
+            _ => conn.send(&adb::Packet::new(adb::CLSE, 0, remote, [])),
+        };
+        if let Err(e) = served {
+            let _ = kmsg(&format!("rescue: the computer went away mid-command: {e}"));
+        }
+    };
+    if let Err(e) = usb.close(conn.into_link()) {
+        let _ = kmsg(&format!("rescue: USB not handed back to adb: {e:#}"));
+    }
+    match ended {
+        Ok(()) => last,
+        Err(e) => failed(e),
+    }
+}
+
+/// What rescue answers for `name`: the phone's properties it may give, and
+/// its charge.
+fn rescue_answer(name: &str) -> String {
+    adb::rescue_getprop(name, |key| match key {
+        adb::BATTERY_LEVEL => skyward_info::battery_now().ok().flatten().map(|b| b.level.to_string()),
+        key => prop(key),
+    })
 }
 
 /// The outcome, given how serving the package went: a package that stopped
@@ -296,7 +438,7 @@ fn conclude(done: Done, served: Result<Option<Fault>>, origin: Origin) -> Outcom
         (_, Err(e)) => failed(e.context("serve the package")),
         (_, Ok(Some(Fault::Transfer(why)))) => Outcome::Failed(match origin {
             Origin::Computer => Failure::Disconnected,
-            Origin::File => Failure::Unreadable(why),
+            Origin::File | Origin::Asked { .. } => Failure::Unreadable(why),
         }),
         (_, Ok(Some(Fault::Changed(_)))) => Outcome::Failed(Failure::Changed),
         (Done::Engine(code), Ok(None)) => Outcome::Failed(Failure::Engine(code)),
@@ -311,9 +453,44 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
     let _ = kmsg(&format!("install: {}", describe(&package)));
     match package {
         Package::Update(update) => update_system(ctx, mount, &update),
+        // The system asks for packages that install themselves, as Android's
+        // own recovery takes nothing else; an image needs someone to say
+        // where it goes.
+        Package::Image(_) if matches!(ctx.origin, Origin::Asked { .. }) => Ok(Done::Decided(Outcome::Refused(Refusal::Image))),
         Package::Image(kind) => flash_image(ctx, kind, size),
         Package::Script => run_script(ctx, size),
         Package::Unknown => Ok(Done::Decided(Outcome::Refused(Refusal::Unknown))),
+    }
+}
+
+/// Whether the install waits for the user to agree before it writes. A
+/// file a single tap picked always does, and so does an update from the
+/// computer that erases all user data; what the system asked for it agreed
+/// to itself, as with Android's own recovery.
+fn waits(origin: Origin, wipe: bool) -> bool {
+    match origin {
+        Origin::File => true,
+        Origin::Computer => wipe,
+        Origin::Asked { .. } => false,
+    }
+}
+
+/// Why there is too little charge to install, if there is: an install the
+/// system asked for that a restart cut off goes on whatever the charge, as
+/// Android's own recovery has it, the charge having been enough to start.
+fn short_of_charge(origin: Origin) -> Result<Option<Refusal>> {
+    match origin {
+        Origin::Asked { retry: true } => Ok(None),
+        _ => battery(),
+    }
+}
+
+/// Move off the installed system before the first write, where nothing has
+/// yet: rescue may install one package after another.
+fn detach_once(ctx: &mut Context) -> Result<()> {
+    match ctx.detach.take() {
+        Some(detach) => detach().context("move off the installed system"),
+        None => Ok(()),
     }
 }
 
@@ -331,7 +508,7 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
     if let Err(refusal) = package::check(update, &phone(slot)?) {
         return Ok(Done::Decided(Outcome::Refused(refusal)));
     }
-    if let Some(refusal) = battery()? {
+    if let Some(refusal) = short_of_charge(ctx.origin)? {
         return Ok(Done::Decided(Outcome::Refused(refusal)));
     }
     let state = skyward_vab::snapshot_state()?;
@@ -344,10 +521,7 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
     }
     let version = update.version().map(str::to_string);
     let wipe = update.wipes();
-    // Erasing all user data is the user's to agree to before the system
-    // they would come back to is written over, and so is an update a
-    // single tap on a file picked.
-    if wipe || ctx.origin == Origin::File {
+    if waits(ctx.origin, wipe) {
         ctx.send(Event::Ready { version: version.clone(), wipe });
         match ctx.commands.recv() {
             Ok(Command::Install) => {}
@@ -357,8 +531,7 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
     }
     ctx.send(Event::Installing { version });
     let kept = hold(ctx, slot)?;
-    let detach = ctx.detach.take().expect("an installer takes one package");
-    detach().context("move off the installed system")?;
+    detach_once(ctx)?;
     // update_engine mounts /metadata itself, as in the stock recovery, keeps
     // the update's state there, and unmounts it when done. The recovery
     // reads the state from it read-only again afterwards.
@@ -565,7 +738,7 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
     let (partition, slots) = match ctx.commands.recv() {
         Ok(Command::Flash { partition, slots }) => (partition, slots),
         Ok(Command::Cancel) | Err(_) => return Ok(Done::Decided(Outcome::Cancelled)),
-        Ok(Command::Install) => bail!("an image waiting for its partition was told to install an update"),
+        Ok(other) => bail!("an image waiting for its partition was told {other:?}"),
     };
     ensure!(partitions.contains(&partition), "{partition} is not among {partitions:?}");
     ensure!(!slots.is_empty(), "no slot chosen for {partition}");
@@ -582,13 +755,13 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
 }
 
 /// Run the install script of the zip being served, `size` bytes, once the
-/// user agrees, as Android's recovery runs one, among what the recoveries
-/// such scripts are written for give them: their shell at /sbin, and the
-/// slot's partitions mapped writable and unmounted. Where the screen asked
-/// for it, the zip is first checked to be signed with one of the phone's
-/// update keys.
+/// user agrees, or at once where the system asked for it, as Android's
+/// recovery runs one, among what the recoveries such scripts are written
+/// for give them: their shell at /sbin, and the slot's partitions mapped
+/// writable and unmounted. Where the screen asked for it, the zip is first
+/// checked to be signed with one of the phone's update keys.
 fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
-    if let Some(refusal) = battery()? {
+    if let Some(refusal) = short_of_charge(ctx.origin)? {
         return Ok(Done::Decided(Outcome::Refused(refusal)));
     }
     if ctx.options.signed {
@@ -603,18 +776,21 @@ fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
     if ctx.shared.cancelled() {
         return Ok(Done::Decided(Outcome::Cancelled));
     }
-    ctx.send(Event::Script);
-    match ctx.commands.recv() {
-        Ok(Command::Install) => {}
-        Ok(Command::Cancel) | Err(_) => return Ok(Done::Decided(Outcome::Cancelled)),
-        Ok(other) => bail!("a script waiting to be agreed to was told {other:?}"),
+    // A script may write over any partition, so whoever is at the screen
+    // agrees to it first; the system agreed to what it asked for.
+    if !matches!(ctx.origin, Origin::Asked { .. }) {
+        ctx.send(Event::Script);
+        match ctx.commands.recv() {
+            Ok(Command::Install) => {}
+            Ok(Command::Cancel) | Err(_) => return Ok(Done::Decided(Outcome::Cancelled)),
+            Ok(other) => bail!("a script waiting to be agreed to was told {other:?}"),
+        }
     }
     let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
     extract_script()?;
     shell_at_sbin()?;
     let kept = hold(ctx, slot)?;
-    let detach = ctx.detach.take().expect("an installer takes one package");
-    detach().context("move off the installed system")?;
+    detach_once(ctx)?;
     // While an update is in flight, the slot's partitions in super are its
     // and stay unmapped.
     let mapped = match skyward_vab::snapshot_state()? {
@@ -715,8 +891,13 @@ fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
     let (output_read, output_write) = pipe(0)?;
     let fd = requests_write.as_raw_fd();
     let mut command = std::process::Command::new(BINARY);
+    command.args([API_VERSION, &fd.to_string(), fuse::PACKAGE]);
+    // A script started again after a restart cut it off is told so, as
+    // Android's own recovery tells it, to pick up where it was.
+    if ctx.origin == (Origin::Asked { retry: true }) {
+        command.arg(RETRY);
+    }
     command
-        .args([API_VERSION, &fd.to_string(), fuse::PACKAGE])
         .current_dir("/")
         .env("PATH", SCRIPT_PATH)
         .stdin(Stdio::null())
@@ -834,9 +1015,9 @@ fn clean_up(before: &[(i32, PathBuf)], mapped: &SlotMaps) -> Result<()> {
 }
 
 /// What the phone tells the computer it is.
-fn banner() -> Vec<u8> {
+fn banner(mode: &str) -> Vec<u8> {
     let p = |name| prop(name).unwrap_or_default();
-    adb::banner(&p("ro.product.name"), &p("ro.product.model"), &p("ro.product.device"))
+    adb::banner(mode, &p("ro.product.name"), &p("ro.product.model"), &p("ro.product.device"))
 }
 
 fn failed(e: anyhow::Error) -> Outcome {
