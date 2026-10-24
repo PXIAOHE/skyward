@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use procfs::process::{FDTarget, MMapPath, Process};
 use skyward_config::Service;
 use skyward_vab::Mounted;
@@ -23,7 +23,8 @@ const READY_POLL: Duration = Duration::from_millis(100);
 /// it again whenever it exits. They are started in the order they are
 /// written, and one that says what it will be ready with holds up those
 /// after it until it is. A program still running from an earlier instance
-/// of the recovery service is waited on instead of started twice.
+/// of the recovery service is waited on instead of started twice. A
+/// program that runs once is run to its end where it stands in that order.
 ///
 /// `libraries` is a directory of shared libraries every one of them may
 /// need, searched after whatever it names itself.
@@ -35,6 +36,12 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         let mut s = s.clone();
         if let Some(dir) = libraries {
             s.libraries.push(dir.to_string_lossy().into_owned());
+        }
+        if s.oneshot {
+            let status = command(&s).status().with_context(|| format!("run {}", s.path))?;
+            ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
+            skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
+            continue;
         }
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
@@ -98,14 +105,21 @@ fn supervise(s: &Service) -> ! {
 
 /// Start the program and wait for it to end.
 fn run(s: &Service) -> Result<String> {
+    let mut child = command(s).spawn().with_context(|| format!("start {}", s.path))?;
+    let status = child.wait().context("wait for it")?;
+    Ok(format!("pid {} ended: {status}", child.id()))
+}
+
+/// The program as it is started: with what it is given, from the top of the
+/// tree, reading and writing nothing of the recovery's, and finding its
+/// libraries where it names them.
+fn command(s: &Service) -> Command {
     let mut cmd = Command::new(&s.path);
-    cmd.current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
     }
-    let mut child = cmd.spawn().with_context(|| format!("start {}", s.path))?;
-    let status = child.wait().context("wait for it")?;
-    Ok(format!("pid {} ended: {status}", child.id()))
+    cmd
 }
 
 /// Lock in memory every file the running programs have mapped or open on
@@ -114,8 +128,9 @@ fn run(s: &Service) -> Result<String> {
 /// locked mappings stay for the rest of the recovery's life.
 pub fn pin(services: &[Service], mounted: &[Mounted]) -> Result<Vec<PathBuf>> {
     let mut files = BTreeSet::new();
-    for s in services {
-        // A program between restarts has nothing in memory to keep.
+    // A program run once has ended, and one between restarts has nothing in
+    // memory to keep either.
+    for s in services.iter().filter(|s| !s.oneshot) {
         let Some(pid) = running(&s.path) else { continue };
         let process = Process::new(pid as i32).with_context(|| format!("open process {pid}"))?;
         for map in process.maps().with_context(|| format!("read the mappings of {}", s.path))? {

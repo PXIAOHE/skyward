@@ -45,6 +45,21 @@ partition = "modem"
 [partitions]
 mounted = ["persist"]
 
+# What the phone's own init runs once the system has finished starting.
+# The kernel starts both CPU clusters on the performance governor, which
+# holds them at their highest clock, and Qualcomm's idle driver keeps idle
+# CPUs from powering down until it is told otherwise; the script hands the
+# clusters to WALT, lets idle CPUs power down and sets how the memory bus
+# scales. Without it the CPUs stay at their highest clock and voltage even
+# while idle, and the phone slowly heats up. It needs none of the programs
+# below and runs before them, so one of them that does not come up still
+# leaves the CPUs settled.
+[[service]]
+path = "/vendor/bin/sh"
+args = ["/vendor/bin/init.kernel.post_boot.sh"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+oneshot = true
+
 # The secure world reaches back into Android through the listeners this
 # daemon registers; without them the key service cannot use any key.
 [[service]]

@@ -252,9 +252,18 @@ pub struct Partitions {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Service {
     pub path: String,
+    /// What the program is given after its own path, as init gives a
+    /// service the words after its path.
+    #[serde(default)]
+    pub args: Vec<String>,
     /// Directories for LD_LIBRARY_PATH, searched in order.
     #[serde(default)]
     pub libraries: Vec<String>,
+    /// The program runs once, to its end, as a service of init's marked
+    /// oneshot does: it is not started again, the programs after it start
+    /// once it has ended, and it has to end well.
+    #[serde(default)]
+    pub oneshot: bool,
     /// A property the program sets once it is ready for the rest. Programs
     /// are started in the order they are written, and one that says it has
     /// something to wait for holds up the ones after it.
@@ -346,6 +355,14 @@ impl DeviceConfig {
         for name in &cfg.partitions.mounted {
             ensure!(!name.is_empty() && !name.contains('/'), "[partitions] mounted: {name} is not a partition's name");
         }
+        for s in cfg.services.iter().filter(|s| s.oneshot) {
+            let waits = s.ready_property.is_some() || s.ready_service.is_some() || s.ready_hardware_service.is_some();
+            ensure!(
+                !waits && s.registers.is_empty() && s.description.is_none(),
+                "[[service]] {}: a program run once is ready when it ends, and registers nothing",
+                s.path
+            );
+        }
         for folder in &cfg.backup.data_skipped {
             let path = Path::new(folder);
             let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
@@ -409,6 +426,7 @@ mod tests {
         assert_eq!(
             paths,
             [
+                "/vendor/bin/sh",
                 "/vendor/bin/qseecomd",
                 "/vendor/bin/hlosminkdaemon",
                 "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti",
@@ -422,7 +440,10 @@ mod tests {
             assert_eq!(s.libraries[..2], ["/system/lib64", "/vendor/lib64"], "{} loads the recovery's own libraries first", s.path);
             assert_eq!(s.ready_hardware_service, None, "{} is of the newer kind", s.path);
         }
-        let [listeners, opener, keymint, gatekeeper, element, weaver, boot] = &cfg.services[..] else { panic!("seven programs") };
+        let [post_boot, listeners, opener, keymint, gatekeeper, element, weaver, boot] = &cfg.services[..] else { panic!("eight programs") };
+        assert!(post_boot.oneshot, "the system's own settings for after start are made once");
+        assert_eq!(post_boot.args, ["/vendor/bin/init.kernel.post_boot.sh"]);
+        assert!(cfg.services[1..].iter().all(|s| !s.oneshot && s.args.is_empty()));
         assert_eq!(listeners.ready_property.as_deref(), Some("vendor.sys.listeners.registered"));
         assert_eq!((opener.ready_property.as_ref(), opener.ready_service.as_ref()), (None, None));
         assert_eq!(keymint.ready_service.as_deref(), Some("android.hardware.security.keymint.IKeyMintDevice/default"));
@@ -447,9 +468,9 @@ mod tests {
             cfg.services.iter().filter(|s| s.runs_on(&props)).map(|s| s.path.clone()).collect()
         };
         let leica = runs(&[("ro.special_edition", "true")]);
-        assert_eq!(leica.len(), 7);
+        assert_eq!(leica.len(), 8);
         let plain = runs(&[]);
-        assert_eq!(plain.len(), 5);
+        assert_eq!(plain.len(), 6);
         assert!(!plain.iter().any(|p| p.starts_with("/odm/")), "the other builds' weaver cannot run in a recovery");
         assert_eq!(runs(&[("ro.special_edition", "false")]), plain);
     }
@@ -464,6 +485,20 @@ mod tests {
             assert_eq!(only.services[0].runs_on(&props(value)), runs, "with ro.sku {value:?}");
             assert!(always.services[0].runs_on(&props(value)));
         }
+    }
+
+    #[test]
+    fn a_program_run_once_waits_for_nothing_and_registers_nothing() {
+        let base = "[device]\ncodename = \"x\"\n[[service]]\npath = \"/vendor/bin/sh\"\nargs = [\"/vendor/bin/a.sh\"]\noneshot = true\n";
+        let once = DeviceConfig::parse(base).unwrap();
+        assert!(once.services[0].oneshot);
+        assert_eq!(once.services[0].args, ["/vendor/bin/a.sh"]);
+        assert!(DeviceConfig::parse(&format!("{base}ready_property = \"vendor.a\"\n")).is_err());
+        assert!(DeviceConfig::parse(&format!("{base}ready_service = \"a.IA/default\"\n")).is_err());
+        assert!(DeviceConfig::parse(&format!("{base}registers = [\"a.IB/default\"]\n")).is_err());
+        assert!(DeviceConfig::parse(&format!("{base}description = \"/vendor/etc/a.xml\"\n")).is_err());
+        let kept = DeviceConfig::parse("[device]\ncodename = \"x\"\n[[service]]\npath = \"/vendor/bin/a\"\n").unwrap();
+        assert!(!kept.services[0].oneshot && kept.services[0].args.is_empty(), "a program is kept running unless it says otherwise");
     }
 
     #[test]
