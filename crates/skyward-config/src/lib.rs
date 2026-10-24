@@ -50,6 +50,10 @@ pub struct DeviceConfig {
     /// The vibration motor's click, on phones that have one.
     #[serde(default)]
     pub haptics: Option<Haptics>,
+    /// The recovery's own logd, on phones whose recovery leaves out
+    /// libraries it needs.
+    #[serde(default)]
+    pub logd: Option<Logd>,
     #[serde(default)]
     pub wipe: Wipe,
     #[serde(default)]
@@ -171,6 +175,15 @@ pub struct Haptics {
     pub click: i16,
     /// How long the click plays, in milliseconds.
     pub click_ms: u64,
+}
+
+/// What the recovery's own logd, which keeps what programs log for
+/// logcat, needs from the installed system before it can start.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Logd {
+    /// Libraries of the installed system it loads that the recovery's own
+    /// library folder lacks, put there before it is started.
+    pub libraries: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -368,6 +381,13 @@ impl DeviceConfig {
             let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
+        if let Some(logd) = &cfg.logd {
+            for library in &logd.libraries {
+                let path = Path::new(library);
+                let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
+                ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[logd] libraries: {library} is not an absolute path to a file");
+            }
+        }
         if let Some(wlan) = &cfg.wlan {
             for file in &wlan.firmware {
                 let name = Path::new(&file.name);
@@ -404,6 +424,25 @@ mod tests {
         assert_eq!(cfg.modules.sources, default_module_sources());
         assert!(cfg.modules.load.is_empty());
         assert_eq!((cfg.firmware, cfg.wlan, cfg.update), (None, None, None), "a phone may have none of them");
+        assert_eq!(cfg.logd, None, "a recovery's own logd usually has all it needs");
+    }
+
+    #[test]
+    fn nezha_gives_its_logd_the_libraries_its_recovery_leaves_out() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        let logd = cfg.logd.expect("the 17 Ultra's recovery leaves out what its logd loads");
+        assert_eq!(logd.libraries, ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]);
+        let ishtar = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        assert_eq!(ishtar.logd, None, "the 13 Ultra's recovery carries both");
+    }
+
+    #[test]
+    fn a_library_for_logd_is_an_absolute_path_to_a_file() {
+        let with = |library: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[logd]\nlibraries = [\"{library}\"]\n"));
+        assert!(with("/mnt/system/system/lib64/libcap.so").is_ok());
+        for bad in ["lib64/libcap.so", "/", "/mnt/system/../lib64/libcap.so", ""] {
+            assert!(with(bad).is_err(), "{bad} is refused");
+        }
     }
 
     #[test]

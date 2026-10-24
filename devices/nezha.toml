@@ -45,6 +45,13 @@ partition = "modem"
 [partitions]
 mounted = ["persist"]
 
+# The recovery's own logd loads libsysutils and libcap, which the stock
+# recovery leaves out, so it ends as soon as init starts it, init starts it
+# again every five seconds, and nothing the phone's own programs log is
+# kept. The installed system carries both, built from the same sources.
+[logd]
+libraries = ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]
+
 # What the phone's own init runs once the system has finished starting.
 # The kernel starts both CPU clusters on the performance governor, which
 # holds them at their highest clock, and Qualcomm's idle driver keeps idle

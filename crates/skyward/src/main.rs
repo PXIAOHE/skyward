@@ -461,18 +461,26 @@ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
     skyward_modules::load(&dirs, names)
 }
 
-/// Make the phone's firmware reachable to its drivers, mount the partitions
-/// its own programs and drivers use where it mounts them, load the
-/// configured kernel modules and start the phone's own programs, read from
-/// the partitions just mounted: on the 13 Ultra, the touchscreen driver and
-/// the touch processing. Of the programs the configuration names, only
-/// those this phone's build of the hardware runs are started.
+/// Start the recovery's own logd where it needs libraries of the installed
+/// system, make the phone's firmware reachable to its drivers, mount the
+/// partitions its own programs and drivers use where it mounts them, load
+/// the configured kernel modules and start the phone's own programs, read
+/// from the partitions just mounted: on the 13 Ultra, the touchscreen
+/// driver and the touch processing. Of the programs the configuration
+/// names, only those this phone's build of the hardware runs are started.
 #[cfg(target_os = "android")]
 fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     let nodes = skyward_sys::ueventd::apply()?;
     skyward_sys::kmsg(&format!("{nodes} device nodes given the owner their phone describes"))?;
     let props = skyward_info::installed_props(slot)?;
     adopt_installed_version(&props)?;
+    // Without logd the phone's own programs still run, and only what they
+    // log is lost, so why it did not start goes to the kernel log.
+    if let Some(logd) = &cfg.logd {
+        if let Err(e) = start_logd(logd) {
+            skyward_sys::kmsg(&format!("logd not started: {e:#}"))?;
+        }
+    }
     let services: Vec<_> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().collect();
     // The drivers ask for their firmware by name, and the kernel looks only
     // in folders of its own unless told to pass on what it does not find
@@ -511,6 +519,35 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     }
     services::start(&services, libraries.as_deref())?;
     agree_on_the_notes_key(&registering)
+}
+
+/// The folder the recovery's own programs load their libraries from.
+#[cfg(target_os = "android")]
+const RECOVERY_LIBRARIES: &str = "/system/lib64";
+
+/// How long logd may take to say it is ready once started.
+#[cfg(target_os = "android")]
+const LOGD_READY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Give the recovery's own logd the libraries of the installed system it
+/// loads, and start it at once rather than on init's next try, so that it
+/// keeps what the phone's own programs log from their start. Each library
+/// is copied beside the recovery's own under a name of its own and then
+/// renamed into place, so a logd an earlier run of the recovery service
+/// started keeps the copy it has open.
+#[cfg(target_os = "android")]
+fn start_logd(logd: &skyward_config::Logd) -> Result<()> {
+    for library in &logd.libraries {
+        let from = Path::new(library);
+        let to = Path::new(RECOVERY_LIBRARIES).join(from.file_name().expect("the configuration names each library's file"));
+        let mut part = to.clone().into_os_string();
+        part.push(".part");
+        std::fs::copy(from, &part).with_context(|| format!("copy {library} to {}", Path::new(&part).display()))?;
+        std::fs::rename(&part, &to).with_context(|| format!("put {} in place", to.display()))?;
+    }
+    skyward_sys::set_prop("ctl.start", "logd")?;
+    skyward_sys::wait_prop("logd.ready", "true", LOGD_READY)?;
+    skyward_sys::kmsg(&format!("logd runs with {} libraries of the installed system", logd.libraries.len()))
 }
 
 /// Have the parts of the secure world that keep keys agree on the key they
