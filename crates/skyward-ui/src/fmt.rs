@@ -344,6 +344,7 @@ pub fn item_end(end: &ItemEnd, verb: &str) -> String {
         ItemEnd::NotShared(_) => "无需处理".into(),
         ItemEnd::Clean => "未发现错误".into(),
         ItemEnd::Fixed => "已修复".into(),
+        ItemEnd::Made => "已格式化".into(),
         ItemEnd::Failed(_) => format!("{verb}失败"),
     }
 }

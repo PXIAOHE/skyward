@@ -1,11 +1,15 @@
 //! Work on whole partitions on a thread of its own, one after another:
 //! erasing the partitions a wipe package lists and undoing shared blocks,
-//! which the system asks for before the recovery starts.
+//! which the system asks for before the recovery starts, and repairing or
+//! making afresh the filesystem of one partition, which the filesystem
+//! page asks for.
 
 use anyhow::{Context, Result};
 use skyward_block::erase;
 use skyward_block::fsck::{self, Fixed};
-use skyward_block::{probe, tools};
+use skyward_block::fstab::{self, Entry};
+use skyward_block::{mount, probe, tools};
+use skyward_crypto::data;
 use skyward_install::package::Phone;
 use skyward_install::wipe::{self as package, Wipe};
 use skyward_install::Refusal;
@@ -35,6 +39,19 @@ pub enum Task {
     Disable { package_size: u64 },
     /// Undo the sharing of blocks in the slot's ext4 partitions.
     Unshare { slot: Slot },
+    /// Check the whole of a filesystem and fix what is wrong.
+    Repair(Part),
+    /// Make a partition's filesystem afresh as this one.
+    Remake(Part, String),
+}
+
+/// A partition the filesystem page works on.
+pub enum Part {
+    /// The data partition, reached through its decryption under the key
+    /// the phone keeps for it.
+    Data,
+    /// A partition of the phone's table, by its entry.
+    Entry(Entry),
 }
 
 /// How one partition ended.
@@ -45,6 +62,7 @@ pub enum Item {
     /// It holds this filesystem, which shares no blocks.
     NotShared(String),
     Fixed(Fixed),
+    Made,
     Failed(String),
 }
 
@@ -98,6 +116,8 @@ impl Worker {
                 let done = match task {
                     Task::Disable { package_size } => disable(package_size, &mut tell),
                     Task::Unshare { slot } => unshare(slot, &mut tell),
+                    Task::Repair(part) => repair(part, &mut tell),
+                    Task::Remake(part, filesystem) => remake(part, &filesystem, &mut tell),
                 };
                 tell(Event::Done(done));
             })
@@ -260,4 +280,122 @@ fn copy_with_libraries(program: &Path) -> Result<PathBuf> {
         }
     }
     Ok(copy)
+}
+
+/// Check the whole of the filesystem a partition holds, found as it is
+/// reached, and fix what is wrong, telling what the program said. The data
+/// partition is closed first and reached through a mapping of its own,
+/// which goes again once the work is done; another partition is unmounted
+/// for it and mounted again read-only after.
+fn repair(part: Part, tell: &mut dyn FnMut(Event)) -> Result<(), Stop> {
+    tell(Event::Listed(vec![name(&part)]));
+    tell(Event::At(0));
+    let done = reach(&part, |device| {
+        let filesystem = probe::filesystem(device)?.context("the partition holds no filesystem blkid knows")?;
+        let (fixed, ran) = fsck::repair(device, &filesystem)?;
+        Ok((Item::Fixed(fixed), ran.said))
+    });
+    let (item, words) = done.unwrap_or_else(|e| (Item::Failed(said(&e)), String::new()));
+    tell(Event::Ended(0, item, words));
+    Ok(())
+}
+
+/// Make the partition afresh as `filesystem`, with nothing mounted from it.
+fn remake(part: Part, filesystem: &str, tell: &mut dyn FnMut(Event)) -> Result<(), Stop> {
+    tell(Event::Listed(vec![name(&part)]));
+    tell(Event::At(0));
+    let made = match &part {
+        Part::Entry(entry) if entry.mount_point == "/cache" => crate::wipe::remake_cache(entry, filesystem),
+        Part::Entry(entry) => crate::wipe::remake(entry, filesystem),
+        Part::Data => Err(anyhow::anyhow!("the data partition is made afresh as another filesystem by a factory reset")),
+    };
+    let item = match made {
+        Ok(()) => Item::Made,
+        Err(e) => Item::Failed(said(&e)),
+    };
+    tell(Event::Ended(0, item, String::new()));
+    Ok(())
+}
+
+/// The partition's name, as the pages list it.
+fn name(part: &Part) -> String {
+    match part {
+        Part::Data => "data".into(),
+        Part::Entry(entry) => entry.mount_point.trim_start_matches('/').to_string(),
+    }
+}
+
+/// Do `work` with the device the partition's filesystem is reached through,
+/// nothing mounted from it.
+fn reach<T>(part: &Part, work: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    match part {
+        Part::Data => {
+            crate::wipe::release_data()?;
+            let mapped = crate::decrypt::with_key_service(data::map_unmounted).map_err(anyhow::Error::msg)?;
+            let done = work(&mapped);
+            data::unmap()?;
+            done
+        }
+        Part::Entry(entry) => {
+            let at = Path::new(&entry.mount_point);
+            let mounted = mount::is_mount_point(at)?;
+            if mounted {
+                mount::umount(at)?;
+            }
+            let device = PathBuf::from(fstab::device(entry)?);
+            let done = work(&device);
+            if mounted {
+                mount::mount_ro(&device, at)?;
+            }
+            done
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn on_the_phone_a_partition_of_the_table_is_repaired_and_mounted_again_read_only() {
+        let root = std::env::temp_dir().join(format!("skyward-partwork-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let at = root.join("mnt");
+        std::fs::create_dir_all(&at).unwrap();
+        let image = root.join("part.img");
+        std::fs::File::create(&image).unwrap().set_len(128 << 20).unwrap();
+        let out = std::process::Command::new("/system/bin/losetup").args(["-f", "--show"]).arg(&image).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let device = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        // Held open throughout, so nothing lets the device go before the
+        // test does.
+        let held = std::fs::File::open(&device).unwrap();
+        erase::make(Path::new(&device), "f2fs", &[], false).unwrap();
+        mount::mount_ro(Path::new(&device), &at).unwrap();
+        let mount_point = at.to_string_lossy().into_owned();
+        let entry = Entry {
+            device: device.clone(),
+            mount_point: mount_point.clone(),
+            filesystem: "f2fs".into(),
+            options: Vec::new(),
+            extras: Vec::new(),
+        };
+
+        let mut told = Vec::new();
+        assert_eq!(repair(Part::Entry(entry), &mut |event| told.push(event)), Ok(()));
+
+        let [Event::Listed(names), Event::At(0), Event::Ended(0, item, said)] = &told[..] else {
+            panic!("told {} events", told.len())
+        };
+        assert_eq!(names, &[mount_point.trim_start_matches('/').to_string()]);
+        assert_eq!(item, &Item::Fixed(Fixed::Clean), "{said}");
+        assert!(mount::is_mount_point(&at).unwrap(), "mounted again");
+        let written = std::fs::write(at.join("note"), b"x").unwrap_err();
+        assert_eq!(written.raw_os_error(), Some(libc::EROFS), "read-only");
+        mount::umount(&at).unwrap();
+        drop(held);
+        let detached = std::process::Command::new("/system/bin/losetup").args(["-d", &device]).status().unwrap();
+        assert!(detached.success(), "let {device} go");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

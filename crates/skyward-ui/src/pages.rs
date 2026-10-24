@@ -1,7 +1,8 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
-    FileOp, FileTask, Folder, Frame, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen, Source, State, Switch, Target,
-    UsbDrive, UsbLink, Wipe, ADDABLE, BACKUP_PARTS, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, WIPES,
+    FileOp, FileTask, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
+    Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, ADDABLE, BACKUP_PARTS, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF,
+    TARGETS, TIME_ZONES, WIPES,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -80,6 +81,8 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Editor => editor(cx),
         Screen::Terminal => terminal(cx),
         Screen::Relabel => relabel(cx),
+        Screen::Filesystems => filesystems(cx),
+        Screen::Filesystem => filesystem(cx),
         Screen::PartWork => part_work(cx),
         Screen::Language => language(cx),
         Screen::TimeZone => time_zone(cx),
@@ -102,9 +105,14 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
     }
 }
 
-/// Label and colour of each swipe-to-confirm control.
-pub fn confirm_label(which: Confirm) -> (&'static str, bool) {
+/// Label and colour of each swipe-to-confirm control: the filesystem
+/// page's as `s` says what it is to do.
+pub fn confirm_label(which: Confirm, s: &State) -> (&'static str, bool) {
     match which {
+        Confirm::Filesystem => match s.fs_action {
+            FsAction::Repair => ("滑动以修复", true),
+            FsAction::Remake(_) => ("滑动以更换", true),
+        },
         Confirm::Reboot => ("滑动以重启", false),
         Confirm::Wipe => ("滑动以清除", true),
         Confirm::Flash => ("滑动以刷入", true),
@@ -641,7 +649,7 @@ pub fn reboot(cx: &Ctx) -> Frame {
         out.extend(hits(&slots.rows, &[Action::Open(Screen::Slot)]));
         y = slots.bottom;
     }
-    let (label, danger) = confirm_label(Confirm::Reboot);
+    let (label, danger) = confirm_label(Confirm::Reboot, cx.state);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Reboot) });
     Frame::new(t, c, out, "重启", top)
@@ -914,7 +922,7 @@ pub fn installing(cx: &Ctx) -> Frame {
                 Pick::ALL.iter().zip(&titles).map(|(p, title)| Row::new(title).trail(Trail::Check(*p == choice.pick))).collect();
             let picks = widgets::list(&mut c, t, f, y, &rows);
             out.extend(hits(&picks.rows, &Pick::ALL.map(Action::FlashSlots)));
-            let (label, danger) = confirm_label(Confirm::Flash);
+            let (label, danger) = confirm_label(Confirm::Flash, cx.state);
             let track = widgets::confirm(&mut c, t, f, picks.bottom + t.m.dp(28.0), label, danger, s.confirm);
             out.push(Hit { rect: track, action: Action::Confirm(Confirm::Flash) });
             let note = match s.source {
@@ -943,7 +951,7 @@ pub fn installing(cx: &Ctx) -> Frame {
                 (title, GREEN, Icon::Install, detail, Confirm::Install)
             };
             let y = widgets::list(&mut c, t, f, top, &[standing(&title, color, icon, &detail)]).bottom;
-            let (label, danger) = confirm_label(which);
+            let (label, danger) = confirm_label(which, cx.state);
             let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
             out.push(Hit { rect: track, action: Action::Confirm(which) });
             widgets::footnote(&mut c, t, f, track.y + track.h, "返回将取消安装，不会写入任何内容。")
@@ -987,7 +995,7 @@ pub fn installing(cx: &Ctx) -> Frame {
             if let Some(note) = fmt::snapshot_script_note(&i.snapshot) {
                 y = widgets::footnote(&mut c, t, f, y, note);
             }
-            let (label, danger) = confirm_label(Confirm::RunScript);
+            let (label, danger) = confirm_label(Confirm::RunScript, cx.state);
             let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
             out.push(Hit { rect: track, action: Action::Confirm(Confirm::RunScript) });
             widgets::footnote(&mut c, t, f, track.y + track.h, "返回将取消安装，不会运行安装脚本。")
@@ -1223,7 +1231,7 @@ pub fn wipe(cx: &Ctx) -> Frame {
         y = list.bottom;
     }
     let y = widgets::footnote(&mut c, t, f, y, "清除应用数据和应用缓存前，需先完成「解密」。清除后无法恢复。");
-    let (label, danger) = confirm_label(Confirm::Wipe);
+    let (label, danger) = confirm_label(Confirm::Wipe, cx.state);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Wipe) });
     Frame::new(t, fit(c, t, track.y + track.h), out, "清除数据", top)
@@ -1316,7 +1324,7 @@ pub fn backup(cx: &Ctx) -> Frame {
     ]);
     out.extend(hits(&options.rows, &[Action::Toggle(Switch::Compress), Action::Toggle(Switch::Verify)]));
     let y = widgets::footnote(&mut c, t, f, options.bottom, "备份将保存在 Skyward/backups 文件夹中，以开始备份的时间命名。");
-    let (label, danger) = confirm_label(Confirm::Backup);
+    let (label, danger) = confirm_label(Confirm::Backup, cx.state);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Backup) });
     Frame::new(t, fit(c, t, track.y + track.h), out, "备份", top)
@@ -1403,7 +1411,7 @@ pub fn restore_backup(cx: &Ctx) -> Frame {
                         y = widgets::footnote(&mut c, t, f, y, &warn);
                     }
                 }
-                let (label, danger) = confirm_label(Confirm::Restore);
+                let (label, danger) = confirm_label(Confirm::Restore, cx.state);
                 let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
                 out.push(Hit { rect: track, action: Action::Confirm(Confirm::Restore) });
                 track.y + track.h
@@ -1415,7 +1423,7 @@ pub fn restore_backup(cx: &Ctx) -> Frame {
     let mut bottom = delete.bottom;
     if s.asking_delete {
         let y = widgets::footnote(&mut c, t, f, delete.bottom, "删除该备份？删除后无法恢复。");
-        let (label, danger) = confirm_label(Confirm::DeleteBackup);
+        let (label, danger) = confirm_label(Confirm::DeleteBackup, cx.state);
         let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::DeleteBackup) });
         bottom = track.y + track.h;
@@ -1587,6 +1595,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new("文件管理").icon(BLUE, Icon::Folder),
         Row::new("终端").icon(SLATE, Icon::Terminal),
         Row::new("修复 SELinux 上下文").icon(PURPLE, Icon::Shield),
+        Row::new("文件系统").icon(RED, Icon::Mount),
         Row::new("导出日志").icon(ORANGE, Icon::Log),
         Row::new("系统更新").icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
     ]);
@@ -1594,6 +1603,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Files),
         Action::Open(Screen::Terminal),
         Action::Open(Screen::Relabel),
+        Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Update),
     ]);
@@ -1619,7 +1629,7 @@ pub fn relabel(cx: &Ctx) -> Frame {
         if let Some(note) = note {
             y = widgets::footnote(&mut c, t, f, y, note);
         }
-        let (label, danger) = confirm_label(Confirm::Relabel);
+        let (label, danger) = confirm_label(Confirm::Relabel, cx.state);
         let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::Relabel) });
         return Frame::new(t, c, out, title, top);
@@ -1658,11 +1668,110 @@ pub fn relabel(cx: &Ctx) -> Frame {
     Frame { back: job.outcome.is_some(), ..Frame::new(t, c, out, title, top) }
 }
 
+/// The partitions whose filesystems can be repaired or made afresh as
+/// another, each with what it holds and its size.
+pub fn filesystems(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let y = widgets::section_first(&mut c, t, f, top, "分区");
+    let bottom = match &s.filesystems {
+        None => widgets::list(&mut c, t, f, y, &[Row::new("正在读取分区").trail(Trail::None)]).bottom,
+        Some(Err(why)) => {
+            let y = widgets::list(&mut c, t, f, y, &[Row::new("无法读取分区").trail(Trail::None)]).bottom;
+            widgets::footnote(&mut c, t, f, y, why)
+        }
+        Some(Ok(rows)) if rows.is_empty() => widgets::list(&mut c, t, f, y, &[Row::new("暂无可修复的分区").trail(Trail::None)]).bottom,
+        Some(Ok(rows)) => {
+            let subs: Vec<String> = rows.iter().map(|r| format!("{} · {}", fs_held(r, &s.data), fmt::bytes(r.size))).collect();
+            let shown: Vec<Row> = rows.iter().zip(&subs).map(|(r, sub)| Row::new(&r.name).subtitle(sub)).collect();
+            let list = widgets::list(&mut c, t, f, y, &shown);
+            out.extend(hits(&list.rows, &(0..rows.len()).map(Action::OpenFilesystem).collect::<Vec<_>>()));
+            widgets::footnote(&mut c, t, f, list.bottom, "仅显示本机分区表中可格式化的分区。")
+        }
+    };
+    Frame::new(t, fit(c, t, bottom), out, "文件系统", top)
+}
+
+/// What a partition holds, as its row and page name it: the data
+/// partition's is read only once it is open, and until then the row says
+/// where it stands, as the home page does.
+fn fs_held(row: &FsRow, data: &Data) -> String {
+    match (&row.filesystem, row.name == DATA_PARTITION) {
+        (Some(filesystem), _) => filesystem.clone(),
+        (None, true) => fmt::data(data).into(),
+        (None, false) => "无法识别".into(),
+    }
+}
+
+/// One partition: what it holds, what can be done to it, and a swipe to do
+/// what is chosen.
+pub fn filesystem(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let Some(Ok(rows)) = &s.filesystems else { unreachable!("a partition's page opens from the list read") };
+    let row = &rows[s.fs_chosen];
+    let data = row.name == DATA_PARTITION;
+    let facts = [("挂载点", row.mount_point.clone()), ("文件系统", fs_held(row, &s.data)), ("大小", fmt::bytes(row.size))];
+    let y = widgets::info_card(&mut c, t, f, top, &facts);
+    let y = widgets::section(&mut c, t, f, y, "操作");
+    let chosen = |action: &FsAction| s.fs_action == *action;
+    let remakes: Vec<String> = row.others.iter().map(|fs| format!("更换为 {fs}")).collect();
+    let made: Vec<String> = row.others.iter().map(|_| remade(row, s)).collect();
+    let mut shown = vec![Row::new("修复文件系统").subtitle("检查整个文件系统，并修复发现的错误").trail(Trail::Check(chosen(&FsAction::Repair)))];
+    let mut actions = vec![Action::ChooseFs(FsChoice::Repair)];
+    for (k, fs) in row.others.iter().enumerate() {
+        shown.push(Row::new(&remakes[k]).subtitle(&made[k]).trail(Trail::Check(chosen(&FsAction::Remake(fs.clone())))));
+        actions.push(Action::ChooseFs(FsChoice::Remake(k)));
+    }
+    let list = widgets::list(&mut c, t, f, y, &shown);
+    out.extend(hits(&list.rows, &actions));
+    let mut y = list.bottom;
+    if row.others.is_empty() {
+        y = widgets::footnote(&mut c, t, f, y, "暂不支持更换该分区的文件系统。");
+    }
+    if data {
+        y = widgets::footnote(&mut c, t, f, y, "修复前将关闭 data 分区，完成后需在「解密」中重新打开。");
+    }
+    if !row.others.is_empty() {
+        y = widgets::footnote(&mut c, t, f, y, "更换后，分区中的内容无法恢复。");
+    }
+    let (label, danger) = confirm_label(Confirm::Filesystem, s);
+    let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+    out.push(Hit { rect: track, action: Action::Confirm(Confirm::Filesystem) });
+    Frame::new(t, fit(c, t, track.y + track.h), out, partition_title(&row.name), top)
+}
+
+/// The title of the page of a partition the filesystem page lists.
+fn partition_title(name: &str) -> &'static str {
+    match name {
+        DATA_PARTITION => "data 分区",
+        "metadata" => "metadata 分区",
+        "cache" => "cache 分区",
+        _ => "分区",
+    }
+}
+
+/// What making `row` afresh as another filesystem erases: the data
+/// partition goes as a factory reset goes, with /metadata and the cache
+/// partition beside it.
+fn remade(row: &FsRow, s: &State) -> String {
+    match row.name == DATA_PARTITION {
+        true => {
+            let parts = if s.cache_partition { "data、cache、metadata 分区" } else { "data、metadata 分区" };
+            format!("格式化 {parts}，清空本机的全部数据")
+        }
+        false => format!("格式化 {} 分区，清空其中的全部内容", row.name),
+    }
+}
+
 /// Work on whole partitions: each partition and where it stands, what the
 /// program said of the last, and once it has ended, how. What the system
 /// asked for leaves on its own once it went through every partition, and
-/// offers where to go otherwise; other work goes back to the page it came
-/// from.
+/// offers where to go otherwise; what the user chose goes back to its page.
 pub fn part_work(cx: &Ctx) -> Frame {
     use crate::app::{ItemEnd, ItemState, PartKind};
     let (t, f, s) = (cx.t, cx.f, cx.state);
@@ -1674,6 +1783,8 @@ pub fn part_work(cx: &Ctx) -> Frame {
     let (title, verb, several) = match &work.kind {
         PartKind::Disable => ("清除分区", "清除", true),
         PartKind::Unshare => ("取消数据块共享", "处理", true),
+        PartKind::Repair => ("修复文件系统", "修复", false),
+        PartKind::Remake(_) => ("更换文件系统", "格式化", false),
     };
     let failed = |state: &ItemState| matches!(state, ItemState::Ended(ItemEnd::Failed(_)));
     let short = matches!(work.outcome, Some(Err(_))) || work.items.iter().any(|(_, state)| failed(state));
@@ -1812,7 +1923,7 @@ pub fn update(cx: &Ctx) -> Frame {
     y = if y == top { widgets::section_first(&mut c, t, f, y, "更新合并") } else { widgets::section(&mut c, t, f, y, "更新合并") };
     y = widgets::list(&mut c, t, f, y, &[row]).bottom;
     if s.update == Standing::Waiting {
-        let (label, danger) = confirm_label(Confirm::Merge);
+        let (label, danger) = confirm_label(Confirm::Merge, cx.state);
         let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::Merge) });
         y = widgets::footnote(&mut c, t, f, track.y + track.h, "合并后无法回到更新前的系统。");
@@ -2231,7 +2342,7 @@ pub fn file_info(cx: &Ctx) -> Frame {
             format!("删除\"{}\"？删除后无法恢复。", e.name)
         };
         let y = widgets::footnote(&mut c, t, f, actions.bottom, &what);
-        let (label, danger) = confirm_label(Confirm::DeleteEntry);
+        let (label, danger) = confirm_label(Confirm::DeleteEntry, cx.state);
         let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::DeleteEntry) });
         bottom = track.y + track.h;
@@ -2542,7 +2653,7 @@ pub fn slot(cx: &Ctx) -> Frame {
         return Frame::new(t, c, out, "启动槽位", top);
     }
     let y = widgets::footnote(&mut c, t, f, list.bottom, "另一个槽位中没有完整的系统时，切换后将无法开机。");
-    let (label, danger) = confirm_label(Confirm::Slot);
+    let (label, danger) = confirm_label(Confirm::Slot, cx.state);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::Slot) });
     Frame::new(t, c, out, "启动槽位", top)
@@ -2694,7 +2805,7 @@ pub fn cant_start(cx: &Ctx) -> Frame {
     let choices = widgets::list(&mut c, t, f, y, &rows);
     out.extend(hits(&choices.rows, &[Action::RebootTo(Target::System), Action::Dismiss]));
     let y = widgets::footnote(&mut c, t, f, choices.bottom, "恢复出厂设置后，数据无法恢复。");
-    let (label, danger) = confirm_label(Confirm::FactoryReset);
+    let (label, danger) = confirm_label(Confirm::FactoryReset, cx.state);
     let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
     out.push(Hit { rect: track, action: Action::Confirm(Confirm::FactoryReset) });
     Frame { back: false, ..Frame::new(t, c, out, "无法启动系统", top) }

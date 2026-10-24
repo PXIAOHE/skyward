@@ -8,8 +8,8 @@ use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_ui::app::{
     Action, Adding, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, DownloadEnd,
-    DownloadJob, EraseStop, Field, FileKind, FileOp, FileRow, FileTask, Have, Held, Install, ItemEnd, JobEnd, Key, Keys, MountFailure,
-    MountRow, Part, PartKind, PartStop, Pick, Place, Screen, Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
+    DownloadJob, EraseStop, Field, FileKind, FileOp, FileRow, FileTask, FsAction, FsRow, Have, Held, Install, ItemEnd, JobEnd, Key, Keys,
+    MountFailure, MountRow, Part, PartKind, PartStop, Pick, Place, Screen, Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Cap, Layer};
 use skyward_ui::{editor, fmt, pages, Canvas, Ctx, Fonts, Theme};
@@ -42,6 +42,52 @@ for cpu in /sys/devices/system/cpu/cpu[0-7]; do\n\
 done\n\
 setprop persist.vendor.display.enable_optimize_refresh 1\n\
 echo \"调度器已调整，刷新率设置写入 /data/local/tmp/refresh.log\" >> /data/local/tmp/refresh.log\n";
+
+/// What fsck.f2fs says as it repairs a data partition with one check that
+/// failed and was fixed.
+const FSCK_SAMPLE: &str = "Info: Force to fix corruption\n\
+Info: total FS sectors = 57982464 (226494 MB)\n\
+Info: checkpoint state = 285 :  allow_nocrc nat_bits compacted_summary orphan_inodes umount\n\
+\n\
+[FSCK] Unreachable nat entries                       [Ok..] [0x0]\n\
+[FSCK] SIT valid block bitmap checking                [Ok..]\n\
+[FSCK] Hard link checking for regular file           [Ok..] [0x2b]\n\
+[FSCK] valid_block_count matching with CP            [Fail] [0x2f0b1d3]\n\
+[FSCK] valid_node_count matching with CP (de lookup) [Ok..] [0x3c4a1]\n\
+[FSCK] valid_inode_count matched with CP             [Ok..] [0x3b2f0]\n\
+[FSCK] free segment_count matched with CP            [Ok..] [0x6b17]\n\
+[FSCK] other corrupted bugs                          [Ok..]\n\
+\n\
+Done: 41.618725 secs\n";
+
+/// What fsck.f2fs says as it gives up on a data partition it could not
+/// mend.
+const FSCK_FAILED_SAMPLE: &str = "Info: Force to fix corruption\n\
+Info: total FS sectors = 57982464 (226494 MB)\n\
+Info: checkpoint state = 46 :  crc compacted_summary orphan_inodes sudden-power-off\n\
+\n\
+[FSCK] Unreachable nat entries                       [Fail] [0x1c]\n\
+[FSCK] SIT valid block bitmap checking                [Fail]\n\
+[FSCK] Hard link checking for regular file           [Ok..] [0x2b]\n\
+[FSCK] valid_block_count matching with CP            [Fail] [0x2f0b1d3]\n\
+[FSCK] other corrupted bugs                          [Fail]\n\
+\n\
+Done: 38.204116 secs\n";
+
+/// The 13 Ultra's partitions as the filesystem page lists them, its data
+/// partition open or closed.
+fn phone_filesystems(open: bool) -> Vec<FsRow> {
+    vec![
+        FsRow {
+            name: "data".into(),
+            mount_point: "/data".into(),
+            filesystem: open.then(|| "f2fs".into()),
+            size: 237_498_597_376,
+            others: Vec::new(),
+        },
+        FsRow { name: "metadata".into(), mount_point: "/metadata".into(), filesystem: Some("f2fs".into()), size: 64 << 20, others: Vec::new() },
+    ]
+}
 
 /// File name, page, dark theme, readings, where the data partition stands,
 /// pattern drawn.
@@ -302,7 +348,7 @@ fn main() -> Result<()> {
     let adding = |app: &mut App, name: &str, security: Security, field: Field, choosing: bool| {
         app.state.adding = Some(Adding { name: name.into(), security, field, choosing });
     };
-    let pages: [PageShot; 146] = [
+    let pages: [PageShot; 154] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -538,6 +584,39 @@ fn main() -> Result<()> {
             app.state.wlan = Some(joined(Joining::Connected(router_link())));
             app.state.traffic = Traffic { rx: 5000, tx: 2188 };
         }),
+        ("159-filesystems-light", Screen::Filesystems, false, &|app| app.set_filesystems(Ok(phone_filesystems(true)))),
+        ("160-filesystems-dark-closed", Screen::Filesystems, true, &|app| {
+            app.state.data = Data::Closed;
+            app.set_filesystems(Ok(phone_filesystems(false)));
+        }),
+        ("161-filesystem-light-data", Screen::Filesystem, false, &|app| app.set_filesystems(Ok(phone_filesystems(true)))),
+        ("162-filesystem-dark-cache", Screen::Filesystem, true, &|app| {
+            let mut rows = phone_filesystems(true);
+            rows.push(FsRow {
+                name: "cache".into(),
+                mount_point: "/cache".into(),
+                filesystem: Some("ext4".into()),
+                size: 512 << 20,
+                others: vec!["f2fs".into()],
+            });
+            app.set_filesystems(Ok(rows));
+            app.state.cache_partition = true;
+            app.state.fs_chosen = 2;
+            app.state.fs_action = FsAction::Remake("f2fs".into());
+        }),
+        ("163-part-work-light-repairing", Screen::Filesystem, false, &|app| {
+            app.set_filesystems(Ok(phone_filesystems(true)));
+            app.part_work_started(PartKind::Repair, false);
+            app.part_listed(vec!["data".into()]);
+            app.part_at(0);
+        }),
+        ("164-part-work-dark-repaired", Screen::Filesystem, true, &|app| {
+            app.set_filesystems(Ok(phone_filesystems(true)));
+            app.part_work_started(PartKind::Repair, false);
+            app.part_listed(vec!["data".into()]);
+            app.part_ended(0, ItemEnd::Fixed, FSCK_SAMPLE);
+            app.part_work_ended(Ok(()), 0);
+        }),
         ("165-part-work-light-unshare-done", Screen::Home, false, &|app| {
             app.part_work_started(PartKind::Unshare, true);
             app.part_listed(["system", "system_ext", "product", "vendor", "odm"].map(String::from).to_vec());
@@ -589,6 +668,21 @@ fn main() -> Result<()> {
         ("175-installing-light-asked-image", Screen::Home, false, &|app| {
             app.start_asked(false, "/data/ota_package/boot.img".into());
             app.install(skyward_install::Event::Finished(Outcome::Refused(Refusal::Image)), 0);
+        }),
+        ("176-part-work-light-repair-failed", Screen::Filesystem, false, &|app| {
+            app.set_filesystems(Ok(phone_filesystems(false)));
+            app.part_work_started(PartKind::Repair, false);
+            app.part_listed(vec!["data".into()]);
+            app.part_ended(0, ItemEnd::Failed(None), FSCK_FAILED_SAMPLE);
+            app.part_work_ended(Ok(()), 0);
+        }),
+        ("177-part-work-dark-repair-unreached", Screen::Filesystem, true, &|app| {
+            app.set_filesystems(Ok(phone_filesystems(false)));
+            app.part_work_started(PartKind::Repair, false);
+            app.part_listed(vec!["data".into()]);
+            let why = "android.hardware.security.keymint.IKeyMintDevice/default is not running; the phone's key service has to be started first";
+            app.part_ended(0, ItemEnd::Failed(Some(why.into())), "");
+            app.part_work_ended(Ok(()), 0);
         }),
         ("143-update-light-offline", Screen::Update, false, &|app| {
             app.state.update_server = true;

@@ -68,8 +68,15 @@ pub enum Screen {
     /// system's rules give them: what it does and a swipe to start, then
     /// how far it has come and how it ended.
     Relabel,
-    /// Work on whole partitions under way, and how it ended: what the
-    /// system asked for before the recovery started.
+    /// The partitions whose filesystems can be repaired or made afresh as
+    /// another.
+    Filesystems,
+    /// One of them: what it holds, and what to do to it, with a swipe to
+    /// do it.
+    Filesystem,
+    /// Work on whole partitions under way, and how it ended: the
+    /// filesystem page's, or what the system asked for before the recovery
+    /// started.
     PartWork,
     Language,
     TimeZone,
@@ -164,6 +171,9 @@ pub enum DownloadEnd {
 /// Where the full packages downloaded go, from the top of internal
 /// storage: the folder the stock updater keeps them in.
 pub const DOWNLOADS: &str = "downloaded_rom";
+
+/// The data partition's name, as the filesystem page lists it.
+pub const DATA_PARTITION: &str = "data";
 
 /// A password typed, which what is printed of it leaves out: the recovery
 /// prints each effect the pages ask for.
@@ -326,6 +336,40 @@ pub struct RelabelJob {
     pub stopping: bool,
 }
 
+/// A partition the filesystem page lists, as the runtime read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FsRow {
+    /// Its name, such as data or metadata.
+    pub name: String,
+    pub mount_point: String,
+    /// The filesystem it holds, where that can be read: the data
+    /// partition's only once it is open.
+    pub filesystem: Option<String>,
+    /// Its size in bytes.
+    pub size: u64,
+    /// The filesystems the phone's own table lists for it, besides the one
+    /// it holds, that the recovery can make.
+    pub others: Vec<String>,
+}
+
+/// What the filesystem page does to the partition it shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FsAction {
+    /// Check the whole of the filesystem and fix what is wrong.
+    Repair,
+    /// Make the partition afresh as this filesystem.
+    Remake(String),
+}
+
+/// A choice on the page of one partition, as a control carries it: the
+/// filesystem to make it afresh as goes by its place among the others it
+/// may hold, a control's action being copied freely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsChoice {
+    Repair,
+    Remake(usize),
+}
+
 /// Work on whole partitions one after another, as its page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartWork {
@@ -349,6 +393,9 @@ pub enum PartKind {
     Disable,
     /// Undo the sharing of blocks in ext4 partitions.
     Unshare,
+    Repair,
+    /// Make the partition afresh as this filesystem.
+    Remake(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -369,6 +416,7 @@ pub enum ItemEnd {
     /// Nothing was wrong with the filesystem.
     Clean,
     Fixed,
+    Made,
     /// The work went wrong: why, where what the program working on it said
     /// does not tell it.
     Failed(Option<String>),
@@ -698,6 +746,8 @@ pub enum Confirm {
     /// Give the data partition's files the SELinux labels the installed
     /// system's rules give them.
     Relabel,
+    /// Do to the partition the filesystem page shows what it chose.
+    Filesystem,
 }
 
 /// What the wipe page erases: everything a factory reset erases, or any of
@@ -1048,6 +1098,10 @@ pub enum Action {
     Resolve(ClashChoice),
     /// Stop giving the data partition's files their labels.
     StopRelabel,
+    /// Open the page of the filesystem page's partition at this place.
+    OpenFilesystem(usize),
+    /// Choose what to do to the partition that page shows.
+    ChooseFs(FsChoice),
     /// Stop copying, moving or deleting.
     StopJob,
     /// Join the network at this place in the list of those in range, or
@@ -1355,6 +1409,14 @@ pub struct State {
     /// Giving the data partition's files their SELinux labels under way, or
     /// how it last ended.
     pub relabel: Option<RelabelJob>,
+    /// The filesystem page's partitions, as the runtime last read them, or
+    /// why it could not; none until it has.
+    pub filesystems: Option<Result<Vec<FsRow>, String>>,
+    /// Which of them the page for one shows, and what it is to do to it:
+    /// a repair, which leaves what it holds as it is, until another is
+    /// chosen.
+    pub fs_chosen: usize,
+    pub fs_action: FsAction,
     /// Work on whole partitions under way, or how it last ended.
     pub part_work: Option<PartWork>,
     /// Where an update the system installed stands, as the runtime last
@@ -1442,6 +1504,9 @@ impl Default for State {
             clash: None,
             job: None,
             relabel: None,
+            filesystems: None,
+            fs_chosen: 0,
+            fs_action: FsAction::Repair,
             part_work: None,
             update: Standing::None,
             wlan: None,
@@ -1630,6 +1695,15 @@ pub enum Effect {
     Relabel,
     /// Stop giving the data partition's files their labels.
     StopRelabel,
+    /// Read the partitions for the filesystem page, which has just opened,
+    /// telling them with [`App::set_filesystems`].
+    ReadFilesystems,
+    /// Do `action` to the filesystem page's partition by its name, telling
+    /// how it goes with [`App::part_work_started`], [`App::part_listed`],
+    /// [`App::part_at`], [`App::part_ended`] and [`App::part_work_ended`];
+    /// making the data partition afresh as another filesystem is a factory
+    /// reset, which tells as erasing tells.
+    Filesystem { name: String, action: FsAction },
     /// Save the logs chosen, the recovery's own and the kernel's, into a
     /// folder of their own in internal storage or the temporary folder,
     /// saying where with [`App::report`].
@@ -2832,9 +2906,21 @@ impl App {
         self.refresh();
     }
 
+    /// The partitions for the filesystem page, as the runtime read them,
+    /// or why it could not.
+    pub fn set_filesystems(&mut self, rows: Result<Vec<FsRow>, String>) {
+        self.state.filesystems = Some(rows);
+        self.refresh();
+    }
+
+    /// The partition the page of one shows.
+    fn fs_row(&self) -> Option<&FsRow> {
+        self.state.filesystems.as_ref()?.as_ref().ok()?.get(self.state.fs_chosen)
+    }
+
     /// Work on whole partitions has begun. Work the system asked for, which
-    /// `asked` says, has its page as the only one; other work opens its page
-    /// over the one shown, to go back to once the work has ended.
+    /// `asked` says, has its page as the only one; the filesystem page's
+    /// opens over it, to go back to once the work has ended.
     pub fn part_work_started(&mut self, kind: PartKind, asked: bool) {
         self.state.part_work = Some(PartWork { kind, asked, items: Vec::new(), output: Vec::new(), outcome: None });
         match asked {
@@ -2875,12 +2961,17 @@ impl App {
 
     /// The work has ended. What comes next is the user's to choose, and
     /// the panel lights for it, unless the system asked for the work and it
-    /// went through every partition: the phone then leaves on its own.
+    /// went through every partition: the phone then leaves on its own. The
+    /// data partition, worked on, is closed now.
     pub fn part_work_ended(&mut self, outcome: Result<(), PartStop>, now: u64) {
         let work = self.state.part_work.as_mut().expect("only work under way ends");
         let failed = outcome.is_err() || work.items.iter().any(|(_, s)| matches!(s, ItemState::Ended(ItemEnd::Failed(_))));
         let lit = failed || !work.asked;
+        let data = work.kind == PartKind::Repair && work.items.iter().any(|(name, _)| name == DATA_PARTITION);
         work.outcome = Some(outcome);
+        if data && self.state.data != Data::Erased {
+            self.state.data = Data::Closed;
+        }
         if lit {
             self.wake(now);
         }
@@ -4001,7 +4092,8 @@ impl App {
         if morph {
             self.start_morph(false, now);
         }
-        match self.screen() {
+        let left = self.screen();
+        match left {
             Screen::Mount => self.state.mount_failure = None,
             // A slot picked and not switched to is put down.
             Screen::Slot => self.state.next_slot = None,
@@ -4065,13 +4157,16 @@ impl App {
                 }
                 self.state.relabel = None;
             }
-            // Work on a partition cannot be stopped halfway.
+            // Work on a partition cannot be stopped halfway. Done, the
+            // partition may hold another filesystem, and what is to be done
+            // to it is chosen afresh.
             Screen::PartWork => {
                 if self.state.part_work.as_ref().is_some_and(|w| w.outcome.is_none()) {
                     self.say("请等待完成后再返回", now);
                     return fx;
                 }
                 self.state.part_work = None;
+                self.state.fs_action = FsAction::Repair;
             }
             Screen::RestoreBackup => {
                 self.state.restore = None;
@@ -4148,9 +4243,13 @@ impl App {
         self.settle_page();
         self.refresh();
         // Coming back to the list of backups looks for them again: one may
-        // have been made, deleted or opened up to be read since.
-        if self.screen() == Screen::Restore {
-            fx.push(self.find_backups());
+        // have been made, deleted or opened up to be read since. So does
+        // coming back to the partitions after work on one, which may have
+        // changed what it holds.
+        match self.screen() {
+            Screen::Restore => fx.push(self.find_backups()),
+            Screen::Filesystem | Screen::Filesystems if left == Screen::PartWork => fx.push(Effect::ReadFilesystems),
+            _ => {}
         }
         fx
     }
@@ -4237,6 +4336,7 @@ impl App {
     fn arrive_at(&mut self, s: Screen) -> Vec<Effect> {
         match s {
             Screen::Mount => vec![Effect::ReadMounts],
+            Screen::Filesystems => vec![Effect::ReadFilesystems],
             Screen::Slot | Screen::Reboot => vec![Effect::ReadSlots],
             Screen::Restore => vec![self.find_backups()],
             Screen::Files => vec![Effect::ReadDir(self.state.files.path.clone())],
@@ -4479,6 +4579,20 @@ impl App {
                     self.refresh();
                     return vec![Effect::StopRelabel];
                 }
+            }
+            Action::OpenFilesystem(k) => {
+                self.state.fs_chosen = k;
+                self.state.fs_action = FsAction::Repair;
+                self.open(Screen::Filesystem);
+            }
+            Action::ChooseFs(choice) => {
+                let row = self.fs_row().expect("the page of a partition shows one that was read");
+                let action = match choice {
+                    FsChoice::Repair => FsAction::Repair,
+                    FsChoice::Remake(k) => FsAction::Remake(row.others[k].clone()),
+                };
+                self.state.fs_action = action;
+                self.refresh();
             }
             Action::ScreenOff(k) => {
                 self.state.screen_off = k;
@@ -5502,6 +5616,17 @@ impl App {
                 Data::Erased => self.say("data 分区已清除", now),
                 Data::Closed | Data::Failed(_) => self.say("请先在「解密」中打开 data 分区", now),
             },
+            // The data partition is reached through its own key whether or
+            // not it is open, but not while it is being opened or erased.
+            Confirm::Filesystem => {
+                let row = self.fs_row().expect("the page of a partition shows one that was read");
+                let data = row.name == DATA_PARTITION;
+                match (&self.state.fs_action, &self.state.data) {
+                    (_, Data::Opening) if data => self.say("正在打开 data 分区，请稍后再试", now),
+                    (FsAction::Repair, Data::Erased) if data => self.say("data 分区已清除", now),
+                    (action, _) => fx.push(Effect::Filesystem { name: row.name.clone(), action: action.clone() }),
+                }
+            }
             Confirm::Flash => {
                 if let Install::Choosing(choice) = &self.state.install {
                     let partition = choice.partitions[choice.partition];
@@ -5871,7 +5996,7 @@ impl App {
     /// Draw the swipe-to-confirm control at `track` on the page again, its
     /// knob where it has come to.
     fn paint_knob(&mut self, t: &Theme, f: &Fonts, which: Confirm, track: Rect) {
-        let (label, danger) = pages::confirm_label(which);
+        let (label, danger) = pages::confirm_label(which, &self.state);
         if let Some(fr) = self.frame.as_mut() {
             fr.canvas.fill_rect(track.x, track.y, track.w, track.h, t.pal.bg);
             widgets::confirm(&mut fr.canvas, t, f, track.y, label, danger, self.state.confirm);
@@ -8797,6 +8922,75 @@ mod tests {
         tap_at(&mut app, &f, &i, Action::Back, 2000);
         assert_eq!(app.screen(), Screen::Advanced);
         assert_eq!(app.state.relabel, None);
+    }
+
+    /// The filesystem page's partitions on a phone with a cache partition:
+    /// the data partition closed, and a cache partition its table lets hold
+    /// either filesystem.
+    fn fs_rows() -> Vec<FsRow> {
+        let row = |name: &str, filesystem: Option<&str>, others: &[&str]| FsRow {
+            name: name.into(),
+            mount_point: format!("/{name}"),
+            filesystem: filesystem.map(str::to_string),
+            size: 64 << 20,
+            others: others.iter().map(|o| o.to_string()).collect(),
+        };
+        vec![row("data", None, &[]), row("metadata", Some("f2fs"), &[]), row("cache", Some("ext4"), &["f2fs"])]
+    }
+
+    #[test]
+    fn the_filesystem_page_does_to_a_partition_what_is_chosen_and_reads_them_again_after() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Filesystems)), vec![Effect::ReadFilesystems]);
+        app.set_filesystems(Ok(fs_rows()));
+        tap(&mut app, &f, &i, Action::OpenFilesystem(2));
+        assert_eq!(app.screen(), Screen::Filesystem);
+        assert_eq!(app.state.fs_action, FsAction::Repair, "a repair, which changes nothing the partition holds, to begin with");
+        tap(&mut app, &f, &i, Action::ChooseFs(FsChoice::Remake(0)));
+        assert_eq!(app.state.fs_action, FsAction::Remake("f2fs".into()));
+        let remake = Effect::Filesystem { name: "cache".into(), action: FsAction::Remake("f2fs".into()) };
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Filesystem), vec![remake]);
+        app.part_work_started(PartKind::Remake("f2fs".into()), false);
+        assert_eq!(app.screen(), Screen::PartWork);
+        app.part_listed(vec!["cache".into()]);
+        app.part_at(0);
+        assert!(!app.frame(&f, &i).back, "no going back while it works");
+        app.key(Key::Back, 0);
+        assert_eq!((app.screen(), toast(&app)), (Screen::PartWork, Some("请等待完成后再返回")));
+        app.part_ended(0, ItemEnd::Made, "");
+        app.part_work_ended(Ok(()), 0);
+        assert!(app.frame(&f, &i).back);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Back, 2000), vec![Effect::ReadFilesystems], "the partition may hold another now");
+        assert_eq!(app.screen(), Screen::Filesystem);
+        assert_eq!(app.state.part_work, None);
+        assert_eq!(app.state.fs_action, FsAction::Repair, "what to do to it is chosen afresh");
+    }
+
+    #[test]
+    fn work_on_the_data_partition_waits_for_it_to_open_and_leaves_it_closed() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Filesystems, W, H, PPD);
+        app.set_filesystems(Ok(fs_rows()));
+        tap(&mut app, &f, &i, Action::OpenFilesystem(0));
+        tap(&mut app, &f, &i, Action::ChooseFs(FsChoice::Repair));
+        app.state.data = Data::Opening;
+        app.refresh();
+        assert!(swipe(&mut app, &f, &i, Confirm::Filesystem).is_empty());
+        assert_eq!(toast(&app), Some("正在打开 data 分区，请稍后再试"));
+        app.state.data = Data::Open;
+        app.refresh();
+        let repair = Effect::Filesystem { name: "data".into(), action: FsAction::Repair };
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::Filesystem), vec![repair]);
+        app.part_work_started(PartKind::Repair, false);
+        app.part_listed(vec!["data".into()]);
+        app.part_at(0);
+        app.part_ended(0, ItemEnd::Fixed, "[FSCK] valid_block_count matching with CP   [Fail]\n\nDone: 3.2 secs\n");
+        app.part_work_ended(Ok(()), 0);
+        let work = app.state.part_work.clone().expect("the page shows how it ended");
+        assert_eq!(work.items, [("data".to_string(), ItemState::Ended(ItemEnd::Fixed))]);
+        assert_eq!(work.output, ["[FSCK] valid_block_count matching with CP   [Fail]", "Done: 3.2 secs"], "blank lines left out");
+        assert_eq!(app.state.data, Data::Closed, "worked on, the partition is closed");
     }
 
     #[test]

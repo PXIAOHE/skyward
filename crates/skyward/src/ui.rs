@@ -15,12 +15,12 @@ use crate::wipe::{self, Eraser, Step};
 use crate::wlan;
 use anyhow::{anyhow, ensure, Context, Result};
 use skyward_block::fsck::Fixed;
-use skyward_block::{fstab, mount};
+use skyward_block::{fstab, mount, probe};
 use skyward_config::{DeviceConfig, Service};
 use skyward_crypto::data::{Closed, Opened};
 use skyward_install::asked::{self, Needs};
 use skyward_install::{Detach, Installer, Options};
-use skyward_sys::bcb::{self, Work};
+use skyward_sys::bcb::{self, Work, REFORMATS};
 use skyward_sys::control::{Control, Request};
 use skyward_sys::Power;
 use skyward_files::Ownership;
@@ -31,8 +31,8 @@ use skyward_net::release::{Installed, Release};
 use skyward_net::wlan::{Power as WlanPower, Wlan};
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
-    FileRow, FileTask, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place, RenameRefused,
-    Screen, Target, UsbDrive, UsbLink, Wipe, DOWNLOADS,
+    FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place,
+    RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe, DATA_PARTITION, DOWNLOADS,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
@@ -626,6 +626,7 @@ fn item_end(item: partwork::Item) -> ItemEnd {
         partwork::Item::NotShared(filesystem) => ItemEnd::NotShared(filesystem),
         partwork::Item::Fixed(Fixed::Clean) => ItemEnd::Clean,
         partwork::Item::Fixed(Fixed::Fixed) => ItemEnd::Fixed,
+        partwork::Item::Made => ItemEnd::Made,
         // What the program said shows below.
         partwork::Item::Fixed(Fixed::Failed) => ItemEnd::Failed(None),
         partwork::Item::Failed(why) => ItemEnd::Failed(Some(why)),
@@ -639,6 +640,54 @@ fn part_stop(stop: partwork::Stop) -> PartStop {
         partwork::Stop::Unmounted(base) => PartStop::Unmounted(base),
         partwork::Stop::Failed(why) => PartStop::Failed(why),
     }
+}
+
+/// The partitions the filesystem page lists, in this order, where the
+/// phone's table has them: the data partition, /metadata and the cache
+/// partition. Each comes with what it holds now, its size, and the other
+/// filesystems the table lists for it that the recovery makes. The data
+/// partition reads only through its decryption, so what it holds is known
+/// only once it is open; until then, any of the table's filesystems may be
+/// it, and where the table lists one, it is that. /metadata keeps the key
+/// the data partition opens with, which making it afresh would lose, so it
+/// is offered no other.
+fn read_filesystems() -> Result<Vec<FsRow>> {
+    let mut rows = Vec::new();
+    for (name, point) in [(DATA_PARTITION, "/data"), ("metadata", "/metadata"), ("cache", "/cache")] {
+        let entries = fstab::read(point)?;
+        let Some(entry) = entries.first() else { continue };
+        let device = fstab::device(entry)?;
+        let size = skyward_block::size_bytes(&device)?;
+        let mut listed: Vec<String> = Vec::new();
+        for e in &entries {
+            if REFORMATS.contains(&e.filesystem.as_str()) && !listed.contains(&e.filesystem) {
+                listed.push(e.filesystem.clone());
+            }
+        }
+        let filesystem = match name {
+            DATA_PARTITION => mount::visible(Path::new(point))?.map(|v| v.filesystem),
+            _ => probe::filesystem(Path::new(&device))?,
+        };
+        let others = match (name, &filesystem) {
+            ("metadata", _) => Vec::new(),
+            (_, Some(held)) => listed.into_iter().filter(|fs| fs != held).collect(),
+            (_, None) if listed.len() > 1 => listed,
+            (_, None) => Vec::new(),
+        };
+        rows.push(FsRow { name: name.to_string(), mount_point: point.to_string(), filesystem, size, others });
+    }
+    Ok(rows)
+}
+
+/// The filesystem page's partition `name` for its work: the data partition,
+/// or the table's first entry for another.
+fn fs_part(name: &str) -> Result<partwork::Part> {
+    if name == DATA_PARTITION {
+        return Ok(partwork::Part::Data);
+    }
+    let point = format!("/{name}");
+    let entry = fstab::read(&point)?.into_iter().next().with_context(|| format!("the phone's table has no {point}"))?;
+    Ok(partwork::Part::Entry(entry))
 }
 
 /// What the pages act on: a touch or a key, what a program asked on the
@@ -1450,6 +1499,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         skyward_sys::kmsg(&format!("partition work ended: {done:?}"))?;
                         let work = app.state.part_work.as_ref().context("partition work shows on its page")?;
                         let whole = done.is_ok() && !work.items.iter().any(|(_, s)| matches!(s, ItemState::Ended(ItemEnd::Failed(_))));
+                        let data = work.items.iter().any(|(name, _)| name == DATA_PARTITION);
                         // What the system asked for is done with either way,
                         // and the phone leaves on its own once it went
                         // through every partition.
@@ -1461,6 +1511,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             if whole {
                                 leave_at = Some(now + LEAVE_AFTER_MS);
                             }
+                        }
+                        // Work on the data partition leaves it closed.
+                        if data {
+                            closed.clear();
                         }
                         app.part_work_ended(done.map_err(part_stop), now);
                         parted = true;
@@ -1861,6 +1915,36 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         }
                     }
                     Effect::StopRelabel => relabeler.as_ref().context("there is no relabeling to stop")?.stop(),
+                    // Partitions that cannot be read are the page's to say.
+                    Effect::ReadFilesystems => app.set_filesystems(read_filesystems().map_err(|e| format!("{e:#}"))),
+                    // The data partition made afresh as another filesystem
+                    // is a factory reset, as the system asks for one; the
+                    // rest is work on one partition. Opening the data
+                    // partition and working on it are not to cross, and file
+                    // transfer lets internal storage go first.
+                    Effect::Filesystem { name, action } => {
+                        ensure!(eraser.is_none() && part_worker.is_none(), "work on partitions is under way already");
+                        if name == DATA_PARTITION && decryptor.is_some() {
+                            app.report("正在打开 data 分区，请稍后再试", now);
+                            continue;
+                        }
+                        if name == DATA_PARTITION && !withhold(&mut transfer, &mut app, now)? {
+                            continue;
+                        }
+                        let part = fs_part(&name)?;
+                        let (kind, task) = match action {
+                            FsAction::Remake(filesystem) if name == DATA_PARTITION => {
+                                erase_leaves = false;
+                                eraser = Some(factory_reset(&mut app, false, false, Some(filesystem))?);
+                                continue;
+                            }
+                            FsAction::Repair => (PartKind::Repair, partwork::Task::Repair(part)),
+                            FsAction::Remake(filesystem) => (PartKind::Remake(filesystem.clone()), partwork::Task::Remake(part, filesystem)),
+                        };
+                        skyward_sys::kmsg(&format!("{kind:?} the filesystem of {name}, as the filesystem page asked"))?;
+                        app.part_work_started(kind, false);
+                        part_worker = Some(partwork::Worker::start(task)?);
+                    }
                     // An install still stopping may yet write; a backup or
                     // restore waits for it.
                     Effect::Backup { parts, place, compress, verify } => {

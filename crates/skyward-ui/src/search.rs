@@ -34,6 +34,12 @@ pub const ENTRIES: &[Entry] = &[
         Screen::Relabel,
         &["xiufuselinuxshangxiawen", "xfsxw", "xiufu", "xf", "shangxiawen", "context", "restorecon", "label"],
     ),
+    entry(
+        "文件系统",
+        "高级",
+        Screen::Filesystems,
+        &["wenjianxitong", "wjxt", "genghuan", "gh", "fsck", "filesystem", "f2fs", "ext4"],
+    ),
     entry("导出日志", "高级", Screen::Logs, &["daochurizhi", "dcrz", "rizhi", "rz", "logs", "dmesg"]),
     entry(
         "系统更新",
@@ -127,6 +133,13 @@ mod tests {
     #[test]
     fn chinese_titles_match_as_typed() {
         assert_eq!(titles("挂载"), ["挂载"]);
+    }
+
+    #[test]
+    fn the_filesystem_page_is_found_by_what_it_does() {
+        assert_eq!(titles("wjxt"), ["文件系统"]);
+        assert_eq!(titles("fsck"), ["文件系统"]);
+        assert_eq!(titles("genghuan"), ["文件系统"]);
     }
 
     #[test]
