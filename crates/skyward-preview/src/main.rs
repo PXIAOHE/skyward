@@ -348,7 +348,7 @@ fn main() -> Result<()> {
     let adding = |app: &mut App, name: &str, security: Security, field: Field, choosing: bool| {
         app.state.adding = Some(Adding { name: name.into(), security, field, choosing });
     };
-    let pages: [PageShot; 154] = [
+    let pages: [PageShot; 158] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -683,6 +683,18 @@ fn main() -> Result<()> {
             let why = "android.hardware.security.keymint.IKeyMintDevice/default is not running; the phone's key service has to be started first";
             app.part_ended(0, ItemEnd::Failed(Some(why.into())), "");
             app.part_work_ended(Ok(()), 0);
+        }),
+        ("178-file-info-light-package", Screen::FileInfo, false, &|app| {
+            in_download(app, "OTA_ishtar_OS3.0.305.0.WMACNXM_20260412_full_package_signed_for_recovery_install.zip")
+        }),
+        ("179-file-info-dark-image", Screen::FileInfo, true, &|app| in_download(app, "skyward-recovery-ishtar.img")),
+        ("180-install-opened-light-checking", Screen::Installing, false, &|app| {
+            app.state.source = Source::Opened { drive: false };
+            app.state.install = Install::Checking { size: 7_014_220_000, stage: None };
+        }),
+        ("181-install-opened-dark-usb", Screen::Installing, true, &|app| {
+            app.state.source = Source::Opened { drive: true };
+            app.state.install = Install::Checking { size: 104_857_600, stage: None };
         }),
         ("143-update-light-offline", Screen::Update, false, &|app| {
             app.state.update_server = true;

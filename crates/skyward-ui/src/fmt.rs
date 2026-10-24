@@ -566,7 +566,7 @@ pub fn mount_failure(m: &MountFailure) -> String {
 fn give(source: Source) -> &'static str {
     match source {
         Source::Computer | Source::Rescue => "发送",
-        Source::File(_) | Source::Asked { .. } => "选择",
+        Source::File(_) | Source::Opened { .. } | Source::Asked { .. } => "选择",
     }
 }
 
@@ -626,8 +626,8 @@ pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
                 (Trouble::Older, _) => "更新包的版本过旧。".into(),
                 (Trouble::NoSpace, _) => "super 分区空间不足。".into(),
                 (Trouble::Transfer, Source::Computer | Source::Rescue) => "读取更新包失败，请检查数据线连接后重新发送。".into(),
-                (Trouble::Transfer, Source::File(Place::Storage) | Source::Asked { .. }) => "读取更新包失败。".into(),
-                (Trouble::Transfer, Source::File(Place::UsbDrive)) => "读取更新包失败，请检查 U 盘连接后重试。".into(),
+                (Trouble::Transfer, Source::File(Place::Storage) | Source::Opened { drive: false } | Source::Asked { .. }) => "读取更新包失败。".into(),
+                (Trouble::Transfer, Source::File(Place::UsbDrive) | Source::Opened { drive: true }) => "读取更新包失败，请检查 U 盘连接后重试。".into(),
                 (Trouble::Write, _) => "写入分区失败。".into(),
                 (Trouble::Verify, _) => "分区校验失败。".into(),
                 (Trouble::PostInstall, _) => "完成安装失败。".into(),
@@ -639,12 +639,12 @@ pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
         Failure::Script(code) => (format!("安装脚本运行失败，退出码为 {code}。"), None),
         Failure::Disconnected => ("电脑已停止发送，请检查数据线连接后重新发送。".into(), None),
         Failure::Unreadable(why) => match source {
-            Source::File(Place::UsbDrive) => ("读取文件失败，请检查 U 盘连接后重试。".into(), Some(why.clone())),
+            Source::File(Place::UsbDrive) | Source::Opened { drive: true } => ("读取文件失败，请检查 U 盘连接后重试。".into(), Some(why.clone())),
             _ => ("读取文件失败。".into(), Some(why.clone())),
         },
         Failure::Changed => match source {
             Source::Computer | Source::Rescue => ("文件在发送过程中被修改，请重新发送。".into(), None),
-            Source::File(_) | Source::Asked { .. } => ("文件在读取过程中被修改，请重新选择。".into(), None),
+            Source::File(_) | Source::Opened { .. } | Source::Asked { .. } => ("文件在读取过程中被修改，请重新选择。".into(), None),
         },
         Failure::Error(detail) => ("发生意外错误。".into(), Some(detail.clone())),
     }

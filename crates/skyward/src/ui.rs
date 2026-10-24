@@ -32,7 +32,7 @@ use skyward_net::wlan::{Power as WlanPower, Wlan};
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
     FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place,
-    RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe, DATA_PARTITION, DOWNLOADS,
+    RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe, DATA_PARTITION, DOWNLOADS, USB_DRIVE,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
@@ -59,9 +59,6 @@ const LEAVE_AFTER_MS: u64 = 1500;
 /// How long after the screen starts a touch panel may still come up; with
 /// none by then, the pages are worked with the keys, their light shown.
 const TOUCH_WAIT: Duration = Duration::from_secs(5);
-
-/// Where the USB drive plugged in is shown.
-const USB_DRIVE: &str = "/mnt/usb";
 
 /// Where logs saved to the temporary folder go, and where in internal
 /// storage the others do.
@@ -1821,6 +1818,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             continue;
                         }
                         installer = Some(Installer::open(in_place(place, &path), detach(cfg.services.clone()), install_options(&app))?);
+                    }
+                    Effect::InstallPath(path) => {
+                        ensure!(installer.is_none(), "an installer is running already");
+                        if !withhold(&mut transfer, &mut app, now)? {
+                            continue;
+                        }
+                        installer = Some(Installer::open(PathBuf::from(path), detach(cfg.services.clone()), install_options(&app))?);
                     }
                     Effect::Flash { partition, pick } => {
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;

@@ -2,7 +2,7 @@ use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
     FileOp, FileTask, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
     Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, ADDABLE, BACKUP_PARTS, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF,
-    TARGETS, TIME_ZONES, WIPES,
+    TARGETS, TIME_ZONES, WIPES, installs,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -732,6 +732,7 @@ fn install_title(source: Source) -> &'static str {
         Source::Computer => "通过电脑安装",
         Source::File(Place::Storage) => "从内部存储安装",
         Source::File(Place::UsbDrive) => "从 U 盘安装",
+        Source::Opened { .. } => "从文件管理安装",
         Source::Asked { security: false } => "安装系统更新",
         Source::Asked { security: true } => "安装安全更新",
         Source::Rescue => "救援模式",
@@ -888,8 +889,8 @@ pub fn installing(cx: &Ctx) -> Frame {
             let note = match s.source {
                 Source::Computer => "读取完成前，请不要断开数据线。返回将取消安装，并结束电脑上的 adb sideload。",
                 Source::Rescue => "读取完成前，请不要断开数据线。返回将取消安装，并退出救援模式。",
-                Source::File(Place::Storage) | Source::Asked { .. } => "返回将取消安装。",
-                Source::File(Place::UsbDrive) => "读取完成前，请不要拔出 U 盘。返回将取消安装。",
+                Source::File(Place::Storage) | Source::Opened { drive: false } | Source::Asked { .. } => "返回将取消安装。",
+                Source::File(Place::UsbDrive) | Source::Opened { drive: true } => "读取完成前，请不要拔出 U 盘。返回将取消安装。",
             };
             widgets::footnote(&mut c, t, f, y, note)
         }
@@ -898,8 +899,8 @@ pub fn installing(cx: &Ctx) -> Frame {
             let y = widgets::list(&mut c, t, f, top, &[standing("正在读取文件", GREEN, Icon::Install, &detail)]).bottom;
             match s.source {
                 Source::Computer | Source::Rescue => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要断开数据线。"),
-                Source::File(Place::Storage) | Source::Asked { .. } => y,
-                Source::File(Place::UsbDrive) => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要拔出 U 盘。"),
+                Source::File(Place::Storage) | Source::Opened { drive: false } | Source::Asked { .. } => y,
+                Source::File(Place::UsbDrive) | Source::Opened { drive: true } => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要拔出 U 盘。"),
             }
         }
         Install::Choosing(choice) => {
@@ -928,7 +929,7 @@ pub fn installing(cx: &Ctx) -> Frame {
             let note = match s.source {
                 Source::Computer => "刷入将覆盖分区中的原有内容。返回将取消刷入，并结束电脑上的 adb sideload。",
                 Source::Rescue => "刷入将覆盖分区中的原有内容。返回将取消刷入，并退出救援模式。",
-                Source::File(_) | Source::Asked { .. } => "刷入将覆盖分区中的原有内容。返回将取消刷入。",
+                Source::File(_) | Source::Opened { .. } | Source::Asked { .. } => "刷入将覆盖分区中的原有内容。返回将取消刷入。",
             };
             widgets::footnote(&mut c, t, f, track.y + track.h, note)
         }
@@ -983,8 +984,8 @@ pub fn installing(cx: &Ctx) -> Frame {
             let y = widgets::progress_card(&mut c, t, f, top, &format!("正在刷入 {partition}"), &detail, done);
             let keep = match s.source {
                 Source::Computer | Source::Rescue => "刷入完成前，请不要断开数据线。",
-                Source::File(Place::Storage) | Source::Asked { .. } => "刷入完成前，请不要关机。",
-                Source::File(Place::UsbDrive) => "刷入完成前，请不要拔出 U 盘。",
+                Source::File(Place::Storage) | Source::Opened { drive: false } | Source::Asked { .. } => "刷入完成前，请不要关机。",
+                Source::File(Place::UsbDrive) | Source::Opened { drive: true } => "刷入完成前，请不要拔出 U 盘。",
             };
             widgets::footnote(&mut c, t, f, y, keep)
         }
@@ -1046,8 +1047,8 @@ fn asked_package(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
 fn until_installed(source: Source) -> &'static str {
     match source {
         Source::Computer | Source::Rescue => "安装完成前，请不要断开数据线或关机。",
-        Source::File(Place::Storage) | Source::Asked { .. } => "安装完成前，请不要关机。",
-        Source::File(Place::UsbDrive) => "安装完成前，请不要拔出 U 盘或关机。",
+        Source::File(Place::Storage) | Source::Opened { drive: false } | Source::Asked { .. } => "安装完成前，请不要关机。",
+        Source::File(Place::UsbDrive) | Source::Opened { drive: true } => "安装完成前，请不要拔出 U 盘或关机。",
     }
 }
 
@@ -1066,7 +1067,7 @@ fn finished(
     let gap = t.m.card_gap;
     let (again, another) = match source {
         Source::Computer => (Row::new("再次发送").icon(GREEN, Icon::Usb), Action::Sideload),
-        Source::File(_) => (Row::new("选择其他文件").icon(GREEN, Icon::Folder), Action::Back),
+        Source::File(_) | Source::Opened { .. } => (Row::new("选择其他文件").icon(GREEN, Icon::Folder), Action::Back),
         Source::Asked { .. } => (Row::new("选择其他文件").icon(GREEN, Icon::Folder), Action::Open(Screen::Install)),
         Source::Rescue => (Row::new("退出救援模式").icon(GREEN, Icon::Usb), Action::Back),
     };
@@ -1130,7 +1131,7 @@ fn finished(
             out.extend(hits(&next.rows, &[another, Action::RebootTo(Target::System)]));
             let redo = match source {
                 Source::Computer | Source::Rescue => ("重新发送", "重新发送"),
-                Source::File(_) | Source::Asked { .. } => ("重新安装", "重新刷入"),
+                Source::File(_) | Source::Opened { .. } | Source::Asked { .. } => ("重新安装", "重新刷入"),
             };
             let warning = match damage {
                 Some(Damage::System) => format!("当前系统已被部分覆盖，重启后将无法进入系统。请{}完整更新包，安装完成后再重启。", redo.0),
@@ -2318,6 +2319,13 @@ pub fn file_info(cx: &Ctx) -> Frame {
     let y = widgets::info_card(&mut c, t, f, top, &facts);
     let mut rows = Vec::new();
     let mut acts = Vec::new();
+    // Images are flashed; packages and zips that install themselves are
+    // installed.
+    if installs(e) {
+        let image = Path::new(&e.name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("img"));
+        rows.push(Row::new(if image { "刷入" } else { "安装" }));
+        acts.push(Action::InstallEntry);
+    }
     if e.kind == FileKind::File {
         rows.push(Row::new("编辑"));
         acts.push(Action::EditEntry);

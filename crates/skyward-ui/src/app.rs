@@ -172,6 +172,9 @@ pub enum DownloadEnd {
 /// storage: the folder the stock updater keeps them in.
 pub const DOWNLOADS: &str = "downloaded_rom";
 
+/// Where the USB drive plugged in is shown.
+pub const USB_DRIVE: &str = "/mnt/usb";
+
 /// The data partition's name, as the filesystem page lists it.
 pub const DATA_PARTITION: &str = "data";
 
@@ -248,6 +251,8 @@ pub enum Source {
     Computer,
     /// A file chosen in a place.
     File(Place),
+    /// A file opened in the file manager; `drive` for one on the USB drive.
+    Opened { drive: bool },
     /// A package on the phone the system asked to be installed before the
     /// recovery started; `security` for a security update.
     Asked { security: bool },
@@ -638,20 +643,29 @@ impl Folder {
 }
 
 /// Whether a list in a place shows an entry: a folder, or a file the
-/// installer may take by its name, an update package or a partition
-/// image. Hidden entries are left out, as the stock file manager leaves
-/// them out.
+/// installer takes. Hidden entries are left out, as the stock file manager
+/// leaves them out.
 fn installable(e: &FileRow) -> bool {
     if e.name.starts_with('.') {
         return false;
     }
     match e.kind {
         FileKind::Folder { .. } | FileKind::Link { folder: true, .. } => true,
-        FileKind::File | FileKind::Link { folder: false, .. } => std::path::Path::new(&e.name)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("img")),
+        FileKind::File | FileKind::Link { folder: false, .. } => installs(e),
         FileKind::Special => false,
     }
+}
+
+/// Whether the installer takes a file by its name: an update package, a
+/// zip that installs itself, or a partition image.
+pub(crate) fn installs(e: &FileRow) -> bool {
+    let named = std::path::Path::new(&e.name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("img"));
+    named && matches!(e.kind, FileKind::File | FileKind::Link { folder: false, .. })
+}
+
+/// The last part of `path`, as the installing page names the file there.
+fn file_name(path: &str) -> Option<String> {
+    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
 /// A partition the mount page lists: its name, where it sits, and how it
@@ -1085,6 +1099,8 @@ pub enum Action {
     RenameEntry,
     /// Open the file the file page shows to edit it.
     EditEntry,
+    /// Install the file the file page shows.
+    InstallEntry,
     /// Write the file the editor page shows as it now stands.
     SaveText,
     /// Open the page of the permissions of the entry the file page shows.
@@ -1610,6 +1626,9 @@ pub enum Effect {
     /// Start installing the file at this path from the top of a place,
     /// telling how it goes as [`Effect::Sideload`] does.
     InstallFile(Place, String),
+    /// Start installing the file at this full path, opened in the file
+    /// manager, telling how it goes as [`Effect::Sideload`] does.
+    InstallPath(String),
     /// Write the image the installer holds to `partition` in the slots
     /// `pick` means.
     Flash { partition: &'static str, pick: Pick },
@@ -4537,6 +4556,10 @@ impl App {
                 self.open(Screen::Rename);
             }
             Action::EditEntry => return vec![Effect::OpenText(self.entry_path())],
+            Action::InstallEntry => {
+                let size = self.state.file.as_ref().expect("the file page shows an entry").size;
+                return self.install_opened(self.entry_path(), size, now);
+            }
             Action::SaveText => {
                 let ed = self.state.editor.as_ref().expect("the editor page shows a file");
                 return vec![Effect::SaveText { path: ed.path.clone(), text: ed.text() }];
@@ -4693,6 +4716,10 @@ impl App {
                     }
                     FileKind::File if matches!(files::file_type(&entry.name), FileType::Text | FileType::Code) => {
                         return vec![Effect::OpenText(self.state.files.inside(&entry.name))];
+                    }
+                    _ if installs(&entry) => {
+                        let path = self.state.files.inside(&entry.name);
+                        return self.install_opened(path, entry.size, now);
                     }
                     FileKind::File | FileKind::Link { folder: false, .. } | FileKind::Special => {
                         self.state.file = Some(entry);
@@ -4901,12 +4928,27 @@ impl App {
     /// Install the file of `size` bytes at `path` in `place`, its page
     /// following how it goes; one install at a time.
     fn install_file(&mut self, place: Place, path: String, size: u64, now: u64) -> Vec<Effect> {
+        let name = file_name(&path);
+        self.install_named(Source::File(place), name, size, Effect::InstallFile(place, path), now)
+    }
+
+    /// Install the file of `size` bytes at the full `path`, opened in the
+    /// file manager, as a file chosen in a place installs.
+    fn install_opened(&mut self, path: String, size: u64, now: u64) -> Vec<Effect> {
+        let source = Source::Opened { drive: std::path::Path::new(&path).starts_with(USB_DRIVE) };
+        let name = file_name(&path);
+        self.install_named(source, name, size, Effect::InstallPath(path), now)
+    }
+
+    /// Install the file `name` of `size` bytes from `source`, `start` asking
+    /// the runtime to, its page following how it goes; one install at a
+    /// time.
+    fn install_named(&mut self, source: Source, name: Option<String>, size: u64, start: Effect, now: u64) -> Vec<Effect> {
         match self.state.install {
             Install::Idle | Install::Finished { .. } => {
-                let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
-                self.begin_install(Install::Checking { size, stage: None }, Source::File(place), name);
+                self.begin_install(Install::Checking { size, stage: None }, source, name);
                 self.open(Screen::Installing);
-                vec![Effect::InstallFile(place, path)]
+                vec![start]
             }
             _ => {
                 self.say("上一次安装尚未结束，请稍后再试", now);
@@ -8553,12 +8595,12 @@ mod tests {
         app.set_files("/vendor".into(), Ok(vec![entry("etc", folder(3))]), LISTED);
         assert_eq!(app.key(Key::Back, 0), vec![Effect::ReadDir("/".into())], "back climbs a folder");
         assert_eq!(app.screen(), Screen::Files);
-        app.set_files("/".into(), Ok(vec![entry("boot.img", FileKind::File), entry("init.rc", FileKind::File)]), LISTED);
+        app.set_files("/".into(), Ok(vec![entry("vmlinux", FileKind::File), entry("init.rc", FileKind::File)]), LISTED);
         assert_eq!(tap(&mut app, &f, &i, Action::OpenEntry(1)), vec![Effect::OpenText("/init.rc".into())], "a text file opens to edit");
         assert_eq!(app.screen(), Screen::Files);
         tap(&mut app, &f, &i, Action::OpenEntry(0));
         assert_eq!(app.screen(), Screen::FileInfo);
-        assert_eq!(app.state.file.as_ref().map(|e| e.name.as_str()), Some("boot.img"));
+        assert_eq!(app.state.file.as_ref().map(|e| e.name.as_str()), Some("vmlinux"));
         app.key(Key::Back, 0);
         assert_eq!(app.state.file, None);
         assert!(app.key(Key::Back, 0).is_empty(), "at the root, back leaves");
@@ -8652,6 +8694,16 @@ mod tests {
         app
     }
 
+    /// Hold the file manager's entry at `index` until the page of what can
+    /// be done with it opens.
+    fn hold_entry(app: &mut App, f: &Fonts, i: &DeviceInfo, index: usize) {
+        let (x, y) = spot(app, f, i, Action::OpenEntry(index));
+        app.touch(Touch::Down(x, y), f, 0);
+        app.tick(LONG_PRESS_MS);
+        app.touch(Touch::Up, f, LONG_PRESS_MS);
+        assert_eq!(app.screen(), Screen::FileInfo);
+    }
+
     #[test]
     fn an_entry_held_opens_what_can_be_done_with_it_a_folder_too() {
         let (f, i) = (fonts(), info());
@@ -8671,7 +8723,7 @@ mod tests {
     fn a_picked_entry_goes_into_the_folder_the_bar_is_used_in() {
         let (f, i) = (fonts(), info());
         let mut app = in_sdcard(&f, &i);
-        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        hold_entry(&mut app, &f, &i, 1);
         assert!(tap(&mut app, &f, &i, Action::PickEntry(FileOp::Copy)).is_empty());
         assert_eq!(app.screen(), Screen::Files, "back to the folders to pick one");
         assert_eq!(app.state.clip, Some(Clip { op: FileOp::Copy, path: "/sdcard/a.zip".into() }));
@@ -8734,7 +8786,7 @@ mod tests {
     fn renaming_takes_the_name_typed() {
         let (f, i) = (fonts(), info());
         let mut app = in_sdcard(&f, &i);
-        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        hold_entry(&mut app, &f, &i, 1);
         tap(&mut app, &f, &i, Action::RenameEntry);
         assert_eq!(app.screen(), Screen::Rename);
         assert_eq!(app.state.new_name, "a.zip", "the name it has to start from");
@@ -8757,7 +8809,7 @@ mod tests {
     fn permissions_switch_a_bit_at_a_time_and_show_what_the_entry_took() {
         let (f, i) = (fonts(), info());
         let mut app = in_sdcard(&f, &i);
-        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        hold_entry(&mut app, &f, &i, 1);
         tap(&mut app, &f, &i, Action::OpenPermissions);
         assert_eq!(app.screen(), Screen::Permissions);
         let bits: Vec<u32> = app.frame(&f, &i).hits.iter().filter_map(|h| if let Action::ModeBit(b) = h.action { Some(b) } else { None }).collect();
@@ -8870,8 +8922,7 @@ mod tests {
     fn the_file_page_edits_a_file_and_nothing_else() {
         let (f, i) = (fonts(), info());
         let mut app = in_sdcard(&f, &i);
-        tap(&mut app, &f, &i, Action::OpenEntry(1));
-        assert_eq!(app.screen(), Screen::FileInfo, "an archive opens what can be done with it");
+        hold_entry(&mut app, &f, &i, 1);
         assert_eq!(tap(&mut app, &f, &i, Action::EditEntry), vec![Effect::OpenText("/sdcard/a.zip".into())]);
         for kind in [folder(2), FileKind::Link { target: "a.zip".into(), folder: false }, FileKind::Special] {
             app.state.file = Some(entry("other", kind));
@@ -8884,11 +8935,59 @@ mod tests {
     fn the_file_page_shows_a_file_as_saved() {
         let (f, i) = (fonts(), info());
         let mut app = in_sdcard(&f, &i);
-        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        hold_entry(&mut app, &f, &i, 1);
         app.text_opened(&f, "/sdcard/a.zip".into(), Ok(Some(b"x".to_vec())), 0);
         let saved = FileRow { size: 9, modified: LISTED, ..entry("a.zip", FileKind::File) };
         app.set_files("/sdcard".into(), Ok(vec![entry("DCIM", folder(2)), saved.clone()]), LISTED);
         assert_eq!(app.state.file, Some(saved));
+    }
+
+    #[test]
+    fn a_package_or_an_image_opened_in_the_file_manager_installs_and_another_is_chosen_there() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        assert_eq!(tap(&mut app, &f, &i, Action::OpenEntry(1)), vec![Effect::InstallPath("/sdcard/a.zip".into())]);
+        assert_eq!((app.screen(), app.state.source), (Screen::Installing, Source::Opened { drive: false }));
+        assert_eq!(app.state.package_name.as_deref(), Some("a.zip"), "the page names the file");
+        app.install(Event::Finished(Outcome::Refused(Refusal::Unknown)), 0);
+        tap_at(&mut app, &f, &i, Action::Back, 1000);
+        assert_eq!((app.screen(), &app.state.install), (Screen::Files, &Install::Idle), "another file is chosen where this one was");
+        let drive = format!("{USB_DRIVE}/ROMs");
+        app.set_files(drive.clone(), Ok(vec![entry("boot.img", FileKind::File)]), LISTED);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::OpenEntry(0), 2000), vec![Effect::InstallPath(format!("{drive}/boot.img"))]);
+        assert_eq!(app.state.source, Source::Opened { drive: true }, "the page warns about pulling the drive out");
+    }
+
+    #[test]
+    fn a_file_opened_as_an_install_ends_waits_for_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        app.install(Event::Image { kind: ImageKind::Dtbo, size: 1 << 20, partitions: vec!["dtbo"] }, 0);
+        assert_eq!(app.key(Key::Back, 1000), vec![Effect::Cancel]);
+        assert_eq!(app.screen(), Screen::Files);
+        assert!(tap_at(&mut app, &f, &i, Action::OpenEntry(1), 2000).is_empty());
+        assert_eq!(toast(&app), Some("上一次安装尚未结束，请稍后再试"));
+    }
+
+    #[test]
+    fn the_file_page_installs_what_the_installer_takes_and_nothing_else() {
+        let (f, i) = (fonts(), info());
+        let mut app = in_sdcard(&f, &i);
+        hold_entry(&mut app, &f, &i, 1);
+        assert_eq!(tap(&mut app, &f, &i, Action::InstallEntry), vec![Effect::InstallPath("/sdcard/a.zip".into())]);
+        assert_eq!(app.screen(), Screen::Installing);
+        let link = FileKind::Link { target: "/sdcard/a.zip".into(), folder: false };
+        let taken = [entry("boot.IMG", FileKind::File), entry("b.zip", link)];
+        let left = [entry("a.txt", FileKind::File), entry("img", FileKind::File), entry("c.zip", folder(1)), entry("d.zip", FileKind::Special)];
+        for (e, offered) in taken.into_iter().map(|e| (e, true)).chain(left.into_iter().map(|e| (e, false))) {
+            app.state.file = Some(e);
+            app.state.install = Install::Idle;
+            app.stack = vec![(Screen::FileInfo, 0.0, Focus::Unset)];
+            app.refresh();
+            let has = app.frame(&f, &i).hits.iter().any(|h| h.action == Action::InstallEntry);
+            assert_eq!(has, offered, "{:?}", app.state.file);
+        }
     }
 
     #[test]
@@ -9432,7 +9531,7 @@ mod tests {
     fn a_name_the_folder_cannot_take_is_turned_down_before_renaming() {
         let (f, i) = (fonts(), info());
         let mut app = in_sdcard(&f, &i);
-        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        hold_entry(&mut app, &f, &i, 1);
         tap(&mut app, &f, &i, Action::RenameEntry);
         let refused =
             [("", "请输入名称"), ("..", "名称不能为\".\"或\"..\""), ("x/y", "名称不能包含\"/\""), ("DCIM", "该文件夹中已有\"DCIM\"")];
@@ -9452,7 +9551,7 @@ mod tests {
     fn deleting_asks_with_a_swipe_and_runs_on_its_page() {
         let (f, i) = (fonts(), info());
         let mut app = in_sdcard(&f, &i);
-        tap(&mut app, &f, &i, Action::OpenEntry(1));
+        hold_entry(&mut app, &f, &i, 1);
         assert!(app.frame(&f, &i).hits.iter().all(|h| h.action != Action::Confirm(Confirm::DeleteEntry)));
         tap(&mut app, &f, &i, Action::AskDelete);
         assert_eq!(swipe(&mut app, &f, &i, Confirm::DeleteEntry), vec![Effect::Delete("/sdcard/a.zip".into())]);
