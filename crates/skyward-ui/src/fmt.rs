@@ -1,4 +1,6 @@
-use crate::app::{BackupRefusal, Data, EraseStop, FileKind, FileRow, MountFailure, Part, Place, Source, BACKUP_PARTS, TIME_ZONES};
+use crate::app::{
+    BackupRefusal, Data, EraseStop, FileKind, FileRow, ItemEnd, MountFailure, Part, PartStop, Place, Source, BACKUP_PARTS, TIME_ZONES,
+};
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use jiff::Timestamp;
@@ -301,7 +303,7 @@ pub fn part(p: Part) -> &'static str {
 /// `before`, `inner` and `after` joined, with a space between Chinese and
 /// the Latin letters or digits at either end of `inner`, as the pages write
 /// them: 清除 ART 缓存失败.
-fn spaced(before: &str, inner: &str, after: &str) -> String {
+pub(crate) fn spaced(before: &str, inner: &str, after: &str) -> String {
     let open = if inner.starts_with(|c: char| c.is_ascii()) && !before.ends_with(|c: char| c.is_ascii()) { " " } else { "" };
     let close = if inner.ends_with(|c: char| c.is_ascii()) && !after.starts_with(|c: char| c.is_ascii()) { " " } else { "" };
     format!("{before}{open}{inner}{close}{after}")
@@ -330,6 +332,30 @@ pub fn erase_stop(s: &EraseStop) -> (String, Option<String>) {
             (spaced("", &users(locked), "的数据尚未解密，未清除任何内容。请先在「解密」中输入锁屏密码后重试。"), None)
         }
         EraseStop::Failed(p, why) => (spaced("清除", part(*p), "失败。"), Some(why.clone())),
+    }
+}
+
+/// How a partition's work ended, as its row says it, `verb` naming the
+/// work: 已修复, 修复失败.
+pub fn item_end(end: &ItemEnd, verb: &str) -> String {
+    match end {
+        ItemEnd::Erased => "已清除".into(),
+        ItemEnd::Unshared => "已处理".into(),
+        ItemEnd::NotShared(_) => "无需处理".into(),
+        ItemEnd::Clean => "未发现错误".into(),
+        ItemEnd::Fixed => "已修复".into(),
+        ItemEnd::Failed(_) => format!("{verb}失败"),
+    }
+}
+
+/// Why work on whole partitions stopped before going through them, on a
+/// phone whose codename is `codename`, and the details behind it when
+/// there are any.
+pub fn part_stop(stop: &PartStop, codename: &str) -> (String, Option<String>) {
+    match stop {
+        PartStop::Refused(r) => (erase_request_refusal(r, codename), None),
+        PartStop::Unmounted(base) => (format!("请先在「挂载」中挂载 {base} 分区后重试。"), None),
+        PartStop::Failed(why) => ("发生意外错误。".into(), Some(why.clone())),
     }
 }
 
@@ -534,11 +560,12 @@ pub fn mount_failure(m: &MountFailure) -> String {
 }
 
 /// How another package is given to the installer from where this one came
-/// from: the computer sends it, or another file is chosen.
+/// from: the computer sends it, or another file is chosen, as one is in
+/// place of a package the system named.
 fn give(source: Source) -> &'static str {
     match source {
-        Source::Computer => "发送",
-        Source::File(_) => "选择",
+        Source::Computer | Source::Rescue => "发送",
+        Source::File(_) | Source::Asked { .. } => "选择",
     }
 }
 
@@ -572,6 +599,21 @@ pub fn refusal(r: &Refusal, codename: &str, source: Source, zone: usize) -> Stri
     }
 }
 
+/// Why the system's request to erase the partitions it lists was not
+/// carried out, on a phone whose codename is `codename`.
+pub fn erase_request_refusal(r: &Refusal, codename: &str) -> String {
+    match r {
+        Refusal::Unsigned => "该请求未签名。".into(),
+        Refusal::Unverified => "该请求未通过签名验证。".into(),
+        Refusal::NotBrick(kind) if kind.is_empty() => "该请求未注明类型。".into(),
+        Refusal::NotBrick(kind) => format!("该请求的类型为 {kind}。"),
+        Refusal::OtherDevice(devices) => format!("该请求适用于 {devices}，本机为 {codename}。"),
+        Refusal::OtherSerial => "该请求仅适用于指定序列号的设备，不包括本机。".into(),
+        Refusal::NoSerial => "该请求未注明设备序列号。".into(),
+        other => unreachable!("a request to erase partitions is not refused as {other:?}"),
+    }
+}
+
 /// What went wrong installing a package from `source`, and the details
 /// behind it when there are any.
 pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
@@ -582,8 +624,8 @@ pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
                 (Trouble::Damaged, _) => "更新包已损坏，请重新下载。".into(),
                 (Trouble::Older, _) => "更新包的版本过旧。".into(),
                 (Trouble::NoSpace, _) => "super 分区空间不足。".into(),
-                (Trouble::Transfer, Source::Computer) => "读取更新包失败，请检查数据线连接后重新发送。".into(),
-                (Trouble::Transfer, Source::File(Place::Storage)) => "读取更新包失败。".into(),
+                (Trouble::Transfer, Source::Computer | Source::Rescue) => "读取更新包失败，请检查数据线连接后重新发送。".into(),
+                (Trouble::Transfer, Source::File(Place::Storage) | Source::Asked { .. }) => "读取更新包失败。".into(),
                 (Trouble::Transfer, Source::File(Place::UsbDrive)) => "读取更新包失败，请检查 U 盘连接后重试。".into(),
                 (Trouble::Write, _) => "写入分区失败。".into(),
                 (Trouble::Verify, _) => "分区校验失败。".into(),
@@ -600,8 +642,8 @@ pub fn failure(f: &Failure, source: Source) -> (String, Option<String>) {
             _ => ("读取文件失败。".into(), Some(why.clone())),
         },
         Failure::Changed => match source {
-            Source::Computer => ("文件在发送过程中被修改，请重新发送。".into(), None),
-            Source::File(_) => ("文件在读取过程中被修改，请重新选择。".into(), None),
+            Source::Computer | Source::Rescue => ("文件在发送过程中被修改，请重新发送。".into(), None),
+            Source::File(_) | Source::Asked { .. } => ("文件在读取过程中被修改，请重新选择。".into(), None),
         },
         Failure::Error(detail) => ("发生意外错误。".into(), Some(detail.clone())),
     }

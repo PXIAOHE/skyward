@@ -5,6 +5,7 @@ use crate::haptics::Haptics;
 use crate::relabel;
 use crate::input::{monotonic_ms, Event, Inputs};
 use crate::merge;
+use crate::partwork;
 use crate::pty;
 use crate::readings::{Reading, Readings};
 use crate::secure;
@@ -13,8 +14,11 @@ use crate::updates;
 use crate::wipe::{self, Eraser, Step};
 use crate::wlan;
 use anyhow::{anyhow, ensure, Context, Result};
+use skyward_block::fsck::Fixed;
+use skyward_block::{fstab, mount};
 use skyward_config::{DeviceConfig, Service};
 use skyward_crypto::data::{Closed, Opened};
+use skyward_install::asked::{self, Needs};
 use skyward_install::{Detach, Installer, Options};
 use skyward_sys::bcb::{self, Work};
 use skyward_sys::control::{Control, Request};
@@ -27,8 +31,8 @@ use skyward_net::release::{Installed, Release};
 use skyward_net::wlan::{Power as WlanPower, Wlan};
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
-    FileRow, FileTask, Have, Held, JobEnd, Keys, MountFailure, Part, Place, RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe,
-    DOWNLOADS,
+    FileRow, FileTask, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place, RenameRefused,
+    Screen, Target, UsbDrive, UsbLink, Wipe, DOWNLOADS,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Surface};
@@ -527,9 +531,10 @@ fn erase_stop(stop: wipe::Stop) -> EraseStop {
 
 /// Start erasing all user data, its page following it; why it cannot
 /// start ends it at once, on the same page. `asked` when the system asked
-/// for it.
-fn factory_reset(app: &mut App, keep_memtag_mode: bool, asked: bool) -> Result<Eraser> {
-    match wipe::factory_reset() {
+/// for it; `reformat` the filesystem every part is made afresh as, where
+/// one was asked for.
+fn factory_reset(app: &mut App, keep_memtag_mode: bool, asked: bool, reformat: Option<String>) -> Result<Eraser> {
+    match wipe::factory_reset(reformat) {
         Ok(plan) => {
             app.erase_started(true, asked, plan.steps().into_iter().map(part).collect());
             Eraser::start(move |tell| plan.carry_out(keep_memtag_mode, tell))
@@ -541,11 +546,23 @@ fn factory_reset(app: &mut App, keep_memtag_mode: bool, asked: bool) -> Result<E
     }
 }
 
+/// Start erasing all user data for rescue, the installing page saying so
+/// meanwhile: as a factory reset erases it, the memory tagging asked of the
+/// bootloader forgotten too.
+fn rescue_wipe(app: &mut App) -> Result<Eraser> {
+    app.rescue_wiping();
+    match wipe::factory_reset(None) {
+        Ok(plan) => Eraser::start(move |tell| plan.carry_out(false, tell)),
+        Err(stop) => Eraser::stopped(stop),
+    }
+}
+
 /// Start erasing parts on their own, its page following it: parts of the
-/// data partition, and the cache partition; `logs` are the phone's own log
-/// folders. `asked` when the system asked for it.
-fn parts_wipe(app: &mut App, steps: Vec<Step>, logs: &[String], asked: bool) -> Result<Eraser> {
-    match wipe::parts(steps, logs) {
+/// data partition, and the cache partition, made afresh as `reformat`
+/// where the system asked for that filesystem; `logs` are the phone's own
+/// log folders. `asked` when the system asked for it.
+fn parts_wipe(app: &mut App, steps: Vec<Step>, logs: &[String], asked: bool, reformat: Option<String>) -> Result<Eraser> {
+    match wipe::parts(steps, logs, reformat) {
         Ok(parts) => {
             app.erase_started(false, asked, parts.steps().into_iter().map(part).collect());
             Eraser::start(move |tell| parts.carry_out(tell))
@@ -554,6 +571,73 @@ fn parts_wipe(app: &mut App, steps: Vec<Step>, logs: &[String], asked: bool) -> 
             app.erase_started(false, asked, Vec::new());
             Eraser::stopped(stop)
         }
+    }
+}
+
+/// The reasons the bootloader gives for a start that followed the kernel
+/// stopping, as Android's own recovery lists them; it does not start an
+/// install the system asked for before such a start.
+const PANICS: [&str; 2] = ["kernel_panic", "Panic"];
+
+/// Whether the phone came to the recovery after its kernel stopped.
+pub fn panicked() -> bool {
+    skyward_sys::prop("ro.boot.bootreason").is_some_and(|reason| PANICS.iter().any(|p| p.eq_ignore_ascii_case(&reason)))
+}
+
+/// An install the system asked for that waits for the data partition to
+/// open, or for the user whose own files hold the package to unlock them.
+struct Pending {
+    package: asked::Asked,
+    needs: Needs,
+    retry: bool,
+}
+
+/// Start installing the package the system asked for.
+fn install_asked(cfg: &DeviceConfig, app: &App, pending: Pending) -> Result<Installer> {
+    if pending.needs == Needs::Cache {
+        let cache = wipe::cache()?.context("the phone has no cache partition")?;
+        let at = Path::new(&cache.mount_point);
+        if !mount::is_mount_point(at)? {
+            fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
+            mount::mount_ro(Path::new(&fstab::device(&cache)?), at)?;
+        }
+    }
+    Installer::asked(pending.package, pending.retry, detach(cfg.services.clone()), install_options(app))
+}
+
+/// Where a reboot rescue asked for goes: the target, and whether it is
+/// rescue again, which the recovery is told in misc.
+fn rescue_target(target: &str) -> (Target, bool) {
+    match target {
+        "bootloader" => (Target::Bootloader, false),
+        "fastboot" => (Target::Fastboot, false),
+        "recovery" => (Target::Recovery, false),
+        "rescue" => (Target::Recovery, true),
+        // As minadbd has it, anything else starts the system.
+        _ => (Target::System, false),
+    }
+}
+
+/// How a partition's work ended, as its page tells it.
+fn item_end(item: partwork::Item) -> ItemEnd {
+    match item {
+        partwork::Item::Erased => ItemEnd::Erased,
+        partwork::Item::Unshared => ItemEnd::Unshared,
+        partwork::Item::NotShared(filesystem) => ItemEnd::NotShared(filesystem),
+        partwork::Item::Fixed(Fixed::Clean) => ItemEnd::Clean,
+        partwork::Item::Fixed(Fixed::Fixed) => ItemEnd::Fixed,
+        // What the program said shows below.
+        partwork::Item::Fixed(Fixed::Failed) => ItemEnd::Failed(None),
+        partwork::Item::Failed(why) => ItemEnd::Failed(Some(why)),
+    }
+}
+
+/// Why work on whole partitions stopped, as its page tells it.
+fn part_stop(stop: partwork::Stop) -> PartStop {
+    match stop {
+        partwork::Stop::Refused(refusal) => PartStop::Refused(refusal),
+        partwork::Stop::Unmounted(base) => PartStop::Unmounted(base),
+        partwork::Stop::Failed(why) => PartStop::Failed(why),
     }
 }
 
@@ -831,7 +915,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         Work::Fastboot => Screen::Fastboot,
         Work::PromptWipeData => Screen::CantStart,
         Work::Unsupported(_) => Screen::Unhandled,
-        Work::Menu | Work::Exit | Work::WipeData | Work::WipeCache | Work::Sideload { .. } => start,
+        Work::Menu
+        | Work::Exit
+        | Work::Update(_)
+        | Work::WipeData { .. }
+        | Work::WipeCache { .. }
+        | Work::WipeAb { .. }
+        | Work::Sideload { .. }
+        | Work::Rescue
+        | Work::UnshareBlocks => start,
     };
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
     app.set_screen_corners(cfg.display.corner_radius as f32);
@@ -918,19 +1010,66 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // does erasing an update asked for, sideloaded with a restart after it;
     // what the user chose waits for them.
     let mut erase_leaves = false;
+    // Erasing all user data rescue asked for, whose end goes back to rescue
+    // rather than to a page of its own.
+    let mut rescue_erasing = false;
+    // Where rescue asked the phone to leave for, once it lets USB go.
+    let mut rescue_leaves: Option<(Target, bool)> = None;
+    // The install the system asked for, until the data partition it is in
+    // opens, or the user whose own files hold it unlocks them.
+    let mut pending: Option<Pending> = None;
+    // Work on whole partitions under way, and whether the system asked for
+    // it before the recovery started.
+    let mut part_worker: Option<partwork::Worker> = None;
     match &request.work {
-        Work::WipeData => {
-            eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true)?);
+        Work::WipeData { reformat } => {
+            eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true, reformat.clone())?);
             erase_leaves = true;
         }
-        Work::WipeCache => {
-            eraser = Some(parts_wipe(&mut app, vec![Step::Cache], &cfg.wipe.logs, true)?);
+        Work::WipeCache { reformat } => {
+            eraser = Some(parts_wipe(&mut app, vec![Step::Cache], &cfg.wipe.logs, true, reformat.clone())?);
             erase_leaves = true;
         }
         Work::Sideload { .. } => {
             app.start_sideload();
             installer = Some(Installer::start(detach(cfg.services.clone()), install_options(&app))?);
             sideloading = true;
+        }
+        Work::Rescue => {
+            app.start_rescue();
+            installer = Some(Installer::rescue(detach(cfg.services.clone()), install_options(&app))?);
+            sideloading = true;
+        }
+        Work::Update(update) => {
+            app.start_asked(update.security, update.package.clone());
+            let retry = update.retry > 0;
+            if !retry && panicked() {
+                skyward_sys::kmsg("the phone came here after its kernel stopped, so the update asked for is not installed")?;
+                app.install(skyward_install::Event::Finished(skyward_install::Outcome::Refused(skyward_install::Refusal::Panicked)), monotonic_ms());
+                bcb::clear(&misc)?;
+                kept = false;
+            } else {
+                let (package, needs) = asked::locate(&update.package, app.state.cache_partition);
+                skyward_sys::kmsg(&format!("the update asked for is {package:?}, which needs {needs:?}"))?;
+                let wanted = Pending { package, needs, retry };
+                match needs {
+                    Needs::Data | Needs::User(_) => {
+                        app.asked_opening();
+                        decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
+                        pending = Some(wanted);
+                    }
+                    Needs::Nothing | Needs::Cache => installer = Some(install_asked(cfg, &app, wanted)?),
+                }
+            }
+        }
+        Work::WipeAb { package_size } => {
+            app.part_work_started(PartKind::Disable, true);
+            part_worker = Some(partwork::Worker::start(partwork::Task::Disable { package_size: *package_size })?);
+        }
+        Work::UnshareBlocks => {
+            let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+            app.part_work_started(PartKind::Unshare, true);
+            part_worker = Some(partwork::Worker::start(partwork::Task::Unshare { slot })?);
         }
         Work::Menu | Work::Exit | Work::Fastboot | Work::PromptWipeData | Work::Unsupported(_) => {}
     }
@@ -1112,6 +1251,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(d) = &decryptor {
             fds.push(d.fd());
         }
+        if let Some(p) = &part_worker {
+            fds.push(p.fd());
+        }
         if let Some(w) = &wlan {
             fds.push(w.fd());
         }
@@ -1131,38 +1273,71 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         // What the installer and the eraser told comes first, so a touch
         // acts on the page as it now stands.
-        if let Some(i) = &installer {
-            for ev in i.events() {
+        {
+            let told = installer.as_ref().map(Installer::events).unwrap_or_default();
+            for ev in told {
                 use skyward_install::{Event as Told, Outcome};
                 let finished = matches!(ev, Told::Finished(_));
+                let installed = matches!(ev, Told::Finished(Outcome::Installed { .. } | Outcome::Ran { .. }));
                 let wipe_after = matches!(ev, Told::Finished(Outcome::Installed { wipe: true, .. }));
-                let cache_after = matches!(ev, Told::Finished(Outcome::Ran { wipe_cache: true, .. }));
+                let script_cache = matches!(ev, Told::Finished(Outcome::Ran { wipe_cache: true, .. }));
                 eprintln!("install {ev:?}");
+                match &ev {
+                    // Rescue's own erasing tells rescue how it went once it
+                    // ends; file transfer that will not let internal
+                    // storage go keeps it from starting.
+                    Told::Wipe => {
+                        ensure!(eraser.is_none(), "erasing is under way already");
+                        if withhold(&mut transfer, &mut app, now)? {
+                            eraser = Some(rescue_wipe(&mut app)?);
+                            rescue_erasing = true;
+                        } else {
+                            installer.as_ref().context("rescue asked for erasing")?.wiped(false);
+                        }
+                    }
+                    Told::Reboot(target) => rescue_leaves = Some(rescue_target(target)),
+                    _ => {}
+                }
                 app.install(ev, now);
                 if finished {
                     installer = None;
                     sideloading = false;
-                    // A sideload the system asked for is done with however
-                    // it went; asked to, the phone then leaves on its own,
-                    // once what the package asked to be erased is.
-                    let auto_reboot = matches!(request.work, Work::Sideload { auto_reboot: true });
-                    if matches!(request.work, Work::Sideload { .. }) && kept {
+                    // A sideload or an update the system asked for is done
+                    // with however it went, and so is rescue, once its page
+                    // is left or the computer asks the phone to leave. A
+                    // sideload asked to leaves on its own after it, and an
+                    // update that went in does, once what the package or the
+                    // request asked to be erased is.
+                    if matches!(request.work, Work::Sideload { .. } | Work::Update(_) | Work::Rescue) && kept {
                         bcb::clear(&misc)?;
                         kept = false;
                     }
+                    let (leaves, cache_after) = match &request.work {
+                        Work::Sideload { auto_reboot } => (*auto_reboot, script_cache),
+                        Work::Update(update) => (installed, script_cache || (installed && update.wipe_cache)),
+                        _ => (false, script_cache),
+                    };
                     if cache_after && !app.state.cache_partition {
-                        skyward_sys::kmsg("the install script asked for the cache partition to be erased, and the phone has none")?;
+                        skyward_sys::kmsg("the install asked for the cache partition to be erased, and the phone has none")?;
                     }
                     if wipe_after {
                         ensure!(eraser.is_none(), "erasing is under way already");
-                        eraser = Some(factory_reset(&mut app, false, false)?);
-                        erase_leaves = auto_reboot;
+                        eraser = Some(factory_reset(&mut app, false, false, None)?);
+                        erase_leaves = leaves;
                     } else if cache_after && app.state.cache_partition {
                         ensure!(eraser.is_none(), "erasing is under way already");
-                        eraser = Some(parts_wipe(&mut app, vec![Step::Cache], &cfg.wipe.logs, false)?);
-                        erase_leaves = auto_reboot;
-                    } else if auto_reboot {
+                        eraser = Some(parts_wipe(&mut app, vec![Step::Cache], &cfg.wipe.logs, false, None)?);
+                        erase_leaves = leaves;
+                    } else if leaves {
                         leave_at = Some(now + LEAVE_AFTER_MS);
+                    }
+                    // Rescue asked to come back is told so in misc, as
+                    // Android's own recovery tells it.
+                    if let Some((target, again)) = rescue_leaves.take() {
+                        if again {
+                            bcb::write(&misc, &bcb::Bcb { command: "boot-rescue".into(), args: Vec::new() })?;
+                        }
+                        power(target)?;
                     }
                 }
             }
@@ -1171,8 +1346,23 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(e) = &eraser {
             for ev in e.events() {
                 match ev {
+                    // Rescue's page says only that erasing is under way.
+                    wipe::Event::At(_) | wipe::Event::Progress(..) if rescue_erasing => {}
                     wipe::Event::At(step) => app.erase_at(part(step)),
                     wipe::Event::Progress(done, total) => app.erase_progress(done, total),
+                    // Rescue stays on: its request stays in misc, and the
+                    // computer hears how erasing went.
+                    wipe::Event::Ended(outcome) if rescue_erasing => {
+                        let said = outcome.as_ref().map_or_else(wipe::said, |_| "done".to_string());
+                        skyward_sys::kmsg(&format!("erasing for rescue ended: {said}"))?;
+                        installer.as_ref().context("rescue waits for erasing to end")?.wiped(outcome.is_ok());
+                        app.rescue_wiped(outcome.map_err(erase_stop), now);
+                        if app.state.data == Data::Erased {
+                            closed.clear();
+                        }
+                        rescue_erasing = false;
+                        erased = true;
+                    }
                     wipe::Event::Opened(opening) => {
                         if let Some(mounted) = &opening.mounted {
                             log_mounted(mounted)?;
@@ -1245,6 +1435,41 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if relabeled {
             relabeler = None;
+        }
+        let mut parted = false;
+        if let Some(p) = &part_worker {
+            for ev in p.events() {
+                match ev {
+                    partwork::Event::Listed(names) => app.part_listed(names),
+                    partwork::Event::At(index) => app.part_at(index),
+                    partwork::Event::Ended(index, item, said) => {
+                        skyward_sys::kmsg(&format!("partition work: item {index} ended as {item:?}"))?;
+                        app.part_ended(index, item_end(item), &said);
+                    }
+                    partwork::Event::Done(done) => {
+                        skyward_sys::kmsg(&format!("partition work ended: {done:?}"))?;
+                        let work = app.state.part_work.as_ref().context("partition work shows on its page")?;
+                        let whole = done.is_ok() && !work.items.iter().any(|(_, s)| matches!(s, ItemState::Ended(ItemEnd::Failed(_))));
+                        // What the system asked for is done with either way,
+                        // and the phone leaves on its own once it went
+                        // through every partition.
+                        if work.asked {
+                            if kept {
+                                bcb::clear(&misc)?;
+                                kept = false;
+                            }
+                            if whole {
+                                leave_at = Some(now + LEAVE_AFTER_MS);
+                            }
+                        }
+                        app.part_work_ended(done.map_err(part_stop), now);
+                        parted = true;
+                    }
+                }
+            }
+        }
+        if parted {
+            part_worker = None;
         }
         // The folder shown is read again for what the work changed.
         if worked {
@@ -1362,6 +1587,16 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 }
                 decrypt::Ended::Opened(Err(why)) => {
                     skyward_sys::kmsg(&format!("the data partition stays closed: {why}"))?;
+                    // The update the system asked for cannot be read, and
+                    // is done with.
+                    if pending.take().is_some() {
+                        let failed = skyward_install::Outcome::Failed(skyward_install::Failure::Unreadable(why.clone()));
+                        app.install(skyward_install::Event::Finished(failed), now);
+                        if kept {
+                            bcb::clear(&misc)?;
+                            kept = false;
+                        }
+                    }
                     app.data_failed(why);
                 }
                 decrypt::Ended::Unlocked(Ok(still)) => {
@@ -1371,6 +1606,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 decrypt::Ended::Unlocked(Err(why)) => {
                     skyward_sys::kmsg(&format!("what was entered did not open the user's files: {why}"))?;
                     app.unlock_failed(why, now);
+                }
+            }
+            // The update the system asked for starts once what holds it is
+            // open; until the user whose own files hold it unlocks them,
+            // its page says to.
+            if let Some(wanted) = pending.take() {
+                match wanted.needs {
+                    Needs::User(user) if closed.iter().any(|c| c.user == user) => {
+                        app.asked_locked(user, now);
+                        pending = Some(wanted);
+                    }
+                    _ => installer = Some(install_asked(cfg, &app, wanted)?),
                 }
             }
         }
@@ -1439,7 +1686,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         if !withhold(&mut transfer, &mut app, now)? {
                             continue;
                         }
-                        eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true)?);
+                        eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true, None)?);
                         erase_leaves = true;
                     }
                     // Opening the data partition and erasing it are not to
@@ -1455,13 +1702,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         }
                         erase_leaves = false;
                         if chosen.contains(&Wipe::All) {
-                            eraser = Some(factory_reset(&mut app, false, false)?);
+                            eraser = Some(factory_reset(&mut app, false, false, None)?);
                         } else if chosen.iter().any(|&w| w != Wipe::Cache) && app.state.data == Data::Erased {
                             app.erase_started(false, false, Vec::new());
                             app.erase_ended(Err(EraseStop::Erased), now);
                         } else {
                             let steps = chosen.into_iter().map(step).collect();
-                            eraser = Some(parts_wipe(&mut app, steps, &cfg.wipe.logs, false)?);
+                            eraser = Some(parts_wipe(&mut app, steps, &cfg.wipe.logs, false, None)?);
                         }
                     }
                     Effect::Install => installer.as_ref().context("no installer holds an update")?.install(),
@@ -1525,7 +1772,22 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
                         installer.as_ref().context("no installer holds an image")?.flash(partition, pick.slots(slot));
                     }
-                    Effect::Cancel => installer.as_ref().context("no installer to cancel")?.cancel()?,
+                    Effect::Cancel => match &installer {
+                        Some(i) => i.cancel()?,
+                        // The update the system asked for, waiting on the
+                        // lock of the user whose files hold it, is given up
+                        // as its page is left, and is done with.
+                        None => {
+                            ensure!(pending.take().is_some(), "no installer to cancel");
+                            skyward_sys::kmsg("the update asked for is given up, its page left")?;
+                            if kept {
+                                bcb::clear(&misc)?;
+                                kept = false;
+                            }
+                            let cancelled = skyward_install::Event::Finished(skyward_install::Outcome::Cancelled);
+                            app.install(cancelled, now);
+                        }
+                    },
                     Effect::ReadMounts => app.set_mounts(mounts()),
                     Effect::ReadSlots => app.set_boot_slots(read_slots()),
                     Effect::SetSlot(slot) => app.slot_switched(set_slot(slot), now),

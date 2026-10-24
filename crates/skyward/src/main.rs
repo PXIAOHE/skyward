@@ -18,6 +18,8 @@ mod input;
 #[cfg(target_os = "android")]
 mod merge;
 #[cfg(target_os = "android")]
+mod partwork;
+#[cfg(target_os = "android")]
 mod pty;
 #[cfg(target_os = "android")]
 mod readings;
@@ -517,6 +519,16 @@ fn recovery() -> Result<()> {
         if request.work == bcb::Work::Exit {
             return skyward_sys::power(if request.shutdown_after { Power::Off } else { Power::System });
         }
+        // An update the system asked for starts counting its starts in misc,
+        // as Android's own recovery counts them, so that one a restart cuts
+        // off is taken up again as a retry; one that follows the kernel
+        // stopping is not started at all.
+        #[cfg(target_os = "android")]
+        if let bcb::Work::Update(update) = &request.work {
+            if update.retry == 0 && !ui::panicked() {
+                bcb::write(&misc, &message.with_retry(1))?;
+            }
+        }
         // The kernel starts the clock from the RTC, days after 1970 on these
         // phones; the screen and the files written still work without the
         // real time, so a failure goes to the kernel log.
@@ -530,8 +542,11 @@ fn recovery() -> Result<()> {
             use skyward_ui::app::Screen;
             // fastbootd rewrites super, which it cannot do while the slot's
             // partitions are mapped and mounted, so fastboot runs without
-            // them and without what runs from them.
-            if request.work != bcb::Work::Fastboot {
+            // them and without what runs from them. So does work on whole
+            // partitions the system asks for, as in Android's own recovery:
+            // erasing them, which may take super with them, and undoing
+            // shared blocks, which writes to the slot's own.
+            if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
                 prepare(&cfg, booted_slot()?)?;
             }
             let root = Path::new("/");

@@ -22,6 +22,10 @@ const DATA: &str = "/data";
 const CACHE: &str = "/cache";
 const METADATA: &str = "/metadata";
 
+/// Set where the system's shared storage looks names up without regard to
+/// case, which it asks of the data partition's filesystem.
+const CASEFOLD: &str = "external_storage.casefold.enabled";
+
 /// Where the system keeps each user's apps' own data: the owner's apps
 /// in their own folder, every other user's in one named by number; then
 /// the part that reads before the user signs in.
@@ -152,23 +156,28 @@ pub struct Plan {
     data: Entry,
     cache: Option<Entry>,
     metadata: Entry,
+    /// The filesystem each partition is made afresh as, where the system
+    /// asked for one.
+    reformat: Option<String>,
 }
 
 /// Find what a factory reset erases: the data partition, the cache
 /// partition where the phone has one, and /metadata. An update the system
 /// has still to finish holds it back, as Android's own recovery is held back
 /// by one it cannot finish for the system. The data partition is erased
-/// only as one the system makes afresh as it starts.
-pub fn factory_reset() -> Result<Plan, Stop> {
+/// only as one the system makes afresh as it starts, unless `reformat`
+/// names the filesystem the system asked for it to be made as here.
+pub fn factory_reset(reformat: Option<String>) -> Result<Plan, Stop> {
     let plan = (|| -> Result<Result<Plan, Refusal>> {
         if let Some(hold) = update_hold()? {
             return Ok(Err(Refusal::Update(hold)));
         }
         let data = first(DATA)?;
-        if data.extra("keydirectory").is_none() || !data.extras.iter().any(|e| e == "formattable") {
+        let rebuilt = data.extra("keydirectory").is_some() && data.extras.iter().any(|e| e == "formattable");
+        if !rebuilt && reformat.is_none() {
             return Ok(Err(Refusal::NotRebuilt));
         }
-        Ok(Ok(Plan { data, cache: cache()?, metadata: first(METADATA)? }))
+        Ok(Ok(Plan { data, cache: cache()?, metadata: first(METADATA)?, reformat }))
     })();
     match plan {
         Ok(Ok(plan)) => Ok(plan),
@@ -204,19 +213,28 @@ impl Plan {
     /// Erase each part, telling `tell` of each as it begins. The programs
     /// holding the data partition end and the partition is closed; then it
     /// is discarded whole, and the system makes it afresh under a new key
-    /// the next time it starts. Unless `keep_memtag_mode`, the memory
-    /// tagging asked of the bootloader is forgotten too.
+    /// the next time it starts. Asked for another filesystem, every part is
+    /// made afresh as it here instead, as Android's own recovery makes them:
+    /// the data partition on the partition itself, which a system that
+    /// encrypts it whole encrypts again as it next starts. Unless
+    /// `keep_memtag_mode`, the memory tagging asked of the bootloader is
+    /// forgotten too.
     pub fn carry_out(self, keep_memtag_mode: bool, tell: &mut dyn FnMut(Event)) -> Result<(), Stop> {
         tell(Event::At(Step::Data));
         release_data().map_err(failed(Step::Data))?;
         let device = fstab::device(&self.data).map_err(failed(Step::Data))?;
-        erase::discard(Path::new(&device)).map_err(failed(Step::Data))?;
+        match &self.reformat {
+            Some(filesystem) => erase::make(Path::new(&device), filesystem, &self.data.extras, casefolds(&self.data)),
+            None => erase::discard(Path::new(&device)),
+        }
+        .map_err(failed(Step::Data))?;
+        let made_as = |entry: &Entry| self.reformat.clone().unwrap_or_else(|| entry.filesystem.clone());
         if let Some(cache) = &self.cache {
             tell(Event::At(Step::Cache));
-            remake_cache(cache).map_err(failed(Step::Cache))?;
+            remake_cache(cache, &made_as(cache)).map_err(failed(Step::Cache))?;
         }
         tell(Event::At(Step::Metadata));
-        remake(&self.metadata).map_err(failed(Step::Metadata))?;
+        remake(&self.metadata, &made_as(&self.metadata)).map_err(failed(Step::Metadata))?;
         if !keep_memtag_mode {
             bcb::forget_memtag_mode(&bcb::misc()).map_err(failed(Step::Metadata))?;
         }
@@ -231,12 +249,16 @@ pub struct Parts {
     cache: Option<Entry>,
     /// The phone's own log folders in the data partition.
     logs: Vec<PathBuf>,
+    /// The filesystem the cache partition is made afresh as, where the
+    /// system asked for one.
+    reformat: Option<String>,
 }
 
 /// Find the parts to erase on their own, in the order given: the cache
-/// partition only where the phone has one. `logs` are the phone's own log
+/// partition only where the phone has one, made afresh as `reformat` where
+/// the system asked for that filesystem. `logs` are the phone's own log
 /// folders in the data partition.
-pub fn parts(steps: Vec<Step>, logs: &[String]) -> Result<Parts, Stop> {
+pub fn parts(steps: Vec<Step>, logs: &[String], reformat: Option<String>) -> Result<Parts, Stop> {
     assert!(
         steps.iter().all(|s| !matches!(s, Step::Data | Step::Metadata)),
         "the data partition and /metadata are erased whole only by a factory reset, not {steps:?}"
@@ -245,7 +267,7 @@ pub fn parts(steps: Vec<Step>, logs: &[String]) -> Result<Parts, Stop> {
         false => None,
         true => Some(cache().map_err(failed(Step::Cache))?.ok_or(Stop::Refused(Refusal::NoCache))?),
     };
-    Ok(Parts { steps, cache, logs: logs.iter().map(PathBuf::from).collect() })
+    Ok(Parts { steps, cache, logs: logs.iter().map(PathBuf::from).collect(), reformat })
 }
 
 impl Parts {
@@ -286,7 +308,10 @@ impl Parts {
                 Step::Art => clear_files(&ART_CACHES.map(PathBuf::from), tell),
                 Step::Logs => users.logs(&self.logs).and_then(|folders| clear_files(&folders, tell)),
                 Step::Updates => clear_files(&[PathBuf::from(UPDATES)], tell),
-                Step::Cache => remake_cache(self.cache.as_ref().expect("the cache partition was found as the parts were")),
+                Step::Cache => {
+                    let cache = self.cache.as_ref().expect("the cache partition was found as the parts were");
+                    remake_cache(cache, self.reformat.as_deref().unwrap_or(&cache.filesystem))
+                }
                 Step::Data | Step::Metadata => unreachable!("only a factory reset erases {step:?}"),
             };
             erased.map_err(failed(step))?;
@@ -471,13 +496,21 @@ fn first(mount_point: &str) -> Result<Entry> {
     fstab::read(mount_point)?.into_iter().next().with_context(|| format!("the phone's table has no {mount_point}"))
 }
 
-/// Make the filesystem an entry names afresh, with nothing mounted from it.
-pub fn remake(entry: &Entry) -> Result<()> {
+/// Make the partition an entry names afresh as `filesystem`, with nothing
+/// mounted from it.
+pub fn remake(entry: &Entry, filesystem: &str) -> Result<()> {
     let at = Path::new(&entry.mount_point);
     if mount::is_mount_point(at)? {
         mount::umount(at)?;
     }
-    erase::make(Path::new(&fstab::device(entry)?), &entry.filesystem, &entry.extras, false)
+    erase::make(Path::new(&fstab::device(entry)?), filesystem, &entry.extras, casefolds(entry))
+}
+
+/// Whether the filesystem made for an entry looks names up without regard
+/// to case: the data partition's, where the system's shared storage asks
+/// for it, as Android's own recovery makes it.
+fn casefolds(entry: &Entry) -> bool {
+    entry.mount_point == DATA && skyward_sys::bool_prop(CASEFOLD, false)
 }
 
 /// Let go of the data partition: every program but this one holding what is
@@ -644,18 +677,21 @@ fn give(path: &Path, look: &Look) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(look.mode)).with_context(|| format!("give {} its permissions", path.display()))
 }
 
-/// Make the cache partition afresh, keeping the recovery's logs on it as
-/// Android's own recovery keeps them: the earlier ones and the last, each up
-/// to [`LOG_KEPT`], back in their folder with the owners, permissions and
-/// labels they had. A partition that no longer mounts has none to keep.
-pub fn remake_cache(entry: &Entry) -> Result<()> {
+/// Make the cache partition afresh as `filesystem`, keeping the recovery's
+/// logs on it as Android's own recovery keeps them: the earlier ones and the
+/// last, each up to [`LOG_KEPT`], back in their folder with the owners,
+/// permissions and labels they had. A partition that no longer mounts has
+/// none to keep.
+pub fn remake_cache(entry: &Entry, filesystem: &str) -> Result<()> {
     let at = Path::new(&entry.mount_point);
     let device = PathBuf::from(fstab::device(entry)?);
     let kept = read_logs(&device, at)?;
-    remake(entry)?;
+    remake(entry, filesystem)?;
     let Some((folder, logs)) = kept else { return Ok(()) };
     fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
-    mount::mount(&device, at, &entry.filesystem, &entry.options)?;
+    // The table's options are for the filesystem it names.
+    let options: &[String] = if filesystem == entry.filesystem { &entry.options } else { &[] };
+    mount::mount(&device, at, filesystem, options)?;
     let written = (|| -> Result<()> {
         let dir = at.join(CACHE_LOGS);
         fs::create_dir(&dir).with_context(|| format!("make {}", dir.display()))?;
@@ -983,16 +1019,26 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
-    fn on_the_phone_the_cache_partition_is_made_afresh_with_the_recoverys_logs_kept() {
-        let root = scratch("cache");
+    /// A cache partition on a loop device, made as ext4 and holding the
+    /// recovery's logs as Android's own recovery leaves them among other
+    /// files, unmounted, with its entry in the phone's table.
+    struct Cache {
+        root: PathBuf,
+        device: String,
+        entry: Entry,
+        /// The device, held open so nothing lets it go before the test does.
+        held: fs::File,
+        /// The label the earlier log carries.
+        labelled: Option<Vec<u8>>,
+    }
+
+    fn cache_with_logs(test: &str) -> Cache {
+        let root = scratch(test);
         let image = root.join("cache.img");
-        fs::File::create(&image).unwrap().set_len(32 << 20).unwrap();
+        fs::File::create(&image).unwrap().set_len(128 << 20).unwrap();
         let out = std::process::Command::new("/system/bin/losetup").args(["-f", "--show"]).arg(&image).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let device = String::from_utf8(out.stdout).unwrap().trim().to_string();
-        // Held open throughout, so nothing lets the device go before the
-        // test does.
         let held = fs::File::open(&device).unwrap();
         erase::make(Path::new(&device), "ext4", &[], false).unwrap();
         let at = root.join("mnt");
@@ -1018,24 +1064,46 @@ mod tests {
         fs::write(at.join("stray"), b"cached").unwrap();
         let labelled = label(&logs.join("last_log.1")).unwrap();
         mount::umount(&at).unwrap();
+        Cache { root, device, entry, held, labelled }
+    }
 
-        remake_cache(&entry).unwrap();
+    impl Cache {
+        /// Check that the cache partition, made afresh as `filesystem`,
+        /// holds the logs as they were and nothing else, and let it go.
+        fn holds_the_logs_alone(self, filesystem: &str) {
+            let at = PathBuf::from(&self.entry.mount_point);
+            let logs = at.join(CACHE_LOGS);
+            assert_eq!(skyward_block::probe::filesystem(Path::new(&self.device)).unwrap().as_deref(), Some(filesystem));
+            mount::mount(Path::new(&self.device), &at, filesystem, &[]).unwrap();
+            assert!(!at.join("stray").exists(), "the rest is gone");
+            assert!(!logs.join("command").exists(), "only the logs are kept");
+            assert_eq!(fs::read(logs.join("last_kmsg")).unwrap().len(), LOG_KEPT, "each up to the most kept");
+            assert_eq!(fs::read(logs.join("last_log.1")).unwrap(), b"an earlier log");
+            assert_eq!(fs::read(logs.join("log")).unwrap(), b"this one");
+            let earlier = fs::metadata(logs.join("last_log.1")).unwrap();
+            assert_eq!((earlier.uid(), earlier.gid(), earlier.mode() & 0o7777), (1000, 2001, 0o640));
+            let folder = fs::metadata(&logs).unwrap();
+            assert_eq!((folder.uid(), folder.gid(), folder.mode() & 0o7777), (1000, 2001, 0o770));
+            assert_eq!(label(&logs.join("last_log.1")).unwrap(), self.labelled, "with the label it had");
+            mount::umount(&at).unwrap();
+            drop(self.held);
+            let detached = std::process::Command::new("/system/bin/losetup").args(["-d", &self.device]).status().unwrap();
+            assert!(detached.success(), "let {} go", self.device);
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
 
-        mount::mount(Path::new(&device), &at, "ext4", &[]).unwrap();
-        assert!(!at.join("stray").exists(), "the rest is gone");
-        assert!(!logs.join("command").exists(), "only the logs are kept");
-        assert_eq!(fs::read(logs.join("last_kmsg")).unwrap().len(), LOG_KEPT, "each up to the most kept");
-        assert_eq!(fs::read(logs.join("last_log.1")).unwrap(), b"an earlier log");
-        assert_eq!(fs::read(logs.join("log")).unwrap(), b"this one");
-        let earlier = fs::metadata(logs.join("last_log.1")).unwrap();
-        assert_eq!((earlier.uid(), earlier.gid(), earlier.mode() & 0o7777), (1000, 2001, 0o640));
-        let folder = fs::metadata(&logs).unwrap();
-        assert_eq!((folder.uid(), folder.gid(), folder.mode() & 0o7777), (1000, 2001, 0o770));
-        assert_eq!(label(&logs.join("last_log.1")).unwrap(), labelled, "with the label it had");
-        mount::umount(&at).unwrap();
-        drop(held);
-        let detached = std::process::Command::new("/system/bin/losetup").args(["-d", &device]).status().unwrap();
-        assert!(detached.success(), "let {device} go");
-        fs::remove_dir_all(&root).unwrap();
+    #[test]
+    fn on_the_phone_the_cache_partition_is_made_afresh_with_the_recoverys_logs_kept() {
+        let cache = cache_with_logs("cache");
+        remake_cache(&cache.entry, "ext4").unwrap();
+        cache.holds_the_logs_alone("ext4");
+    }
+
+    #[test]
+    fn on_the_phone_the_cache_partition_made_afresh_as_another_filesystem_keeps_the_logs() {
+        let cache = cache_with_logs("cache-f2fs");
+        remake_cache(&cache.entry, "f2fs").unwrap();
+        cache.holds_the_logs_alone("f2fs");
     }
 }

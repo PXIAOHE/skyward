@@ -30,6 +30,21 @@ pub fn prop(_name: &str) -> Option<String> {
     None
 }
 
+/// A system property read as a yes or a no, the way Android reads one;
+/// `default` where it is unset or says neither.
+pub fn bool_prop(name: &str, default: bool) -> bool {
+    yes_or_no(prop(name).as_deref()).unwrap_or(default)
+}
+
+/// What a property's value says, as Android reads a yes or a no.
+fn yes_or_no(value: Option<&str>) -> Option<bool> {
+    match value? {
+        "1" | "y" | "yes" | "on" | "true" => Some(true),
+        "0" | "n" | "no" | "off" | "false" => Some(false),
+        _ => None,
+    }
+}
+
 /// Every system property whose name starts with `prefix`, with its value.
 #[cfg(target_os = "android")]
 pub fn props(prefix: &str) -> Vec<(String, String)> {
@@ -235,5 +250,18 @@ mod tests {
             assert_eq!(Power::parse(name).unwrap().command(), cmd);
         }
         assert_eq!(Power::parse("download"), None);
+    }
+
+    #[test]
+    fn a_property_says_yes_or_no_in_the_words_android_takes() {
+        for yes in ["1", "y", "yes", "on", "true"] {
+            assert_eq!(yes_or_no(Some(yes)), Some(true), "{yes}");
+        }
+        for no in ["0", "n", "no", "off", "false"] {
+            assert_eq!(yes_or_no(Some(no)), Some(false), "{no}");
+        }
+        assert_eq!(yes_or_no(Some("True")), None, "the words are read as written");
+        assert_eq!(yes_or_no(Some("")), None);
+        assert_eq!(yes_or_no(None), None);
     }
 }

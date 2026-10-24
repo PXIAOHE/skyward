@@ -80,6 +80,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Editor => editor(cx),
         Screen::Terminal => terminal(cx),
         Screen::Relabel => relabel(cx),
+        Screen::PartWork => part_work(cx),
         Screen::Language => language(cx),
         Screen::TimeZone => time_zone(cx),
         Screen::Logs => logs(cx),
@@ -723,6 +724,9 @@ fn install_title(source: Source) -> &'static str {
         Source::Computer => "通过电脑安装",
         Source::File(Place::Storage) => "从内部存储安装",
         Source::File(Place::UsbDrive) => "从 U 盘安装",
+        Source::Asked { security: false } => "安装系统更新",
+        Source::Asked { security: true } => "安装安全更新",
+        Source::Rescue => "救援模式",
     }
 }
 
@@ -831,8 +835,34 @@ pub fn installing(cx: &Ctx) -> Frame {
             let row = standing("正在切换 USB 模式", GREEN, Icon::Usb, "从 adb 调试切换到 sideload 模式");
             widgets::list(&mut c, t, f, top, &[row]).bottom
         }
+        Install::Idle | Install::Starting | Install::Ending if s.source == Source::Rescue => {
+            let row = standing("正在切换 USB 模式", GREEN, Icon::Usb, "从 adb 调试切换到救援模式");
+            widgets::list(&mut c, t, f, top, &[row]).bottom
+        }
         Install::Idle | Install::Starting | Install::Ending => {
             widgets::list(&mut c, t, f, top, &[Row::new("正在读取文件").icon(GREEN, Icon::Install).trail(Trail::None)]).bottom
+        }
+        Install::Opening => {
+            let y = widgets::list(&mut c, t, f, top, &[Row::new("正在打开 data 分区").icon(GREEN, Icon::Lock).trail(Trail::None)]).bottom;
+            asked_package(&mut c, cx, y)
+        }
+        Install::Locked(_) => {
+            let y = widgets::list(&mut c, t, f, top, &[standing("暂无法读取更新包", ORANGE, Icon::Lock, "需先完成「解密」")]).bottom;
+            let open = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new("解密")]);
+            out.extend(hits(&open.rows, &[Action::Open(Screen::Decrypt)]));
+            let y = widgets::footnote(&mut c, t, f, open.bottom, "解密后将自动安装。");
+            asked_package(&mut c, cx, y)
+        }
+        Install::Waiting if s.source == Source::Rescue => {
+            let row = standing("等待电脑发送", GREEN, Icon::Usb, "请用数据线连接电脑，并在电脑上运行以下命令");
+            let y = widgets::list(&mut c, t, f, top, &[row]).bottom;
+            let y = widgets::section(&mut c, t, f, y, "在电脑上运行");
+            let y = widgets::info_card(&mut c, t, f, y, &[
+                ("adb rescue install 文件名", "将文件名替换为系统更新包、刷机包或分区镜像".into()),
+                ("adb rescue getprop", "读取本机的版本和设备信息".into()),
+                ("adb rescue wipe userdata", "清除本机的全部数据".into()),
+            ]);
+            widgets::footnote(&mut c, t, f, y, "需在电脑上安装 Android SDK Platform-Tools。返回后将退出救援模式，并将 USB 切换回 adb 调试。")
         }
         Install::Waiting => {
             let row = standing("等待电脑发送", GREEN, Icon::Usb, "请用数据线连接电脑，并在电脑上运行以下命令");
@@ -849,7 +879,8 @@ pub fn installing(cx: &Ctx) -> Frame {
             let y = widgets::progress_card(&mut c, t, f, top, "正在验证签名", &format!("已读取 {}%", percent(read)), Some(read));
             let note = match s.source {
                 Source::Computer => "读取完成前，请不要断开数据线。返回将取消安装，并结束电脑上的 adb sideload。",
-                Source::File(Place::Storage) => "返回将取消安装。",
+                Source::Rescue => "读取完成前，请不要断开数据线。返回将取消安装，并退出救援模式。",
+                Source::File(Place::Storage) | Source::Asked { .. } => "返回将取消安装。",
                 Source::File(Place::UsbDrive) => "读取完成前，请不要拔出 U 盘。返回将取消安装。",
             };
             widgets::footnote(&mut c, t, f, y, note)
@@ -858,8 +889,8 @@ pub fn installing(cx: &Ctx) -> Frame {
             let detail = format!("文件大小 {}", fmt::bytes(*size));
             let y = widgets::list(&mut c, t, f, top, &[standing("正在读取文件", GREEN, Icon::Install, &detail)]).bottom;
             match s.source {
-                Source::Computer => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要断开数据线。"),
-                Source::File(Place::Storage) => y,
+                Source::Computer | Source::Rescue => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要断开数据线。"),
+                Source::File(Place::Storage) | Source::Asked { .. } => y,
                 Source::File(Place::UsbDrive) => widgets::footnote(&mut c, t, f, y, "读取完成前，请不要拔出 U 盘。"),
             }
         }
@@ -886,10 +917,10 @@ pub fn installing(cx: &Ctx) -> Frame {
             let (label, danger) = confirm_label(Confirm::Flash);
             let track = widgets::confirm(&mut c, t, f, picks.bottom + t.m.dp(28.0), label, danger, s.confirm);
             out.push(Hit { rect: track, action: Action::Confirm(Confirm::Flash) });
-            let note = if computer {
-                "刷入将覆盖分区中的原有内容。返回将取消刷入，并结束电脑上的 adb sideload。"
-            } else {
-                "刷入将覆盖分区中的原有内容。返回将取消刷入。"
+            let note = match s.source {
+                Source::Computer => "刷入将覆盖分区中的原有内容。返回将取消刷入，并结束电脑上的 adb sideload。",
+                Source::Rescue => "刷入将覆盖分区中的原有内容。返回将取消刷入，并退出救援模式。",
+                Source::File(_) | Source::Asked { .. } => "刷入将覆盖分区中的原有内容。返回将取消刷入。",
             };
             widgets::footnote(&mut c, t, f, track.y + track.h, note)
         }
@@ -943,8 +974,8 @@ pub fn installing(cx: &Ctx) -> Frame {
             };
             let y = widgets::progress_card(&mut c, t, f, top, &format!("正在刷入 {partition}"), &detail, done);
             let keep = match s.source {
-                Source::Computer => "刷入完成前，请不要断开数据线。",
-                Source::File(Place::Storage) => "刷入完成前，请不要关机。",
+                Source::Computer | Source::Rescue => "刷入完成前，请不要断开数据线。",
+                Source::File(Place::Storage) | Source::Asked { .. } => "刷入完成前，请不要关机。",
                 Source::File(Place::UsbDrive) => "刷入完成前，请不要拔出 U 盘。",
             };
             widgets::footnote(&mut c, t, f, y, keep)
@@ -967,16 +998,47 @@ pub fn installing(cx: &Ctx) -> Frame {
             let y = widgets::footnote(&mut c, t, f, y, until_installed(s.source));
             script_output(&mut c, cx, y, &mut rows)
         }
+        Install::Wiping => {
+            let y = widgets::progress_card(&mut c, t, f, top, "正在清除", &factory_reset(s), None);
+            widgets::footnote(&mut c, t, f, y, "清除完成前，请不要关机。")
+        }
+        Install::Wiped(Ok(())) => {
+            let y = widgets::list(&mut c, t, f, top, &[standing("已清除", GREEN, Icon::Wipe, "下次开机时将重新创建 data 分区")]).bottom;
+            widgets::footnote(&mut c, t, f, y, MORE_COMMANDS)
+        }
+        Install::Wiped(Err(stop)) => {
+            let (what, detail) = fmt::erase_stop(stop);
+            let mut y = widgets::list(&mut c, t, f, top, &[standing("清除未完成", RED, Icon::Wipe, &what)]).bottom;
+            if let Some(d) = detail {
+                y = widgets::footnote(&mut c, t, f, y, &d);
+            }
+            widgets::footnote(&mut c, t, f, y, MORE_COMMANDS)
+        }
         Install::Finished { outcome, damage } => finished(&mut c, cx, top, outcome, *damage, &mut out, &mut rows),
     };
+    // What the system asked for says why, where it said.
+    let bottom = match (s.source, &s.asked.reason) {
+        (Source::Asked { .. }, Some(reason)) => widgets::info_card(&mut c, t, f, bottom + t.m.dp(12.0), &[("原因", reason.clone())]),
+        _ => bottom,
+    };
     Frame { rows, ..Frame::new(t, fit(c, t, bottom), out, install_title(s.source), top) }
+}
+
+/// What rescue says once a command is done with: the computer may send
+/// another.
+const MORE_COMMANDS: &str = "你可以继续在电脑上发送命令。";
+
+/// The package the system asked for, by the path it gave, at `y`.
+fn asked_package(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
+    let name = cx.state.package_name.clone().unwrap_or_default();
+    widgets::info_card(c, cx.t, cx.f, y + cx.t.m.dp(12.0), &[("更新包", name)])
 }
 
 /// What not to do while a package from `source` is installed.
 fn until_installed(source: Source) -> &'static str {
     match source {
-        Source::Computer => "安装完成前，请不要断开数据线或关机。",
-        Source::File(Place::Storage) => "安装完成前，请不要关机。",
+        Source::Computer | Source::Rescue => "安装完成前，请不要断开数据线或关机。",
+        Source::File(Place::Storage) | Source::Asked { .. } => "安装完成前，请不要关机。",
         Source::File(Place::UsbDrive) => "安装完成前，请不要拔出 U 盘或关机。",
     }
 }
@@ -997,6 +1059,8 @@ fn finished(
     let (again, another) = match source {
         Source::Computer => (Row::new("再次发送").icon(GREEN, Icon::Usb), Action::Sideload),
         Source::File(_) => (Row::new("选择其他文件").icon(GREEN, Icon::Folder), Action::Back),
+        Source::Asked { .. } => (Row::new("选择其他文件").icon(GREEN, Icon::Folder), Action::Open(Screen::Install)),
+        Source::Rescue => (Row::new("退出救援模式").icon(GREEN, Icon::Usb), Action::Back),
     };
     let restart = Row::new("重启到系统").icon(ORANGE, Icon::Power);
     match outcome {
@@ -1005,7 +1069,8 @@ fn finished(
             let y = widgets::list(c, t, f, top, &[standing("安装成功", GREEN, Icon::Install, &detail)]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[restart]);
             out.extend(hits(&next.rows, &[Action::RebootTo(Target::System)]));
-            reflashed(c, cx, next.bottom)
+            let y = reflashed(c, cx, next.bottom);
+            afterwards_of(c, cx, y, true)
         }
         Outcome::Flashed { partition, slots } => {
             let detail = format!("{partition} 已刷入{}。", fmt::slots(slots));
@@ -1020,13 +1085,14 @@ fn finished(
             acts.push(another);
             let next = widgets::list(c, t, f, y + gap, &rows);
             out.extend(hits(&next.rows, &acts));
-            next.bottom
+            afterwards_of(c, cx, next.bottom, true)
         }
         Outcome::Ran { .. } => {
             let y = widgets::list(c, t, f, top, &[standing("安装成功", GREEN, Icon::Install, "安装脚本已运行完成。")]).bottom;
             let next = widgets::list(c, t, f, y + gap, &[restart, again]);
             out.extend(hits(&next.rows, &[Action::RebootTo(Target::System), another]));
             let y = reflashed(c, cx, next.bottom);
+            let y = afterwards_of(c, cx, y, true);
             script_output(c, cx, y, rows)
         }
         Outcome::Cancelled => {
@@ -1038,9 +1104,16 @@ fn finished(
         Outcome::Refused(r) => {
             let reason = fmt::refusal(r, &cx.info.codename, source, cx.state.time_zone);
             let y = widgets::list(c, t, f, top, &[standing("无法安装", ORANGE, Icon::Install, &reason)]).bottom;
-            let next = widgets::list(c, t, f, y + gap, &[again]);
-            out.extend(hits(&next.rows, &[another]));
-            widgets::footnote(c, t, f, next.bottom, "未写入任何内容。")
+            // What the system asked for and did not go in leaves the phone
+            // where it was, from which it may go back to the system.
+            let (rows, acts) = match source {
+                Source::Asked { .. } => (vec![again, restart], vec![another, Action::RebootTo(Target::System)]),
+                _ => (vec![again], vec![another]),
+            };
+            let next = widgets::list(c, t, f, y + gap, &rows);
+            out.extend(hits(&next.rows, &acts));
+            let y = widgets::footnote(c, t, f, next.bottom, "未写入任何内容。");
+            afterwards_of(c, cx, y, false)
         }
         Outcome::Failed(failure) => {
             let (what, detail) = fmt::failure(failure, source);
@@ -1048,8 +1121,8 @@ fn finished(
             let next = widgets::list(c, t, f, y + gap, &[again, restart]);
             out.extend(hits(&next.rows, &[another, Action::RebootTo(Target::System)]));
             let redo = match source {
-                Source::Computer => ("重新发送", "重新发送"),
-                Source::File(_) => ("重新安装", "重新刷入"),
+                Source::Computer | Source::Rescue => ("重新发送", "重新发送"),
+                Source::File(_) | Source::Asked { .. } => ("重新安装", "重新刷入"),
             };
             let warning = match damage {
                 Some(Damage::System) => format!("当前系统已被部分覆盖，重启后将无法进入系统。请{}完整更新包，安装完成后再重启。", redo.0),
@@ -1062,8 +1135,21 @@ fn finished(
                 y = widgets::footnote(c, t, f, y, &d);
             }
             let y = reflashed(c, cx, y);
+            let y = afterwards_of(c, cx, y, false);
             script_output(c, cx, y, rows)
         }
+    }
+}
+
+/// What comes after an install, where it is not the user's to choose:
+/// rescue waits for the computer's next command, and a package the system
+/// asked for, once in, has the phone leave on its own.
+fn afterwards_of(c: &mut Canvas, cx: &Ctx, y: f32, installed: bool) -> f32 {
+    let end = if cx.state.asked.shutdown_after { "关机" } else { "重启" };
+    match cx.state.source {
+        Source::Rescue => widgets::footnote(c, cx.t, cx.f, y, MORE_COMMANDS),
+        Source::Asked { .. } if installed => widgets::footnote(c, cx.t, cx.f, y, &format!("即将自动{end}。")),
+        _ => y,
     }
 }
 
@@ -1572,6 +1658,117 @@ pub fn relabel(cx: &Ctx) -> Frame {
     Frame { back: job.outcome.is_some(), ..Frame::new(t, c, out, title, top) }
 }
 
+/// Work on whole partitions: each partition and where it stands, what the
+/// program said of the last, and once it has ended, how. What the system
+/// asked for leaves on its own once it went through every partition, and
+/// offers where to go otherwise; other work goes back to the page it came
+/// from.
+pub fn part_work(cx: &Ctx) -> Frame {
+    use crate::app::{ItemEnd, ItemState, PartKind};
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let work = s.part_work.as_ref().expect("the page of partition work shows work");
+    let mut c = long_page(cx);
+    let (mut out, mut rows) = (Vec::new(), None);
+    let top = t.m.content_top;
+    // Work on one partition fails; work through several may get partway.
+    let (title, verb, several) = match &work.kind {
+        PartKind::Disable => ("清除分区", "清除", true),
+        PartKind::Unshare => ("取消数据块共享", "处理", true),
+    };
+    let failed = |state: &ItemState| matches!(state, ItemState::Ended(ItemEnd::Failed(_)));
+    let short = matches!(work.outcome, Some(Err(_))) || work.items.iter().any(|(_, state)| failed(state));
+    let heading = match (&work.outcome, short, several) {
+        (None, _, _) => format!("正在{verb}"),
+        (Some(_), false, _) => format!("{verb}完成"),
+        (Some(_), true, true) => format!("{verb}未完成"),
+        (Some(_), true, false) => format!("{verb}失败"),
+    };
+    let mut y = widgets::section_first(&mut c, t, f, top, &heading);
+    if !work.items.is_empty() {
+        let states: Vec<String> = work
+            .items
+            .iter()
+            .map(|(_, state)| match state {
+                ItemState::Waiting if work.outcome.is_some() => format!("未{verb}"),
+                ItemState::Waiting => "等待中".into(),
+                ItemState::Working => format!("正在{verb}"),
+                ItemState::Ended(end) => fmt::item_end(end, verb),
+            })
+            .collect();
+        let held: Vec<Option<&str>> = work
+            .items
+            .iter()
+            .map(|(_, state)| match state {
+                ItemState::Ended(ItemEnd::NotShared(fs)) if !fs.is_empty() => Some(fs.as_str()),
+                _ => None,
+            })
+            .collect();
+        let shown: Vec<Row> = work
+            .items
+            .iter()
+            .zip(&states)
+            .zip(&held)
+            .map(|(((name, _), state), held)| {
+                let row = Row::new(name).trail(Trail::Text(state));
+                match held {
+                    Some(fs) => row.subtitle(fs),
+                    None => row,
+                }
+            })
+            .collect();
+        y = widgets::list(&mut c, t, f, y, &shown).bottom;
+    }
+    let end = if s.asked.shutdown_after { "关机" } else { "重启" };
+    let mut notes: Vec<String> = Vec::new();
+    match &work.outcome {
+        None if work.asked => notes.push(format!("完成后将自动{end}。")),
+        None => notes.push(format!("{verb}完成前，请不要关机。")),
+        Some(Err(stop)) => {
+            let (what, detail) = fmt::part_stop(stop, &cx.info.codename);
+            notes.push(what);
+            notes.extend(detail);
+        }
+        Some(Ok(())) => {}
+    }
+    for (name, state) in &work.items {
+        if let ItemState::Ended(ItemEnd::Failed(Some(why))) = state {
+            notes.push(format!("{}：{why}", fmt::spaced(verb, name, "失败")));
+        }
+    }
+    for note in &notes {
+        y = widgets::footnote(&mut c, t, f, y, note);
+    }
+    if let (true, Some(reason)) = (work.asked, &s.asked.reason) {
+        y = widgets::info_card(&mut c, t, f, y + t.m.dp(12.0), &[("原因", reason.clone())]);
+    }
+    match (&work.outcome, work.asked) {
+        (None, _) => {}
+        (Some(_), true) if !short => {}
+        // The system's work ran without the slot's partitions, which going
+        // on in the recovery brings up first, as leaving fastboot does.
+        (Some(_), true) => {
+            let below = widgets::section(&mut c, t, f, y, "操作");
+            let rows: Vec<Row> = AFTERWARDS.iter().map(|&(title, _)| Row::new(title).trail(Trail::None)).collect();
+            let actions = AFTERWARDS.map(|(_, action)| if action == Action::Dismiss { Action::EnterRecovery } else { action });
+            let choices = widgets::list(&mut c, t, f, below, &rows);
+            out.extend(hits(&choices.rows, &actions));
+            y = choices.bottom;
+        }
+        (Some(_), false) => {
+            let finish = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new("完成").trail(Trail::None)]);
+            out.extend(hits(&finish.rows, &[Action::Back]));
+            y = finish.bottom;
+        }
+    }
+    if !work.output.is_empty() {
+        let below = widgets::section(&mut c, t, f, y, "程序输出");
+        rows = Some(Rows { edges: widgets::output_edges(&c, t, f, below, &work.output), action: None });
+        y = below;
+    }
+    let back = work.outcome.is_some() && !work.asked;
+    Frame { rows, back, ..Frame::new(t, fit(c, t, y), out, title, top) }
+}
+
 /// The system on the phone now; the newest system the phone maker's
 /// server knows, and downloading its full package to install it; and
 /// where an update the system installed stands, merging it into the slot it
@@ -1982,6 +2179,10 @@ pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
             files::row(c, cx.t, cx.f, &entries[i], folder.listed, cx.state.time_zone);
         }
         Screen::Installing => widgets::output_row(c, cx.t, cx.f, &cx.state.script_output, i),
+        Screen::PartWork => {
+            let work = cx.state.part_work.as_ref().expect("the page of partition work shows work");
+            widgets::output_row(c, cx.t, cx.f, &work.output, i)
+        }
         other => unreachable!("{other:?} draws no list row by row"),
     }
 }

@@ -16,7 +16,7 @@ use crate::term::{self, Term, TermKey};
 use crate::theme::Theme;
 use crate::widgets::{self, Bar, Cap, Layer, WlanMark};
 use skyward_info::DeviceInfo;
-use skyward_install::{Event, ImageKind, Outcome, Reflash, Stage};
+use skyward_install::{Event, ImageKind, Outcome, Reflash, Refusal, Stage};
 use skyward_net::download::{Failure, Progress};
 use skyward_net::release::Release;
 use skyward_net::supplicant::Security;
@@ -68,6 +68,9 @@ pub enum Screen {
     /// system's rules give them: what it does and a swipe to start, then
     /// how far it has come and how it ended.
     Relabel,
+    /// Work on whole partitions under way, and how it ended: what the
+    /// system asked for before the recovery started.
+    PartWork,
     Language,
     TimeZone,
     /// Saving the logs, as a bug report asks for them.
@@ -235,6 +238,11 @@ pub enum Source {
     Computer,
     /// A file chosen in a place.
     File(Place),
+    /// A package on the phone the system asked to be installed before the
+    /// recovery started; `security` for a security update.
+    Asked { security: bool },
+    /// The computer, with `adb rescue`.
+    Rescue,
 }
 
 /// What can be done with an entry picked in the file manager.
@@ -316,6 +324,65 @@ pub struct RelabelJob {
     pub outcome: Option<JobEnd>,
     /// Stopping was asked for and is under way.
     pub stopping: bool,
+}
+
+/// Work on whole partitions one after another, as its page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartWork {
+    pub kind: PartKind,
+    /// The system asked for it before the recovery started: done, the phone
+    /// leaves on its own.
+    pub asked: bool,
+    /// The partitions it goes through, once known, and where each stands.
+    pub items: Vec<(String, ItemState)>,
+    /// What the program that worked on the last of them said.
+    pub output: Vec<String>,
+    /// How it ended: done, or why it stopped before going through the
+    /// partitions.
+    pub outcome: Option<Result<(), PartStop>>,
+}
+
+/// What partition work does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartKind {
+    /// Erase the partitions a wipe package lists.
+    Disable,
+    /// Undo the sharing of blocks in ext4 partitions.
+    Unshare,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemState {
+    Waiting,
+    Working,
+    Ended(ItemEnd),
+}
+
+/// How a partition's work ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemEnd {
+    Erased,
+    Unshared,
+    /// It holds this filesystem, none where blkid knows of none, and shares
+    /// no blocks.
+    NotShared(String),
+    /// Nothing was wrong with the filesystem.
+    Clean,
+    Fixed,
+    /// The work went wrong: why, where what the program working on it said
+    /// does not tell it.
+    Failed(Option<String>),
+}
+
+/// Why partition work stopped before going through the partitions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartStop {
+    /// The wipe package is not one this phone may be erased by.
+    Refused(Refusal),
+    /// The program it takes is only on this partition of the installed
+    /// system, which is not mounted.
+    Unmounted(&'static str),
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -755,8 +822,15 @@ pub enum Install {
     /// No installer runs.
     #[default]
     Idle,
-    /// USB is being set up for sideload.
+    /// USB is being set up for sideload or rescue, or the package the
+    /// system asked for is looked for.
     Starting,
+    /// The package the system asked for is in the data partition, which is
+    /// being opened.
+    Opening,
+    /// It is in the own files of this user, which wait on their screen
+    /// lock.
+    Locked(u32),
     Waiting,
     /// The package of `size` bytes is looked at; a zip's signature is
     /// checked, once the installer tells how far.
@@ -777,6 +851,10 @@ pub enum Install {
     Scripting { stage: Option<Stage>, running: bool },
     /// `damage` is what a failure may have left broken.
     Finished { outcome: Outcome, damage: Option<Damage> },
+    /// In rescue, all user data is being erased, as the computer asked.
+    Wiping,
+    /// In rescue, erasing all user data ended: done, or why it stopped.
+    Wiped(Result<(), EraseStop>),
     /// The page was left and the installer is stopping, handing USB back
     /// if it had it.
     Ending,
@@ -1277,6 +1355,8 @@ pub struct State {
     /// Giving the data partition's files their SELinux labels under way, or
     /// how it last ended.
     pub relabel: Option<RelabelJob>,
+    /// Work on whole partitions under way, or how it last ended.
+    pub part_work: Option<PartWork>,
     /// Where an update the system installed stands, as the runtime last
     /// read it.
     pub update: Standing,
@@ -1362,6 +1442,7 @@ impl Default for State {
             clash: None,
             job: None,
             relabel: None,
+            part_work: None,
             update: Standing::None,
             wlan: None,
             joining: None,
@@ -2751,6 +2832,114 @@ impl App {
         self.refresh();
     }
 
+    /// Work on whole partitions has begun. Work the system asked for, which
+    /// `asked` says, has its page as the only one; other work opens its page
+    /// over the one shown, to go back to once the work has ended.
+    pub fn part_work_started(&mut self, kind: PartKind, asked: bool) {
+        self.state.part_work = Some(PartWork { kind, asked, items: Vec::new(), output: Vec::new(), outcome: None });
+        match asked {
+            true => {
+                self.stack = vec![(Screen::PartWork, 0.0, Focus::Unset)];
+                self.settle_page();
+            }
+            false => self.open(Screen::PartWork),
+        }
+        self.refresh();
+    }
+
+    /// The partitions the work goes through.
+    pub fn part_listed(&mut self, names: Vec<String>) {
+        let work = self.state.part_work.as_mut().expect("only work under way lists its partitions");
+        work.items = names.into_iter().map(|name| (name, ItemState::Waiting)).collect();
+        self.refresh();
+    }
+
+    /// The partition at `index` is under way.
+    pub fn part_at(&mut self, index: usize) {
+        let work = self.state.part_work.as_mut().expect("only work under way moves on");
+        work.items[index].1 = ItemState::Working;
+        self.refresh();
+    }
+
+    /// The partition at `index` ended as `end`, the program working on it
+    /// having said `said`.
+    pub fn part_ended(&mut self, index: usize, end: ItemEnd, said: &str) {
+        let work = self.state.part_work.as_mut().expect("only work under way ends a partition");
+        work.items[index].1 = ItemState::Ended(end);
+        let lines: Vec<String> = said.lines().map(str::trim_end).filter(|l| !l.is_empty()).map(str::to_string).collect();
+        if !lines.is_empty() {
+            work.output = lines[lines.len().saturating_sub(SCRIPT_LINES)..].to_vec();
+        }
+        self.refresh();
+    }
+
+    /// The work has ended. What comes next is the user's to choose, and
+    /// the panel lights for it, unless the system asked for the work and it
+    /// went through every partition: the phone then leaves on its own.
+    pub fn part_work_ended(&mut self, outcome: Result<(), PartStop>, now: u64) {
+        let work = self.state.part_work.as_mut().expect("only work under way ends");
+        let failed = outcome.is_err() || work.items.iter().any(|(_, s)| matches!(s, ItemState::Ended(ItemEnd::Failed(_))));
+        let lit = failed || !work.asked;
+        work.outcome = Some(outcome);
+        if lit {
+            self.wake(now);
+        }
+        self.refresh();
+    }
+
+    /// The system asked for the package at `name` to be installed before
+    /// the recovery started: the installing page opens over the home page,
+    /// looking for it. `security` for a security update.
+    pub fn start_asked(&mut self, security: bool, name: String) {
+        self.begin_install(Install::Starting, Source::Asked { security }, Some(name));
+        self.open(Screen::Installing);
+    }
+
+    /// The package the system asked for is in the data partition, which is
+    /// being opened for it.
+    pub fn asked_opening(&mut self) {
+        self.state.install = Install::Opening;
+        self.state.data = Data::Opening;
+        self.refresh();
+    }
+
+    /// The package the system asked for is in the own files of `user`,
+    /// which wait on their screen lock: the page says to decrypt them, and
+    /// lights for it.
+    pub fn asked_locked(&mut self, user: u32, now: u64) {
+        self.state.install = Install::Locked(user);
+        self.wake(now);
+        self.refresh();
+    }
+
+    /// The system asked for rescue before the recovery started: the
+    /// installing page opens over the home page, already waiting for the
+    /// computer.
+    pub fn start_rescue(&mut self) {
+        self.begin_install(Install::Starting, Source::Rescue, None);
+        self.open(Screen::Installing);
+    }
+
+    /// In rescue, the computer asked for all user data to be erased, and it
+    /// is being erased.
+    pub fn rescue_wiping(&mut self) {
+        self.state.install = Install::Wiping;
+        self.refresh();
+    }
+
+    /// In rescue, erasing all user data has ended; a data partition erased
+    /// whole opens no more until the system makes it afresh.
+    pub fn rescue_wiped(&mut self, outcome: Result<(), EraseStop>, now: u64) {
+        if outcome.is_ok() {
+            self.state.data = Data::Erased;
+        }
+        self.state.install = Install::Wiped(outcome);
+        self.wake(now);
+        if self.screen() == Screen::Installing {
+            self.refresh();
+        }
+    }
+
     /// How the WLAN stands, as the runtime last told it.
     pub fn set_wlan(&mut self, w: Wlan) {
         if self.state.wlan.as_ref() == Some(&w) {
@@ -3876,6 +4065,14 @@ impl App {
                 }
                 self.state.relabel = None;
             }
+            // Work on a partition cannot be stopped halfway.
+            Screen::PartWork => {
+                if self.state.part_work.as_ref().is_some_and(|w| w.outcome.is_none()) {
+                    self.say("请等待完成后再返回", now);
+                    return fx;
+                }
+                self.state.part_work = None;
+            }
             Screen::RestoreBackup => {
                 self.state.restore = None;
                 self.state.asking_delete = false;
@@ -3916,11 +4113,30 @@ impl App {
                     self.say("正在安装，请等待安装完成", now);
                     return fx;
                 }
-                Install::Starting | Install::Waiting | Install::Choosing(_) | Install::Confirming { .. } | Install::ConfirmingScript => {
+                Install::Opening => {
+                    self.say("正在打开 data 分区，请稍后再试", now);
+                    return fx;
+                }
+                Install::Wiping => {
+                    self.say("正在清除，请等待清除完成", now);
+                    return fx;
+                }
+                Install::Starting
+                | Install::Locked(_)
+                | Install::Waiting
+                | Install::Choosing(_)
+                | Install::Confirming { .. }
+                | Install::ConfirmingScript => {
                     self.state.install = Install::Ending;
                     fx.push(Effect::Cancel);
                 }
-                Install::Finished { .. } => self.state.install = Install::Idle,
+                // Rescue waits on for the computer's next command until
+                // its page is left.
+                Install::Finished { .. } | Install::Wiped(_) if self.state.source == Source::Rescue => {
+                    self.state.install = Install::Ending;
+                    fx.push(Effect::Cancel);
+                }
+                Install::Finished { .. } | Install::Wiped(_) => self.state.install = Install::Idle,
                 Install::Idle | Install::Ending => {}
             }
         }
@@ -8581,6 +8797,69 @@ mod tests {
         tap_at(&mut app, &f, &i, Action::Back, 2000);
         assert_eq!(app.screen(), Screen::Advanced);
         assert_eq!(app.state.relabel, None);
+    }
+
+    #[test]
+    fn partition_work_the_system_asked_for_is_the_only_page_and_offers_somewhere_to_go_only_when_it_fell_short() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.part_work_started(PartKind::Disable, true);
+        assert_eq!(app.stack.len(), 1);
+        assert_eq!(app.screen(), Screen::PartWork);
+        app.part_listed(vec!["/dev/block/by-name/userdata".into(), "/dev/block/by-name/metadata".into()]);
+        app.part_at(0);
+        app.part_ended(0, ItemEnd::Erased, "");
+        app.part_at(1);
+        app.part_ended(1, ItemEnd::Erased, "");
+        app.part_work_ended(Ok(()), 0);
+        let reboot = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::RebootTo(Target::System));
+        assert!(!reboot(&mut app), "done, the phone leaves on its own");
+        app.part_work_started(PartKind::Disable, true);
+        app.part_work_ended(Err(PartStop::Refused(Refusal::Unverified)), 0);
+        assert!(reboot(&mut app), "refused, the user chooses where to go");
+        let frame = app.frame(&f, &i);
+        assert!(!frame.back);
+        assert!(
+            frame.hits.iter().any(|h| h.action == Action::EnterRecovery),
+            "the recovery, which ran without the slot's partitions, brings them up to go on"
+        );
+    }
+
+    #[test]
+    fn an_update_the_system_asked_for_waits_for_the_files_that_hold_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.start_asked(false, "/sdcard/update.zip".into());
+        assert_eq!((app.screen(), app.state.source), (Screen::Installing, Source::Asked { security: false }));
+        app.asked_opening();
+        app.key(Key::Back, 0);
+        assert_eq!((app.screen(), toast(&app)), (Screen::Installing, Some("正在打开 data 分区，请稍后再试")));
+        app.asked_locked(0, 0);
+        assert_eq!(app.state.install, Install::Locked(0));
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Open(Screen::Decrypt)));
+        assert_eq!(app.key(Key::Back, 5000), vec![Effect::Cancel], "leaving gives the update up");
+        app.install(Event::Finished(Outcome::Cancelled), 5000);
+        assert_eq!(app.state.install, Install::Idle);
+    }
+
+    #[test]
+    fn rescue_stays_for_one_command_after_another_until_its_page_is_left() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.start_rescue();
+        assert_eq!((app.screen(), app.state.source), (Screen::Installing, Source::Rescue));
+        app.install(Event::Waiting, 0);
+        app.install(Event::Checking { size: 4096 }, 0);
+        app.install(Event::Done(Outcome::Installed { slot: Slot::B, wipe: false }), 0);
+        assert!(matches!(app.state.install, Install::Finished { .. }));
+        app.rescue_wiping();
+        app.key(Key::Back, 5000);
+        assert_eq!((app.screen(), toast(&app)), (Screen::Installing, Some("正在清除，请等待清除完成")));
+        app.rescue_wiped(Ok(()), 6000);
+        assert_eq!((app.state.install.clone(), app.state.data.clone()), (Install::Wiped(Ok(())), Data::Erased));
+        app.frame(&f, &i);
+        assert_eq!(app.key(Key::Back, 12000), vec![Effect::Cancel], "leaving ends rescue");
+        assert_eq!(app.state.install, Install::Ending);
     }
 
     fn network(name: &str, signal: i32, security: Security) -> Network {

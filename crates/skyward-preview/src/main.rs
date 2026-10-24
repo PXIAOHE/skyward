@@ -8,8 +8,8 @@ use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_ui::app::{
     Action, Adding, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, DownloadEnd,
-    DownloadJob, EraseStop, Field, FileKind, FileOp, FileRow, FileTask, Have, Held, Install, JobEnd, Key, Keys, MountFailure, MountRow,
-    Part, Pick, Place, Screen, Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
+    DownloadJob, EraseStop, Field, FileKind, FileOp, FileRow, FileTask, Have, Held, Install, ItemEnd, JobEnd, Key, Keys, MountFailure,
+    MountRow, Part, PartKind, PartStop, Pick, Place, Screen, Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Cap, Layer};
 use skyward_ui::{editor, fmt, pages, Canvas, Ctx, Fonts, Theme};
@@ -302,7 +302,7 @@ fn main() -> Result<()> {
     let adding = |app: &mut App, name: &str, security: Security, field: Field, choosing: bool| {
         app.state.adding = Some(Adding { name: name.into(), security, field, choosing });
     };
-    let pages: [PageShot; 135] = [
+    let pages: [PageShot; 146] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -537,6 +537,58 @@ fn main() -> Result<()> {
         ("158-wlan-light-traffic", Screen::Wlan, false, &|app| {
             app.state.wlan = Some(joined(Joining::Connected(router_link())));
             app.state.traffic = Traffic { rx: 5000, tx: 2188 };
+        }),
+        ("165-part-work-light-unshare-done", Screen::Home, false, &|app| {
+            app.part_work_started(PartKind::Unshare, true);
+            app.part_listed(["system", "system_ext", "product", "vendor", "odm"].map(String::from).to_vec());
+            for k in 0..5 {
+                app.part_ended(k, ItemEnd::NotShared("erofs".into()), "");
+            }
+            app.part_work_ended(Ok(()), 0);
+        }),
+        ("166-part-work-dark-disable-refused", Screen::Home, true, &|app| {
+            app.set_asked(Asked { reason: Some("wipe_ab".into()), ..Asked::default() });
+            app.part_work_started(PartKind::Disable, true);
+            app.part_work_ended(Err(PartStop::Refused(Refusal::Unverified)), 0);
+        }),
+        ("167-part-work-light-disable-erasing", Screen::Home, false, &|app| {
+            app.part_work_started(PartKind::Disable, true);
+            app.part_listed(["userdata", "metadata", "super"].map(String::from).to_vec());
+            app.part_ended(0, ItemEnd::Erased, "");
+            app.part_at(1);
+        }),
+        ("168-installing-light-asked-locked", Screen::Home, false, &|app| {
+            app.start_asked(false, "/sdcard/Download/ishtar-ota_full-OS3.0.308.0.WMACNXM-user-16.0.zip".into());
+            app.asked_locked(0, 0);
+        }),
+        ("169-installing-dark-asked-opening", Screen::Home, true, &|app| {
+            app.set_asked(Asked { reason: Some("update".into()), ..Asked::default() });
+            app.start_asked(true, "@/cache/recovery/block.map".into());
+            app.asked_opening();
+        }),
+        ("170-installing-light-rescue-waiting", Screen::Home, false, &|app| {
+            app.start_rescue();
+            app.install(skyward_install::Event::Waiting, 0);
+        }),
+        ("171-installing-dark-rescue-wiping", Screen::Home, true, &|app| {
+            app.start_rescue();
+            app.rescue_wiping();
+        }),
+        ("172-installing-light-rescue-installed", Screen::Home, false, &|app| {
+            app.start_rescue();
+            app.install(skyward_install::Event::Done(Outcome::Installed { slot: Slot::B, wipe: false }), 0);
+        }),
+        ("173-installing-light-asked-installed", Screen::Home, false, &|app| {
+            app.start_asked(false, "@/cache/recovery/block.map".into());
+            app.install(skyward_install::Event::Finished(Outcome::Installed { slot: Slot::B, wipe: false }), 0);
+        }),
+        ("174-installing-dark-asked-panicked", Screen::Home, true, &|app| {
+            app.start_asked(false, "@/cache/recovery/block.map".into());
+            app.install(skyward_install::Event::Finished(Outcome::Refused(Refusal::Panicked)), 0);
+        }),
+        ("175-installing-light-asked-image", Screen::Home, false, &|app| {
+            app.start_asked(false, "/data/ota_package/boot.img".into());
+            app.install(skyward_install::Event::Finished(Outcome::Refused(Refusal::Image)), 0);
         }),
         ("143-update-light-offline", Screen::Update, false, &|app| {
             app.state.update_server = true;
