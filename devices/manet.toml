@@ -36,10 +36,10 @@ ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
 user = "system"
 groups = ["system", "drmrpc"]
 
-# ---- 老式硬件服务注册处（从已安装系统取）----
+# ---- 老式硬件服务注册处：这台机器把它放在 system_ext ----
 [[service]]
-path = "/mnt/system/system/bin/hwservicemanager"
-libraries = ["/mnt/system/system/lib64/bootstrap", "/mnt/system/system/lib64", "/mnt/system_ext/lib64"]
+path = "/system_ext/bin/hwservicemanager"
+libraries = ["/mnt/system/lib64", "/mnt/system_ext/lib64"]
 ready_property = "hwservicemanager.ready"
 user = "system"
 groups = ["system", "readproc"]

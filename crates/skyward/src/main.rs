@@ -471,8 +471,43 @@ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
 /// from the partitions just mounted: on the 13 Ultra, the touchscreen
 /// driver and the touch processing. Of the programs the configuration
 /// names, only those this phone's build of the hardware runs are started.
+/// The partitions the slot's programs and kernel modules come from, and
+/// where on the phone they are looked for. A recovery shows them under
+/// /mnt; the phone's own programs, its init scripts and its module paths
+/// name them where the system keeps them.
+#[cfg(target_os = "android")]
+const PHONE_MOUNTS: [(&str, &str); 6] = [
+    ("vendor", "/vendor"),
+    ("vendor_dlkm", "/vendor_dlkm"),
+    ("system_dlkm", "/system_dlkm"),
+    ("system_ext", "/system_ext"),
+    ("odm", "/odm"),
+    ("product", "/product"),
+];
+
+/// Show each of [`PHONE_MOUNTS`] where the phone names it, so that the
+/// modules loaded below and the services started after are found at the
+/// paths the phone itself uses.
+#[cfg(target_os = "android")]
+fn show_phone_partitions() -> Result<()> {
+    use skyward_block::mount::{bind, is_mount_point};
+    for (name, at) in PHONE_MOUNTS {
+        let from = Path::new("/mnt").join(name);
+        let to = Path::new(at);
+        if !from.is_dir() || is_mount_point(to)? {
+            continue;
+        }
+        match bind(&from, to) {
+            Ok(()) => skyward_sys::kmsg(&format!("{name} is shown at {at}"))?,
+            Err(e) => skyward_sys::kmsg(&format!("{name} is not shown at {at}: {e:#}"))?,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "android")]
 fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
+    show_phone_partitions()?;
     let nodes = skyward_sys::ueventd::apply()?;
     skyward_sys::kmsg(&format!("{nodes} device nodes given the owner their phone describes"))?;
     let props = skyward_info::installed_props(slot)?;
