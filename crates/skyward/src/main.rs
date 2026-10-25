@@ -683,12 +683,48 @@ fn adopt_installed_version(props: &std::collections::HashMap<String, String>) ->
 /// goes on stays in misc until the work is done; any other is cleared at
 /// once, so that any reboot from here boots the system. Failures go to the
 /// kernel log and still end the process, which init then starts again.
+/// Mount the cache partition, which a recovery mounts for its own files and
+/// the system booted next does not, so what is written there is still there
+/// to read afterwards.
+#[cfg(target_os = "android")]
+fn mount_cache() -> Result<()> {
+    use std::ffi::CString;
+    let (device, at) = ("/dev/block/by-name/rescue", "/cache");
+    if skyward_block::mount::is_mount_point(Path::new(at))? {
+        return Ok(());
+    }
+    std::fs::create_dir_all(at).with_context(|| format!("make {at}"))?;
+    let (device, at, fstype) = (CString::new(device)?, CString::new(at)?, CString::new("ext4")?);
+    if unsafe { libc::mount(device.as_ptr(), at.as_ptr(), fstype.as_ptr(), 0, std::ptr::null()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context(format!("mount the cache partition at {at:?}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn mount_cache() -> Result<()> {
+    anyhow::bail!("the recovery service runs only on Android")
+}
+
 fn recovery() -> Result<()> {
     // A panic aborts the recovery where nothing the phone keeps would show
     // it; the kernel log and the report partition outlive the next boot.
     std::panic::set_hook(Box::new(|info| {
         let _ = skyward_sys::kmsg(&format!("the recovery panicked: {info}"));
     }));
+    // The log is kept where the next boot reads it, on the cache partition:
+    // the phone's own table of filesystems is on a partition nothing has
+    // mounted at this point, so the partition is named by the path the
+    // bootloader gives it.
+    match mount_cache() {
+        Ok(()) => {
+            let _ = skyward_sys::keep_log(Path::new("/cache/skyward.log"));
+        }
+        Err(e) => {
+            let _ = skyward_sys::kmsg(&format!("no cache partition to keep the log on: {e:#}"));
+            let _ = skyward_sys::keep_log(Path::new(skyward_sys::LOG));
+        }
+    }
     let _ = skyward_sys::kmsg("the recovery service started");
     let run = || -> Result<()> {
         skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
