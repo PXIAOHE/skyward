@@ -1,0 +1,105 @@
+[device]
+codename = "manet"
+brand = "Redmi"
+model = "Redmi K70 Pro"
+ab = true
+soc = { hans = "第三代骁龙®8移动平台", hant = "Snapdragon® 8 Gen 3 行動平台", en = "Snapdragon® 8 Gen 3 Mobile Platform" }
+os_version_prop = "ro.mi.os.version.incremental"
+
+[display]
+width = 1440
+height = 3200
+density = 560
+diagonal = 6.67
+# 从 K70 Pro 的 system overlay 读；若显示异常改成 96
+corner_radius = 100
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor"]
+# K70 Pro 用汇顶 Goodix，不是 ishtar 的 ST FTS。
+# 三个模块都在 /vendor/lib/modules/，进 recovery 后 insmod。
+load = ["goodix_core", "goodix_fod", "xiaomi_touch"]
+
+# ---- 解密链：qseecomd 让 secure world 把 key 交出来 ----
+[[service]]
+path = "/vendor/bin/qseecomd"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
+
+# ---- KeyMint：唯一能用硬件包裹密钥的服务 ----
+[[service]]
+path = "/vendor/bin/hw/android.hardware.security.keymint-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+user = "system"
+groups = ["system", "drmrpc"]
+
+# ---- 老式硬件服务注册处（从已安装系统取）----
+[[service]]
+path = "/mnt/system/system/bin/hwservicemanager"
+libraries = ["/mnt/system/system/lib64/bootstrap", "/mnt/system/system/lib64", "/mnt/system_ext/lib64"]
+ready_property = "hwservicemanager.ready"
+user = "system"
+groups = ["system", "readproc"]
+
+# ---- Gatekeeper：屏幕锁校验，key 服务要它出的凭据 ----
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
+user = "system"
+groups = ["system"]
+
+# ---- BootControl：切 A/B 槽 ----
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot-service.qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_hardware_service = "android.hardware.boot@1.2::IBootControl/default"
+user = "root"
+groups = ["root"]
+
+# ---- WLAN：和 ishtar 同一颗芯片（WCN7850 / kiwi_v2）----
+[wlan]
+modules = ["qca_cld3_kiwi_v2"]
+writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+firmware = [
+    { name = "wlan/qca_cld/kiwi_v2/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/kiwi_v2/WCNSS_qcom_cfg.ini" },
+    { name = "wlan/qca_cld/kiwi_v2/wlan_mac.bin", partition = "persist", path = "kiwi_v2/wlan_mac.bin" },
+]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/vendor/lib64", "/system/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+# 基底：OS3.0.306.0.WNMCNXM 的原厂 recovery 分区
+# sha256 由你提供的 recovery.img 实际算出
+[stock]
+version = "OS3.0.306.0.WNMCNXM"
+# 真实完整包地址；CI 用仓库里捆绑的 recovery.img.xz，不会真的去下它
+package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.306.0.WNMCNXM/manet-ota_full-OS3.0.306.0.WNMCNXM-user-16.0-5d044d135d.zip"
+recovery = "4a39faaf69631db5d773b296356ec472917e9577c89696e08e94d3369bc92e56"
+
+[haptics]
+click = 0
+strength = { lightest = 0.5, strongest = 1.0 }
+
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+data_skipped = ["vendor/tzstorage", "vendor/qtee", "vendor/fingerprint", "vendor/goodix", "vendor/fpc"]
+
+[wipe]
+logs = [
+    "/data/miuilog",
+    "/data/vendor/diag",
+    "/data/vendor/log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]

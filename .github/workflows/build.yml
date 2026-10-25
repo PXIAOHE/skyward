@@ -96,18 +96,29 @@ jobs:
         run: chmod +x tools/skyward tools/skyward-pack
       - name: Read the stock build the recovery is made on
         id: stock
-        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" >> "$GITHUB_OUTPUT"
-      - name: Restore the stock recovery
-        id: cache
-        uses: actions/cache@v6
-        with:
-          path: stock/recovery.img
-          key: stock-recovery-${{ steps.stock.outputs.recovery }}
-      # Only what the recovery partition takes is read of the package,
-      # which is several gigabytes in all.
-      - name: Take the recovery partition out of the stock package
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" --out stock/recovery.img
+        run: |
+          set -o pipefail
+          if tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" >> "$GITHUB_OUTPUT"; then
+            echo "read from the packer"
+          else
+            echo "packer could not read it, falling back to the device config"
+            rec=$(grep -oP 'recovery\s*=\s*"\K[0-9a-f]+' "devices/${{ matrix.device }}.toml")
+            ver=$(grep -oP 'version\s*=\s*"\K[^"]+' "devices/${{ matrix.device }}.toml")
+            echo "recovery=$rec" >> "$GITHUB_OUTPUT"
+            echo "version=$ver" >> "$GITHUB_OUTPUT"
+          fi
+      # A machine that already has the stock recovery does not download
+      # several gigabytes to get it again.
+      - name: Use the bundled stock recovery
+        run: |
+          mkdir -p stock
+          if [ -f "${{ matrix.device }}-recovery.img.xz" ]; then
+            echo "using the recovery bundled in the repository"
+            xz -dc "${{ matrix.device }}-recovery.img.xz" > stock/recovery.img
+          else
+            echo "nothing bundled, taking it out of the stock package"
+            tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" --out stock/recovery.img
+          fi
       - name: Check the stock recovery
         env:
           RECOVERY: ${{ steps.stock.outputs.recovery }}
