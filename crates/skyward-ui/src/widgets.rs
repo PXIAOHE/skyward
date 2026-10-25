@@ -857,11 +857,21 @@ pub fn toast(c: &mut Canvas, t: &Theme, f: &Fonts, text: &str) {
     c.text_center(&f.heading, text, m.w as f32 / 2.0, y + h / 2.0, px, Rgba::rgb(255, 255, 255));
 }
 
-pub fn search_bar(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, placeholder: &str) -> f32 {
+/// The home page's search bar in `r`, at `level` of its strength, without
+/// its icon and words: those are laid over it from [`search_words`].
+pub fn search_bar(c: &mut Canvas, t: &Theme, r: Rect, level: f32) {
+    let ink = t.pal.search;
+    c.fill_round_rect(r.x, r.y, r.w, r.h, r.h / 2.0, ink.with_alpha((ink.a as f32 * level).round() as u8));
+}
+
+/// The icon and words of the home page's search bar standing at `bar`, on
+/// their own to lay over it, the layer's top-left corner at `bar`'s taken
+/// down to whole pixels.
+pub fn search_words(t: &Theme, f: &Fonts, bar: Rect, placeholder: &str) -> Canvas {
     let m = &t.m;
-    let (x, w, h) = (m.margin, m.w as f32 - m.margin * 2.0, m.search_h);
-    let cy = y + h / 2.0;
-    c.fill_round_rect(x, y, w, h, h / 2.0, t.pal.search);
+    let (left, top) = (bar.x.floor(), bar.y.floor());
+    let mut c = Canvas::new((bar.x + bar.w - left).ceil() as u32, (bar.y + bar.h - top).ceil() as u32);
+    let (x, cy) = (bar.x - left, bar.y - top + bar.h / 2.0);
     let (icx, icy, sw) = (x + m.dp(22.3), cy - m.dp(2.0), m.dp(1.45));
     let ring = m.dp(6.6);
     c.stroke_circle(icx, icy, ring, sw, t.pal.search_icon);
@@ -869,7 +879,7 @@ pub fn search_bar(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, placeholder: &st
     c.line(icx + k, icy + k, icx + m.dp(9.9), icy + m.dp(10.0), sw, t.pal.search_icon);
     // The placeholder is set at the row-title size and weight, in grey.
     c.text_vc(&f.heading, placeholder, x + m.search_text_inset, cy, m.row_title_px, t.pal.placeholder, None);
-    y + h + m.after_search
+    c
 }
 
 /// What a search field shows and where its parts landed.

@@ -1238,6 +1238,9 @@ pub struct Frame {
     /// A strip that scrolls with the page until it reaches the bar, then
     /// stays under it.
     pub pinned: Option<Pinned>,
+    /// A search bar under the large title that folds away as the page
+    /// scrolls up.
+    pub fold: Option<Fold>,
     /// A terminal's screen, or the editor's card, and the height of its
     /// rows: a drag on it scrolls through what it holds, rather than moving
     /// the page.
@@ -1310,6 +1313,76 @@ pub struct Pinned {
     pub hits: Vec<Hit>,
 }
 
+/// A search bar under a page's large title folding away as the page scrolls
+/// up, as the stock settings home's does: its top stays put and its foot
+/// rises with the page, its icon and words fading out first and then the
+/// bar, until nothing of it is left. The content under it then closes the
+/// gap it leaves, and only after that does the large title go up with the
+/// page. A page let go with its bar part folded settles folded or unfolded,
+/// whichever is nearer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fold {
+    /// Where the bar stands unfolded, in page coordinates.
+    pub bar: Rect,
+    /// What the bar asks for, in grey.
+    pub hint: &'static str,
+    /// How far the page scrolls with its large title held still: the bar
+    /// and the gap under it.
+    pub span: f32,
+}
+
+impl Fold {
+    /// What shows of the bar, on screen, with the page `offset` pixels
+    /// down: all of it, pulled down with the page past its top, or as much
+    /// as is left of it folding; none once it has folded away.
+    pub fn shown(&self, offset: f32) -> Option<Rect> {
+        let h = self.bar.h - offset.max(0.0);
+        (h > 0.0).then(|| Rect { y: self.bar.y - offset.min(0.0), h, ..self.bar })
+    }
+
+    /// How strongly the bar, and its icon and words, show with the page
+    /// `offset` pixels down: the words fade out over the first stretch of
+    /// the fold, and the bar over the next.
+    pub fn levels(&self, t: &Theme, offset: f32) -> (f32, f32) {
+        let along = offset.max(0.0) / t.m.dp(FOLD_FADE_DP);
+        ((2.0 - along).clamp(0.0, 1.0), (1.0 - along).clamp(0.0, 1.0))
+    }
+
+    /// Draw what shows of the bar with the page `offset` pixels down, its
+    /// icon and words laid from `words`, which [`widgets::search_words`]
+    /// makes.
+    pub fn draw(&self, out: &mut Canvas, t: &Theme, words: &Canvas, offset: f32) {
+        let Some(r) = self.shown(offset) else { return };
+        let (bar, level) = self.levels(t, offset);
+        widgets::search_bar(out, t, r, bar);
+        // The icon and words stay centred in what is left of the bar.
+        let sink = r.y + r.h / 2.0 - (self.bar.y + self.bar.h / 2.0);
+        out.lay(words, self.bar.x.floor() as i32, (self.bar.y.floor() + sink).round() as i32, level);
+    }
+
+    /// How far the large title has gone up with the page `offset` pixels
+    /// down: nowhere while the bar folds and its gap closes, then as far
+    /// as the page has gone since; down with a page pulled past its top.
+    pub fn lift(&self, offset: f32) -> f32 {
+        if offset < 0.0 {
+            offset
+        } else {
+            (offset - self.span).max(0.0)
+        }
+    }
+
+    /// Where a page let go at `scroll` comes to rest: with the bar part
+    /// folded, folded or unfolded, whichever is nearer; anywhere else,
+    /// where it is.
+    pub fn settle(&self, scroll: f32) -> f32 {
+        match scroll {
+            s if s <= 0.0 || s >= self.span => s,
+            s if s < self.span * FOLD_SETTLE => 0.0,
+            _ => self.span,
+        }
+    }
+}
+
 /// What the About page lays over its field: the wordmark and version, which
 /// stay put while the cards scroll, and the cards' coverage row by row.
 pub struct HeroArt {
@@ -1334,11 +1407,33 @@ impl Frame {
             bg: t.pal.bg,
             rows: None,
             pinned: None,
+            fold: None,
             scrollback: None,
             dock: None,
             caret: None,
             button: None,
         }
+    }
+
+    /// Where the control at `r` on the page shows, on screen, with the page
+    /// `offset` pixels down: the folding search bar as much as is left of
+    /// it, and none once folded away; any other with the page.
+    pub fn shown(&self, r: Rect, offset: f32) -> Option<Rect> {
+        match &self.fold {
+            Some(fold) if fold.bar == r => fold.shown(offset),
+            _ => Some(Rect { y: r.y - offset, ..r }),
+        }
+    }
+
+    /// How far the large title has gone up with the page `offset` pixels
+    /// down: as far as the page, but for a search bar folding under it.
+    pub fn title_lift(&self, offset: f32) -> f32 {
+        self.fold.as_ref().map_or(offset, |f| f.lift(offset))
+    }
+
+    /// Where a page let go at `scroll` comes to rest: see [`Fold::settle`].
+    pub fn settle(&self, scroll: f32) -> f32 {
+        self.fold.as_ref().map_or(scroll, |f| f.settle(scroll))
     }
 
     /// The topmost control under a point in page coordinates.
@@ -1936,6 +2031,15 @@ const HARD_BOUNCE_DP: f32 = 1667.0;
 const TITLE_FADE_DP: f32 = 20.0;
 /// Blur, in dp, of a title faded out completely.
 const TITLE_BLUR_DP: f32 = 25.0 / 3.0;
+/// A search bar folding away: its icon and words fade out over the first
+/// this many dp of the fold, then the bar over as many more, gone however
+/// faint once its foot reaches its top. A page let go with the bar folded
+/// this share of the way or further settles folded, and unfolded short of
+/// it, on a critically damped spring of this period set off from rest.
+/// Fitted to frames of the stock settings on a Xiaomi 17 Ultra.
+const FOLD_FADE_DP: f32 = 26.0;
+const FOLD_SETTLE: f32 = 0.5;
+const FOLD_PERIOD: f32 = 0.354;
 /// How far, in dp, a swipe from an edge has to come in to go back.
 const BACK_SWIPE_DP: f32 = 56.0;
 /// The back cue sits this far, in dp, above where the finger came down,
@@ -2258,8 +2362,9 @@ pub struct App {
     keys: bool,
     /// The button held down, and what holding it does.
     button: Option<(Key, Press)>,
-    /// The page scrolling of its own accord to show the control the keys
-    /// moved to: where it comes to rest, and the spring taking it there.
+    /// The page scrolling of its own accord, to show the control the keys
+    /// moved to or to fold its search bar whole or not at all: where it
+    /// comes to rest, and the spring taking it there.
     seek: Option<(f32, Spring)>,
     /// A swipe-to-confirm control whose knob the power key moved, to draw
     /// again with the page.
@@ -2279,6 +2384,9 @@ pub struct App {
     /// theme, with their blurred versions as they are needed. A page can
     /// change its title in place, as work on files does once it ends.
     titles: Option<((&'static str, bool), Blurs, Blurs)>,
+    /// The icon and words of the current page's folding search bar, for
+    /// its words and the theme.
+    search_words: Option<((&'static str, bool), Canvas)>,
     /// The `<` chip for the theme (dark or not), and where it goes.
     chip: Option<(bool, Canvas, i32, i32)>,
     /// The chip behind the round button at the right end of the bar, as
@@ -2388,6 +2496,7 @@ impl App {
             drawn: Vec::new(),
             spare: Vec::new(),
             titles: None,
+            search_words: None,
             chip: None,
             button_chip: None,
             shell_folder: "/".into(),
@@ -2593,6 +2702,7 @@ impl App {
                 self.fling = None;
             } else if done {
                 self.fling = None;
+                self.settle_fold(now);
             }
         }
         if let Some((glide, pitch, scrolled)) = self.glide {
@@ -2676,7 +2786,7 @@ impl App {
             (gone, gone)
         } else {
             let under = (fr.content_top - widgets::bar_bottom(&t) - t.m.dp(20.0)).max(0.0);
-            (fr.header && scroll >= t.m.dp(TITLE_FADE_DP), scroll > under)
+            (fr.header && fr.title_lift(scroll) >= t.m.dp(TITLE_FADE_DP), scroll > under)
         })
     }
 
@@ -3702,6 +3812,12 @@ impl App {
         if self.titles.as_ref().is_none_or(|(k, _, _)| *k != key) {
             self.titles = Some((key, Blurs::new(widgets::big_title(&t, f, title)), Blurs::new(widgets::small_title(&t, f, title))));
         }
+        if let Some(fold) = self.frame.as_ref().and_then(|fr| fr.fold) {
+            let key = (fold.hint, self.state.dark);
+            if self.search_words.as_ref().is_none_or(|(k, _)| *k != key) {
+                self.search_words = Some((key, widgets::search_words(&t, f, fold.bar, fold.hint)));
+            }
+        }
         if self.chip.as_ref().is_none_or(|c| c.0 != t.dark) {
             let (art, x, y) = widgets::back_chip(&t);
             self.chip = Some((t.dark, art, x, y));
@@ -3889,20 +4005,23 @@ impl App {
                 self.spare.clear();
             }
             press_row(out);
+            if let Some(fold) = &frame.fold {
+                let (_, words) = self.search_words.as_ref().expect("a folding search bar's words are made with its page");
+                fold.draw(out, t, words, offset);
+            }
             if frame.header {
-                let level = (1.0 - scroll / m.dp(TITLE_FADE_DP)).clamp(0.0, 1.0);
-                draw_faded(out, big, 0.0, -offset, t.pal.text, level, (1.0 - level) * m.dp(TITLE_BLUR_DP));
+                let level = (1.0 - frame.title_lift(scroll) / m.dp(TITLE_FADE_DP)).clamp(0.0, 1.0);
+                draw_faded(out, big, 0.0, -frame.title_lift(offset), t.pal.text, level, (1.0 - level) * m.dp(TITLE_BLUR_DP));
             }
         }
         // The search page's round button and the home page's search bar
         // darken at once under a finger.
         if let Some(a) = pressing.filter(|a| matches!(a, Action::CloseSearch | Action::Open(Screen::Search))) {
             let r = frame.hits.iter().find(|h| h.action == a).expect("a button held down is on its page").rect;
-            let r = Rect { y: r.y - offset, ..r };
-            if a == Action::CloseSearch {
-                widgets::cancel_held(out, t, r);
-            } else {
-                widgets::search_bar_held(out, t, r);
+            match frame.shown(r, offset) {
+                Some(r) if a == Action::CloseSearch => widgets::cancel_held(out, t, r),
+                Some(r) => widgets::search_bar_held(out, t, r),
+                None => {}
             }
         }
         if let Some(caret) = frame.caret.as_ref().filter(|_| view.caret) {
@@ -4473,6 +4592,11 @@ impl App {
         match action {
             Action::Open(s) => {
                 if s == Screen::Search && self.screen() == Screen::Home {
+                    // The bar moves up from where it stands unfolded: a
+                    // page easing there for the keys gets there at once.
+                    if let Some((rest, _)) = self.seek.take() {
+                        self.top_mut().1 = rest;
+                    }
                     self.start_morph(true, now);
                     self.push(s);
                 } else {
@@ -5337,7 +5461,11 @@ impl App {
                 } else if self.bar.on && y < widgets::bar_bottom(&t) {
                     None
                 } else {
-                    self.frame.as_ref().and_then(|fr| fr.hit(x, y + scroll)).map(|h| (h.action, h.rect))
+                    // A search bar folding away answers only on what is
+                    // left of it.
+                    let fr = self.frame.as_ref();
+                    fr.and_then(|fr| fr.hit(x, y + scroll).filter(|h| fr.shown(h.rect, scroll).is_some_and(|r| r.contains(x, y))))
+                        .map(|h| (h.action, h.rect))
                 };
                 let action = hit.map(|h| h.0);
                 // A row of the page darkens behind its words a moment after
@@ -5460,11 +5588,20 @@ impl App {
                     self.dirty = true;
                 }
                 Drag::Scroll { .. } => {
-                    // A finger lifted while still moving sends the page gliding on.
+                    // A finger lifted while still moving sends the page
+                    // gliding on. One lifted slower leaves it where it is,
+                    // but for a search bar part folded, which settles
+                    // folded or unfolded; so does one lifted in the fold
+                    // whose glide would end in it too.
                     let speed = -self.tracker.velocity(now);
-                    if speed.abs() >= m.dp(MIN_FLING_DP) {
+                    let folding = |s: f32| self.frame.as_ref().is_some_and(|fr| fr.settle(s) != s);
+                    let glide = (speed.abs() >= m.dp(MIN_FLING_DP)).then(|| {
                         let speed = speed.clamp(-m.dp(MAX_FLING_DP), m.dp(MAX_FLING_DP));
-                        self.fling = Some(Fling::new(now, scroll, speed, self.px_per_dp * 160.0));
+                        Fling::new(now, scroll, speed, self.px_per_dp * 160.0)
+                    });
+                    match glide {
+                        Some(glide) if !(folding(scroll) && folding(glide.at(u64::MAX).0)) => self.fling = Some(glide),
+                        _ => self.settle_fold(now),
                     }
                 }
                 Drag::Edge { armed: true, .. } => fx.extend(self.back(now)),
@@ -5856,8 +5993,8 @@ impl App {
         let held = |k: usize| matches!(spots[k].group, Group::Fixed | Group::Strip);
         let docked = |k: usize| spots[k].group == Group::Dock;
         // The page's own controls not wholly above the band, or below it.
-        let from_top = |k: usize| page(k) && self.place(&spots[k], scroll).y + spots[k].rect.h > top;
-        let from_bottom = |k: usize| page(k) && self.place(&spots[k], scroll).y < bottom;
+        let from_top = |k: usize| page(k) && self.place(&spots[k], scroll).is_some_and(|r| r.y + r.h > top);
+        let from_bottom = |k: usize| page(k) && self.place(&spots[k], scroll).is_some_and(|r| r.y < bottom);
         enum To {
             Spot(usize),
             Scroll,
@@ -5931,12 +6068,15 @@ impl App {
         let (top, bottom) = self.band(scroll);
         let half = (bottom - top) / 2.0;
         let target = if down { (scroll + half).min(self.max_scroll()) } else { (scroll - half).max(0.0) };
+        // A page coming to rest with its search bar part folded folds it
+        // whole or not at all, as one let go there does.
+        let target = self.frame.as_ref().map_or(target, |fr| fr.settle(target));
         self.seek_to(target, now);
         if cur.is_some_and(|i| self.shows(&spots[i], target)) {
             return;
         }
         let band = self.band(target);
-        let in_view = |k: &usize| spots[*k].group == Group::Page && within(self.place(&spots[*k], target), band);
+        let in_view = |k: &usize| spots[*k].group == Group::Page && self.place(&spots[*k], target).is_some_and(|r| within(r, band));
         let next = if down { (0..spots.len()).find(in_view) } else { (0..spots.len()).rev().find(in_view) };
         self.top_mut().2 = next.map_or(Focus::Off, |k| Focus::On(spots[k]));
     }
@@ -5972,21 +6112,22 @@ impl App {
     /// the bottom strip's first, or else the `<` or the top strip's first.
     fn first_in_view(&self, spots: &[Spot], scroll: f32) -> Option<usize> {
         let band = self.band(scroll);
-        let k = spots.iter().position(|s| s.group == Group::Page && within(self.place(s, scroll), band));
+        let k = spots.iter().position(|s| s.group == Group::Page && self.place(s, scroll).is_some_and(|r| within(r, band)));
         k.or_else(|| spots.iter().position(|s| s.group == Group::Dock))
             .or_else(|| spots.iter().position(|s| matches!(s.group, Group::Fixed | Group::Strip)))
     }
 
-    /// Where on screen `s` is with the page `offset` pixels down.
-    fn place(&self, s: &Spot, offset: f32) -> Rect {
+    /// Where on screen `s` is with the page `offset` pixels down; nowhere
+    /// for a search bar folded away.
+    fn place(&self, s: &Spot, offset: f32) -> Option<Rect> {
         let fr = self.frame.as_ref().expect("a control is placed on the page drawn");
         let dy = match s.group {
             Group::Fixed => 0.0,
             Group::Strip => pinned_top(&self.theme(), fr.pinned.as_ref().expect("the strip holds its controls"), offset),
-            Group::Page => -offset,
+            Group::Page => return fr.shown(s.rect, offset),
             Group::Dock => self.h as f32 - fr.dock.as_ref().expect("the dock holds its controls").canvas.h as f32,
         };
-        Rect { y: s.rect.y + dy, ..s.rect }
+        Some(Rect { y: s.rect.y + dy, ..s.rect })
     }
 
     /// The band of the screen the page's own controls show in with the page
@@ -6004,17 +6145,24 @@ impl App {
 
     /// Whether `s` shows, in part at least, with the page at `scroll`.
     fn shows(&self, s: &Spot, scroll: f32) -> bool {
-        s.group != Group::Page || within(self.place(s, scroll), self.band(scroll))
+        s.group != Group::Page || self.place(s, scroll).is_some_and(|r| within(r, self.band(scroll)))
     }
 
     /// How far down to scroll the page from `scroll` to show `s` whole, a
     /// margin clear of the band's edges, or as much of it from its top as
-    /// fits.
+    /// fits. A search bar under the large title shows only unfolded, at
+    /// the page's top, and a page scrolled down to show any other control
+    /// goes on to fold the bar away whole.
     fn reveal(&self, s: &Spot, scroll: f32) -> f32 {
+        let fr = self.frame.as_ref().expect("a control is revealed on the page drawn");
+        let fold = fr.fold.filter(|_| s.group == Group::Page);
+        if fold.is_some_and(|f| f.bar == s.rect) {
+            return 0.0;
+        }
         let margin = self.theme().m.margin;
         let (top, bottom) = self.band(scroll);
         let (top, bottom) = (top + margin, bottom - margin);
-        let r = self.place(s, scroll);
+        let r = self.place(s, scroll).expect("only a search bar folded away has no place");
         let d = if r.y < top {
             r.y - top
         } else if r.y + r.h > bottom {
@@ -6022,13 +6170,27 @@ impl App {
         } else {
             0.0
         };
-        (scroll + d).clamp(0.0, self.max_scroll())
+        let target = scroll + d;
+        let target = fold.map_or(target, |f| if target > 0.0 && target < f.span { f.span } else { target });
+        target.clamp(0.0, self.max_scroll())
     }
 
     /// Where the page comes to rest: where the keys are scrolling it to, or
     /// where it is.
     fn resting(&self) -> f32 {
         self.seek.map_or(self.top().1, |(target, _)| target)
+    }
+
+    /// A page come to rest with its search bar part folded eases on from
+    /// there to fold the bar away or unfold it whole, whichever is nearer.
+    fn settle_fold(&mut self, now: u64) {
+        let Some(fr) = self.frame.as_ref() else { return };
+        let at = self.top().1;
+        let rest = fr.settle(at).min(self.max_scroll());
+        if rest != at {
+            self.seek = Some((rest, Spring::new(now, at - rest, 0.0, FOLD_PERIOD)));
+            self.dirty = true;
+        }
     }
 
     /// Scroll the page to `target` for the keys, easing there.
@@ -6050,21 +6212,21 @@ impl App {
         let spot = self.lit()?;
         let t = self.theme();
         let keypad = self.screen() == Screen::Decrypt && matches!(self.state.data, Data::Locked { keys: Keys::Digits, .. });
-        let (r, radius) = focus::lit(&t, spot.stop, self.place(&spot, offset), keypad);
+        let (r, radius) = focus::lit(&t, spot.stop, self.place(&spot, offset)?, keypad);
         let held = matches!(self.button, Some((_, Press::Power { .. } | Press::Slide { .. })));
         let alpha = if held || self.adjusting { LIGHT_HELD_ALPHA } else { LIGHT_ALPHA };
         Some((spot.group, r, radius, t.pal.accent.with_alpha(alpha)))
     }
 
-    /// Whether the page is gliding, springing back, or easing to where the
-    /// keys moved at `now`.
+    /// Whether the page is gliding, springing back, or easing on of its own
+    /// accord at `now`.
     fn in_motion(&self, now: u64) -> bool {
         self.fling.is_some_and(|fl| !fl.at(now).1) || self.bounce.is_some_and(|b| !b.at(now).1) || self.seek.is_some_and(|(_, s)| !s.at(now).1)
     }
 
-    /// Stop a page gliding, springing back or easing to where the keys
-    /// moved, where it has got to, for a finger to hold: one past its end
-    /// stays out there as the finger's pull. Whether there was one.
+    /// Stop a page gliding, springing back or easing on of its own accord,
+    /// where it has got to, for a finger to hold: one past its end stays
+    /// out there as the finger's pull. Whether there was one.
     fn catch(&mut self, now: u64) -> bool {
         let glide = self.fling.take().is_some_and(|fl| !fl.at(now).1);
         let seeking = self.seek.take().is_some_and(|(_, s)| !s.at(now).1);
@@ -6451,7 +6613,9 @@ mod tests {
         let f = fonts();
         let plain = info();
         let mut app = App::new(Screen::Home, W, H, PPD);
-        assert_eq!(app.frame(&f, &plain).canvas.h, H, "without the notice the page fits the screen");
+        let fr = app.frame(&f, &plain);
+        let reboot = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("a reboot row").rect;
+        assert!(reboot.y + reboot.h <= H as f32, "without the notice the rows fit the screen");
         let i = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info() };
         let mut app = App::new(Screen::Home, W, H, PPD);
         let fr = app.frame(&f, &i);
@@ -6537,6 +6701,160 @@ mod tests {
         app.compose(&mut screen, &f, &i, "12:00", 4500);
         assert!(app.morph.is_none());
         assert_eq!(top(&screen), Some(home.ceil()));
+    }
+
+    /// A screen too short for the home page's rows, which scrolls well past
+    /// the fold of its search bar.
+    const SHORT: u32 = 2600;
+
+    #[test]
+    fn the_home_search_bar_folds_away_under_its_still_title_before_the_title_goes() {
+        let (f, i) = (fonts(), info());
+        let t = Theme::light(W, SHORT, PPD);
+        let m = t.m;
+        let mut app = App::new(Screen::Home, W, SHORT, PPD);
+        let fold = app.frame(&f, &i).fold.expect("the home page's search bar folds");
+        assert!((fold.span - (m.search_h + m.after_search)).abs() < 1e-3, "the bar and the gap under it");
+        let mut screen = Canvas::new(W, SHORT);
+        // Down a column through the bar clear of its words: the rows in the
+        // bar's grey, and the first row of the device card's white.
+        let x = m.dp(300.0) as u32;
+        let px = |screen: &Canvas, y: u32| screen.data[((y * W + x) * 4) as usize];
+        let bar = |screen: &Canvas| (0..SHORT).filter(|&y| px(screen, y) == t.pal.search.r).collect::<Vec<_>>();
+        let card = |screen: &Canvas| (fold.bar.y as u32..SHORT).find(|&y| px(screen, y) == t.pal.card.r).expect("the card shows");
+        // The large title's band.
+        let (top, bottom) = ((m.title_top - m.dp(14.0)) as u32, fold.bar.y as u32);
+        let title = |screen: &Canvas| screen.crop(0, top, W, bottom - top).data.clone();
+
+        app.compose(&mut screen, &f, &i, "12:00", 0);
+        let (whole, still, first) = (bar(&screen), title(&screen), card(&screen));
+        assert_eq!((whole[0], *whole.last().expect("the bar shows")), (fold.bar.y.ceil() as u32, (fold.bar.y + fold.bar.h).floor() as u32 - 1));
+
+        let half = (fold.bar.h / 2.0).round();
+        scroll_to(&mut app, &f, half, 1000);
+        app.compose(&mut screen, &f, &i, "12:00", 1800);
+        let rows = bar(&screen);
+        assert_eq!(rows[0], whole[0], "its top stays");
+        assert_eq!(*rows.last().expect("half the bar shows"), (fold.bar.y + fold.bar.h - half).floor() as u32 - 1, "its foot rises with the page");
+        assert_eq!(card(&screen), first - half as u32, "the content follows the finger");
+        assert!(title(&screen) == still, "the title holds still");
+
+        scroll_to(&mut app, &f, fold.span, 3000);
+        app.compose(&mut screen, &f, &i, "12:00", 3800);
+        assert!(bar(&screen).is_empty(), "folded away");
+        assert_eq!(card(&screen), first - fold.span.round() as u32, "the gap under it closed");
+        assert!(title(&screen) == still, "the title holds still till then");
+
+        scroll_to(&mut app, &f, fold.span + m.dp(10.0), 5000);
+        app.compose(&mut screen, &f, &i, "12:00", 5800);
+        assert!(title(&screen) != still, "then it goes up with the page");
+        assert!(!app.title.on, "the bar's title waits for the large one to fade");
+        scroll_to(&mut app, &f, fold.span + m.dp(TITLE_FADE_DP) + 2.0, 7000);
+        assert!(app.title.on);
+    }
+
+    #[test]
+    fn a_home_page_let_go_with_its_search_bar_part_folded_folds_it_whole_or_not_at_all() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, SHORT, PPD);
+        let span = app.frame(&f, &i).fold.expect("the home page's search bar folds").span;
+        let settle = |app: &mut App, from: u64| {
+            for ms in (from..from + 2000).step_by(8) {
+                app.tick(ms);
+            }
+            app.top().1
+        };
+        scroll_to(&mut app, &f, span * (FOLD_SETTLE - 0.1), 0);
+        assert_eq!(settle(&mut app, 800), 0.0, "short of the mark it unfolds");
+        scroll_to(&mut app, &f, span * (FOLD_SETTLE + 0.1), 3000);
+        assert_eq!(settle(&mut app, 3800), span, "past it it folds away");
+        scroll_to(&mut app, &f, span + 50.0, 6000);
+        assert_eq!(settle(&mut app, 6800), span + 50.0, "a page scrolled past the fold stays");
+
+        // A light flick down, a thousand pixels a second, let go past the
+        // fold, that glides to rest with the bar part folded.
+        scroll_to(&mut app, &f, span + 86.0, 8000);
+        app.touch(Touch::Down(10.0, 1000.0), &f, 9000);
+        for k in 1..=7u64 {
+            app.touch(Touch::Move(10.0, 1000.0 + 8.0 * k as f32), &f, 9000 + 8 * k);
+        }
+        app.touch(Touch::Up, &f, 9056);
+        let glide = app.fling.expect("it glides");
+        let (rest, _) = glide.at(u64::MAX);
+        assert!(rest > 0.0 && rest < span, "this one comes to rest in the fold: {rest}");
+        let folded = if rest < span * FOLD_SETTLE { 0.0 } else { span };
+        assert_eq!(settle(&mut app, 9056), folded, "it settles there the same way");
+
+        // Let go in the fold while still moving, too slowly to glide out of
+        // it: the bar settles at once from where it was let go.
+        scroll_to(&mut app, &f, 0.0, 12_000);
+        app.touch(Touch::Down(10.0, 1000.0), &f, 13_000);
+        for k in 1..=5u64 {
+            app.touch(Touch::Move(10.0, 1000.0 - 30.0 * k as f32), &f, 13_000 + 8 * k);
+        }
+        for k in 1..=14u64 {
+            app.touch(Touch::Move(10.0, 850.0 + 2.0 * k as f32), &f, 13_040 + 8 * k);
+        }
+        app.touch(Touch::Up, &f, 13_152);
+        assert_eq!(app.top().1, 122.0);
+        assert!(app.fling.is_none(), "no glide");
+        assert_eq!(app.seek.map(|(rest, _)| rest), Some(span), "it was let go past the mark");
+        assert_eq!(settle(&mut app, 13_152), span);
+
+        // A flick that carries the page out of the fold glides on.
+        scroll_to(&mut app, &f, 0.0, 16_000);
+        app.touch(Touch::Down(10.0, 1000.0), &f, 17_000);
+        for k in 1..=4u64 {
+            app.touch(Touch::Move(10.0, 1000.0 - 30.0 * k as f32), &f, 17_000 + 8 * k);
+        }
+        app.touch(Touch::Up, &f, 17_032);
+        let (end, _) = app.fling.expect("it glides").at(u64::MAX);
+        assert!(end > span, "on past the fold: {end}");
+    }
+
+    #[test]
+    fn a_search_bar_folded_away_answers_no_touch() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let fold = app.frame(&f, &i).fold.expect("the home page's search bar folds");
+        scroll_to(&mut app, &f, fold.span, 0);
+        app.tick(3000);
+        // Where the page carried the bar's middle had the bar scrolled with
+        // it: under the large title.
+        let (x, y) = fold.bar.centre();
+        app.touch(Touch::Down(x, y - fold.span), &f, 3000);
+        assert_eq!(app.pressing(), None, "nothing shows held");
+        app.touch(Touch::Up, &f, 3000);
+        assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn the_keys_unfold_the_search_bar_to_light_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let span = app.frame(&f, &i).fold.expect("the home page's search bar folds").span;
+        scroll_to(&mut app, &f, span, 0);
+        app.tick(3000);
+        press(&mut app, Key::VolumeDown, 3000);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::About))), "a bar folded away is not in view");
+        press(&mut app, Key::VolumeUp, 3000);
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))));
+        for ms in (3000..5000).step_by(8) {
+            app.tick(ms);
+        }
+        assert_eq!(app.top().1, 0.0, "the page went back up to unfold it");
+        press(&mut app, Key::Power, 5000);
+        assert_eq!(app.screen(), Screen::Search);
+    }
+
+    #[test]
+    fn a_search_bar_pulled_down_past_the_top_comes_down_whole_with_its_title() {
+        let fold = Fold { bar: Rect::new(36.0, 503.0, 1128.0, 131.0), hint: "", span: 169.0 };
+        assert_eq!(fold.shown(-30.0), Some(Rect::new(36.0, 533.0, 1128.0, 131.0)));
+        assert_eq!(fold.lift(-30.0), -30.0);
+        assert_eq!(fold.shown(31.0), Some(Rect::new(36.0, 503.0, 1128.0, 100.0)));
+        assert_eq!(fold.shown(131.0), None);
+        assert_eq!((fold.lift(150.0), fold.lift(200.0)), (0.0, 31.0));
     }
 
     /// The grey of the screen's pixel at (`x`, `y`).

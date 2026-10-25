@@ -16,7 +16,7 @@ const FRAME_US: u64 = 8333;
 const BUDGET_MS: f64 = 5.5;
 
 /// The moves timed, each from the page it starts on.
-const MOVES: [&str; 9] = ["press", "open", "drag", "fling", "back", "search", "about", "files", "renders"];
+const MOVES: [&str; 10] = ["press", "open", "drag", "fold", "fling", "back", "search", "about", "files", "renders"];
 
 /// Times what the UI draws: whole pages rendered, and every frame of the
 /// moves people make, driven the way the runtime drives the app. Run with
@@ -73,6 +73,12 @@ fn run(name: &str, f: &Fonts, i: &DeviceInfo, quiet: bool) {
             let mut p = Panel::new(Screen::Settings, f, i, quiet);
             p.drag(2400.0, 1900.0, 1000);
             p.report("the settings page dragged slowly");
+        }
+        "fold" => {
+            let mut p = Panel::new(Screen::Home, f, i, quiet);
+            p.drag(2400.0, 2260.0, 600);
+            p.run(800);
+            p.report("the home page's search bar folding, let go past halfway");
         }
         "fling" => {
             let mut p = Panel::new(Screen::Settings, f, i, quiet);

@@ -908,7 +908,7 @@ fn main() -> Result<()> {
     }
 
     // The panel mid-gesture, to set beside recordings of the same moves.
-    let moments: [Moment; 23] = [
+    let moments: [Moment; 27] = [
         ("08-about-light", Screen::About, false, &|_, _| 2000),
         ("08-about-dark", Screen::About, true, &|_, _| 2000),
         ("08-about-light-later", Screen::About, false, &|_, _| 9000),
@@ -939,6 +939,20 @@ fn main() -> Result<()> {
         ("69-fastboot-dark-unplugged", Screen::Fastboot, true, &|app, f| {
             app.set_fastboot(true, UsbLink::Unplugged);
             keys_down(app, f, &info, 1)
+        }),
+        // The home page's search bar folding away under a finger: its words
+        // fading, then the bar, folded whole once let go past halfway, and
+        // past that the large title going.
+        ("184-home-search-folding-light", Screen::Home, false, &|app, f| hold(app, f, 1900.0, 1834.0)),
+        ("185-home-search-folding-dark-late", Screen::Home, true, &|app, f| hold(app, f, 1900.0, 1790.0)),
+        ("186-home-search-folded-light", Screen::Home, false, &|app, f| drag(app, f, 1900.0, 1750.0)),
+        ("187-home-title-going-dark", Screen::Home, true, &|app, f| {
+            // The WLAN's row makes the page long enough to go on past the
+            // fold.
+            app.state.wlan = Some(joined(Joining::Connected(router_link())));
+            app.refresh();
+            app.frame(f, &info);
+            hold(app, f, 1900.0, 1700.0)
         }),
         ("111-home-keys-light", Screen::Home, false, &|app, f| keys_down(app, f, &info, 3)),
         ("112-home-keys-dark", Screen::Home, true, &|app, f| keys_down(app, f, &info, 9)),
@@ -1352,6 +1366,9 @@ fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo) -> Canvas {
     let mut c = Canvas::new(frame.canvas.w, frame.height(&t) as u32);
     c.clear(frame.bg);
     c.put(&frame.canvas, 0);
+    if let Some(fold) = &frame.fold {
+        fold.draw(&mut c, &t, &widgets::search_words(&t, f, fold.bar, fold.hint), 0.0);
+    }
     if let Some(rows) = &frame.rows {
         let cx = Ctx { t: &t, f, info, state: &state, term: None, band: None };
         for k in 0..rows.count() {

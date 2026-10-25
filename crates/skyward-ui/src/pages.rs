@@ -1,6 +1,6 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
-    FileOp, FileTask, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
+    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
     Slider, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, ADDABLE, BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS,
     FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE, USB_DRIVE_WANTED, WIPES, installs,
 };
@@ -205,10 +205,13 @@ pub fn home(cx: &Ctx) -> Frame {
     let (t, f, i, l) = (cx.t, cx.f, cx.info, cx.state.lang);
     let mut c = long_page(cx);
     let mut out = Vec::new();
-    let mut y = t.m.content_top;
-    let search_top = y;
-    y = widgets::search_bar(&mut c, t, f, y, l.pick(SEARCH_HINT));
-    out.push(Hit { rect: Rect::new(t.m.margin, search_top, t.m.w as f32 - t.m.margin * 2.0, t.m.search_h), action: Action::Open(Screen::Search) });
+    // The search bar is left room on the page and drawn over it, folding
+    // away as the page scrolls up.
+    let bar = Rect::new(t.m.margin, t.m.content_top, t.m.w as f32 - t.m.margin * 2.0, t.m.search_h);
+    let mut y = bar.y + bar.h + t.m.after_search;
+    let cards_top = y;
+    let fold = Fold { bar, hint: l.pick(SEARCH_HINT), span: cards_top - bar.y };
+    out.push(Hit { rect: bar, action: Action::Open(Screen::Search) });
 
     let sub = match &i.os_version {
         Some(v) => format!("{} · {v}", i.codename),
@@ -277,7 +280,10 @@ pub fn home(cx: &Ctx) -> Frame {
         Action::Open(Screen::Settings),
         Action::Open(Screen::Reboot),
     ]));
-    Frame { back: false, ..Frame::new(t, fit(c, t, system.bottom), out, HOME_TITLE, search_top) }
+    // However little it holds, the page scrolls far enough to fold its bar
+    // away.
+    let height = fitted(t, system.bottom).max(t.m.h + fold.span.ceil() as u32);
+    Frame { back: false, fold: Some(fold), ..Frame::new(t, c.crop_height(height), out, HOME_TITLE, cards_top) }
 }
 
 /// What the advanced page says beside its system update entry: a download
