@@ -401,22 +401,22 @@ mod tests {
 
     #[test]
     fn a_network_is_set_up_with_its_name_and_password_written_as_the_supplicant_takes_them() {
-        let wpa2 = network_commands(0, "家".as_bytes(), Security::Psk, "pass\"word", false).unwrap();
+        let wpa2 = network_commands(0, "Skyward客厅".as_bytes(), Security::Psk, "pass\"word", false).unwrap();
         assert_eq!(
             wpa2,
-            ["SET_NETWORK 0 ssid e5aeb6", "SET_NETWORK 0 key_mgmt WPA-PSK WPA-PSK-SHA256", "SET_NETWORK 0 psk \"pass\"word\""]
+            ["SET_NETWORK 0 ssid 536b7977617264e5aea2e58e85", "SET_NETWORK 0 key_mgmt WPA-PSK WPA-PSK-SHA256", "SET_NETWORK 0 psk \"pass\"word\""]
         );
-        let wpa3 = network_commands(2, b"x", Security::Sae, "short", false).unwrap();
+        let wpa3 = network_commands(2, b"Skyward",Security::Sae, "short", false).unwrap();
         assert_eq!(wpa3[1..], ["SET_NETWORK 2 key_mgmt SAE", "SET_NETWORK 2 sae_password 73686f7274", "SET_NETWORK 2 ieee80211w 2"]);
-        let both = network_commands(1, b"x", Security::PskSae, "12345678", false).unwrap();
+        let both = network_commands(1, b"Skyward",Security::PskSae, "12345678", false).unwrap();
         assert!(both.contains(&"SET_NETWORK 1 psk \"12345678\"".to_string()));
         assert!(both.contains(&"SET_NETWORK 1 sae_password 3132333435363738".to_string()));
-        assert_eq!(network_commands(0, b"x", Security::Open, "", false).unwrap()[1], "SET_NETWORK 0 key_mgmt NONE");
-        assert!(network_commands(0, b"x", Security::Psk, "1234567", false).is_err(), "a WPA2 password is 8 characters at least");
-        assert!(network_commands(0, b"x", Security::Psk, "密码密码密码密码", false).is_err(), "a WPA2 password is ASCII");
-        assert!(network_commands(0, b"x", Security::Wep, "12345", false).is_err());
-        let hidden = network_commands(3, b"x", Security::Open, "", true).unwrap();
-        assert_eq!(hidden, ["SET_NETWORK 3 ssid 78", "SET_NETWORK 3 scan_ssid 1", "SET_NETWORK 3 key_mgmt NONE"]);
+        assert_eq!(network_commands(0, b"Skyward",Security::Open, "", false).unwrap()[1], "SET_NETWORK 0 key_mgmt NONE");
+        assert!(network_commands(0, b"Skyward",Security::Psk, "1234567", false).is_err(), "a WPA2 password is 8 characters at least");
+        assert!(network_commands(0, b"Skyward",Security::Psk, "密码密码密码密码", false).is_err(), "a WPA2 password is ASCII");
+        assert!(network_commands(0, b"Skyward",Security::Wep, "12345", false).is_err());
+        let hidden = network_commands(3, b"Skyward", Security::Open, "", true).unwrap();
+        assert_eq!(hidden, ["SET_NETWORK 3 ssid 536b7977617264", "SET_NETWORK 3 scan_ssid 1", "SET_NETWORK 3 key_mgmt NONE"]);
     }
 
     #[test]

@@ -588,12 +588,12 @@ fn main() -> Result<()> {
         ("153-wlan-light-searching", Screen::Wlan, false, &|app| app.state.wlan = Some(Wlan { power: Power::On, ..Wlan::default() })),
         ("154-wlan-add-light", Screen::WlanAdd, false, &|app| adding(app, "", Security::Open, Field::Name, false)),
         ("155-wlan-add-light-password", Screen::WlanAdd, false, &|app| {
-            adding(app, "attic", Security::Psk, Field::Password, false);
+            adding(app, "Skyward-Attic", Security::Psk, Field::Password, false);
             app.state.password = "skyward2024".into();
         }),
-        ("156-wlan-add-light-choosing", Screen::WlanAdd, false, &|app| adding(app, "attic", Security::Psk, Field::Name, true)),
+        ("156-wlan-add-light-choosing", Screen::WlanAdd, false, &|app| adding(app, "Skyward-Attic", Security::Psk, Field::Name, true)),
         ("157-wlan-add-dark-choosing", Screen::WlanAdd, true, &|app| {
-            adding(app, "attic", Security::Open, Field::Name, true);
+            adding(app, "Skyward-Attic", Security::Open, Field::Name, true);
             app.state.held = Some(Action::PickSecurity(Security::Sae));
         }),
         ("158-wlan-light-traffic", Screen::Wlan, false, &|app| {

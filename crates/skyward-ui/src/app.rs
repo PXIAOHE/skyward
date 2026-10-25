@@ -9769,11 +9769,11 @@ mod tests {
         assert!(app.act(Action::Open(Screen::Wlan), 0).is_empty(), "a WLAN that is off is not scanned");
         assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(true)]);
         assert_eq!(app.state.wlan.as_ref().unwrap().power, Power::Starting, "the switch moves at once");
-        let nearby = vec![network("Skyward", -34, Security::Psk), network("cafe", -72, Security::Open), network("old", -60, Security::Wep)];
+        let nearby = vec![network("Skyward", -34, Security::Psk), network("Skyward-Open", -72, Security::Open), network("Skyward-WEP", -60, Security::Wep)];
         app.set_wlan(Wlan { power: Power::On, networks: nearby, joined: None });
         tap(&mut app, &f, &i, Action::JoinNetwork(2));
         assert_eq!(toast(&app), Some("暂不支持 WEP 加密的网络"));
-        let cafe = Effect::JoinWlan { ssid: b"cafe".to_vec(), name: "cafe".into(), security: Security::Open, password: Secret::default() };
+        let cafe = Effect::JoinWlan { ssid: b"Skyward-Open".to_vec(), name: "Skyward-Open".into(), security: Security::Open, password: Secret::default() };
         assert_eq!(tap(&mut app, &f, &i, Action::JoinNetwork(1)), vec![cafe], "an open network is joined at once");
         tap(&mut app, &f, &i, Action::JoinNetwork(0));
         assert_eq!(app.screen(), Screen::WlanPassword);
@@ -9855,7 +9855,7 @@ mod tests {
         };
         assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty());
         assert_eq!(toast(&app), Some("请输入网络名称"));
-        type_in(&mut app, "attic");
+        type_in(&mut app, "skyward");
         let frame = app.frame(&f, &i);
         assert!(!frame.hits.iter().any(|h| h.action == Action::TypeInto(Field::Password)), "an open network takes no password");
         // The protections open over the page, which then answers no touch
@@ -9868,7 +9868,7 @@ mod tests {
         app.touch(Touch::Down(below.0, below.1), &f, 0);
         app.touch(Touch::Up, &f, 0);
         let a = app.state.adding.clone().unwrap();
-        assert_eq!((a.name.as_str(), a.security, a.choosing), ("attic", Security::Open, false), "a touch off the list types nothing");
+        assert_eq!((a.name.as_str(), a.security, a.choosing), ("skyward", Security::Open, false), "a touch off the list types nothing");
         tap(&mut app, &f, &i, Action::ChooseSecurity);
         app.key(Key::Back, 0);
         assert_eq!((app.screen(), app.state.adding.as_ref().unwrap().choosing), (Screen::WlanAdd, false), "back closes the list first");
@@ -9880,14 +9880,14 @@ mod tests {
         tap(&mut app, &f, &i, Action::TypeInto(Field::Password));
         type_in(&mut app, "secret");
         tap(&mut app, &f, &i, Action::TypeInto(Field::Name));
-        assert_eq!((app.state.adding.as_ref().unwrap().name.as_str(), app.state.password.as_str()), ("attic", "secret"));
+        assert_eq!((app.state.adding.as_ref().unwrap().name.as_str(), app.state.password.as_str()), ("skyward", "secret"));
         assert!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)).is_empty());
         assert_eq!(toast(&app), Some("请输入 8 到 63 位密码"));
         assert_eq!(app.state.adding.as_ref().unwrap().field, Field::Password, "the keyboard types into the field turned down");
         tap(&mut app, &f, &i, Action::Type(Cap::Show(Layer::Digits)));
         type_in(&mut app, "12");
         let fx = tap(&mut app, &f, &i, Action::Type(Cap::Enter));
-        let join = Effect::JoinWlan { ssid: b"attic".to_vec(), name: "attic".into(), security: Security::Psk, password: Secret("secret12".into()) };
+        let join = Effect::JoinWlan { ssid: b"skyward".to_vec(), name: "skyward".into(), security: Security::Psk, password: Secret("secret12".into()) };
         assert_eq!(fx, vec![join]);
         assert_eq!(app.screen(), Screen::Wlan, "the WLAN page shows how joining goes");
         assert_eq!((app.state.adding.as_ref(), app.state.password.as_str()), (None, ""), "nothing typed is kept");
@@ -9897,7 +9897,7 @@ mod tests {
     fn a_network_added_by_hand_is_turned_down_for_a_name_too_long_and_joined_open_without_its_password() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
-        app.state.wlan = Some(Wlan { power: Power::On, networks: vec![network("cafe", -72, Security::Open)], joined: None });
+        app.state.wlan = Some(Wlan { power: Power::On, networks: vec![network("Skyward-Open", -72, Security::Open)], joined: None });
         app.act(Action::Open(Screen::Wlan), 0);
         tap(&mut app, &f, &i, Action::AddNetwork);
         tap(&mut app, &f, &i, Action::ChooseSecurity);
@@ -9975,13 +9975,13 @@ mod tests {
     fn a_networks_round_button_opens_its_details_and_its_row_joins_it() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
-        let nearby = vec![network("Skyward", -34, Security::Psk), network("cafe", -72, Security::Open)];
+        let nearby = vec![network("Skyward", -34, Security::Psk), network("Skyward-Open", -72, Security::Open)];
         app.state.wlan = Some(Wlan { power: Power::On, networks: nearby, joined: None });
         app.act(Action::Open(Screen::Wlan), 0);
         assert_eq!(tap(&mut app, &f, &i, Action::Rescan), vec![Effect::ScanWlan]);
         tap(&mut app, &f, &i, Action::NetworkDetails(1));
         assert_eq!(app.screen(), Screen::WlanNetwork);
-        assert_eq!(app.state.details.as_ref().map(|n| n.name.as_str()), Some("cafe"));
+        assert_eq!(app.state.details.as_ref().map(|n| n.name.as_str()), Some("Skyward-Open"));
         assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::LeaveNetwork), "a network not chosen has nothing to forget");
         app.key(Key::Back, 0);
         // The round button sits on its row, and is what a touch on it finds.

@@ -240,7 +240,7 @@ mod tests {
     }
 
     fn joining() -> Joined {
-        Joined { ssid: b"home".to_vec(), name: "home".into(), security: Security::Psk, stage: Stage::Joining }
+        Joined { ssid: b"Skyward".to_vec(), name: "Skyward".into(), security: Security::Psk, stage: Stage::Joining }
     }
 
     #[test]
