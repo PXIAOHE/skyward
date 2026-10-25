@@ -32,7 +32,7 @@ use skyward_net::wlan::{Power as WlanPower, Wlan};
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
     FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place,
-    RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe, DATA_OPENING, DATA_PARTITION, DOWNLOADS, INSTALL_UNFINISHED, USB_DRIVE,
+    RenameRefused, Screen, Shot, Target, UsbDrive, UsbLink, Wipe, DATA_OPENING, DATA_PARTITION, DOWNLOADS, INSTALL_UNFINISHED, USB_DRIVE,
 };
 use skyward_ui::surface::kms::KmsSurface;
 use skyward_ui::{Canvas, Fonts, Lang, Surface};
@@ -61,6 +61,12 @@ const TOUCH_WAIT: Duration = Duration::from_secs(5);
 /// storage the others do.
 const TMP_LOGS: &str = "/tmp/skyward-logs";
 const STORAGE_LOGS: &str = "Skyward/logs";
+
+/// The folder of internal storage the system saves its own screenshots in,
+/// which the gallery shows as its screenshots, and where a screenshot waits
+/// for internal storage to open.
+const SCREENSHOTS: &str = "DCIM/Screenshots";
+const HELD_SCREENSHOTS: &str = "/tmp/screenshots";
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
@@ -314,6 +320,51 @@ fn export_logs(recovery: bool, kernel: bool, into: &Path, zone: usize) -> Result
     Ok(folder)
 }
 
+/// Save `frame`, what the panel shows, as a picture named for when it was
+/// taken: into the gallery's screenshots where internal storage is open, as
+/// `storage` says, and otherwise into the recovery's own memory until it
+/// opens. Each is made as the system makes what it saves there.
+fn save_screenshot(frame: &Canvas, storage: bool, zone: usize) -> Result<Shot> {
+    let (folder, shot) = match storage {
+        true => (Path::new(skyward_crypto::data::SDCARD).join(SCREENSHOTS), Shot::Album),
+        false => (PathBuf::from(HELD_SCREENSHOTS), Shot::Held),
+    };
+    let there = folder.ancestors().find(|p| p.exists()).context("the root is always there")?;
+    let ownership = ownership(there)?;
+    skyward_files::make_folders(&folder, ownership)?;
+    let path = folder.join(skyward_ui::fmt::screenshot_name(unix_ms_now()?, zone));
+    let file = skyward_files::make_file(&path, ownership)?;
+    let mut out = std::io::BufWriter::new(&file);
+    frame.write_png(&mut out).with_context(|| format!("write {}", path.display()))?;
+    out.flush().with_context(|| format!("write {}", path.display()))?;
+    drop(out);
+    file.sync_all().with_context(|| format!("write {}", path.display()))?;
+    skyward_sys::kmsg(&format!("screenshot saved as {}", path.display()))?;
+    Ok(shot)
+}
+
+/// Move the screenshots held while internal storage was closed into the
+/// gallery's, now that it is open: each keeps its name, and is made there
+/// as the system makes what it saves.
+fn keep_held_screenshots() -> Result<()> {
+    let held = Path::new(HELD_SCREENSHOTS);
+    let shots = match fs::read_dir(held) {
+        Ok(entries) => entries.map(|e| e.map(|e| e.path())).collect::<std::io::Result<Vec<_>>>().with_context(|| format!("read {}", held.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", held.display())),
+    };
+    if shots.is_empty() {
+        return Ok(());
+    }
+    let album = Path::new(skyward_crypto::data::SDCARD).join(SCREENSHOTS);
+    let there = album.ancestors().find(|p| p.exists()).context("the root is always there")?;
+    let ownership = ownership(there)?;
+    skyward_files::make_folders(&album, ownership)?;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    skyward_files::move_into(&shots, &album, skyward_files::Clash::KeepBoth, ownership, &stop, &mut |_| {})?;
+    skyward_sys::kmsg(&format!("{} screenshots held in {} moved into {}", shots.len(), held.display(), album.display()))
+}
+
 /// The folder backups go in and are found in, in `place`.
 fn backups_in(place: Place) -> PathBuf {
     in_place(place, skyward_backup::FOLDER)
@@ -407,6 +458,11 @@ fn backup_end(end: backup::End) -> BackupEnd {
 /// Now, in Unix seconds.
 fn unix_now() -> Result<i64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_secs() as i64)
+}
+
+/// Now, in Unix milliseconds.
+fn unix_ms_now() -> Result<i64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_millis() as i64)
 }
 
 /// The USB drive plugged in, and whether it is shown at [`USB_DRIVE`] or
@@ -1674,6 +1730,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     app.unlock_failed(why, now);
                 }
             }
+            // Screenshots taken while internal storage was closed go into
+            // the gallery's once it opens.
+            if app.state.place_open(Place::Storage) {
+                if let Err(e) = keep_held_screenshots() {
+                    let why = format!("{e:#}");
+                    skyward_sys::kmsg(&format!("the screenshots held did not go into the gallery's: {why}"))?;
+                    app.screenshots_not_kept(&why, now);
+                }
+            }
             // The update the system asked for starts once what holds it is
             // open; until the user whose own files hold it unlocks them,
             // its page says to.
@@ -1818,6 +1883,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         if let Some(h) = &mut haptics {
                             h.click(app.state.vibration)?;
                         }
+                    }
+                    // The panel shows the last frame drawn, which is what is
+                    // saved; one that cannot be is the page's to report.
+                    Effect::Screenshot { storage } => {
+                        let t0 = Instant::now();
+                        let saved = save_screenshot(&screen, storage, app.state.time_zone).map_err(|e| format!("{e:#}"));
+                        eprintln!("screenshot {saved:?} in {} ms", t0.elapsed().as_millis());
+                        app.screenshot_saved(saved, now);
                     }
                     Effect::Sideload => {
                         ensure!(installer.is_none(), "an installer is running already");

@@ -1384,6 +1384,42 @@ pub fn export_failed(l: Lang, why: &str) -> String {
     tr!(l, "导出失败：{why}", "匯出失敗：{why}", "Couldn't export: {why}")
 }
 
+/// A screenshot went into the gallery's screenshots.
+pub const SCREENSHOT_SAVED: Text = ["截图已保存到相册", "截圖已儲存到相簿", "Screenshot saved to the gallery"];
+
+/// A screenshot is held until the owner's storage opens, and then goes into
+/// the gallery's.
+pub const SCREENSHOT_HELD: Text = ["截图已暂存，解密后存入相册", "截圖已暫存，解密後存入相簿", "Screenshot kept. It goes to the gallery once decrypted"];
+
+/// A screenshot was not saved, as the system says why.
+pub fn screenshot_failed(l: Lang, why: &str) -> String {
+    tr!(l, "截图保存失败：{why}", "截圖儲存失敗：{why}", "Couldn't save the screenshot: {why}")
+}
+
+/// The screenshots held while the owner's storage was closed did not go into
+/// the gallery's, as the system says why.
+pub fn screenshots_not_kept(l: Lang, why: &str) -> String {
+    tr!(l, "暂存的截图未能存入相册：{why}", "暫存的截圖未能存入相簿：{why}", "Kept screenshots couldn't go to the gallery: {why}")
+}
+
+/// The name a screenshot taken `unix_ms` milliseconds into Unix time is saved
+/// under, in the zone at `zone` in [`TIME_ZONES`]: as the system names its
+/// own, the time to the millisecond and then where it was taken,
+/// `Screenshot_2026-10-26-01-45-00-123_Skyward.png`.
+pub fn screenshot_name(unix_ms: i64, zone: usize) -> String {
+    let t = local(unix_ms.div_euclid(1000), zone);
+    format!(
+        "Screenshot_{:04}-{:02}-{:02}-{:02}-{:02}-{:02}-{:03}_Skyward.png",
+        t.year(),
+        t.month(),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        unix_ms.rem_euclid(1000)
+    )
+}
+
 /// What the terminal is told while a command it runs holds it.
 pub const TERMINAL_BUSY: Text = ["终端正在运行命令，请结束后重试", "終端機正在執行指令，請結束後重試", "The terminal is running a command. End it, then try again"];
 
@@ -1501,6 +1537,12 @@ mod tests {
         // Midnight in Beijing is 16:00 UTC the day before.
         assert_eq!(clock(1_792_339_200, 0), "00:00");
         assert_eq!(stamp(1_792_348_265, 0), "20261019-023105");
+    }
+
+    #[test]
+    fn a_screenshot_is_named_as_the_system_names_its_own() {
+        assert_eq!(screenshot_name(1_792_348_265_007, 0), "Screenshot_2026-10-19-02-31-05-007_Skyward.png");
+        assert_eq!(screenshot_name(1_792_348_265_999, zone("UTC")), "Screenshot_2026-10-18-18-31-05-999_Skyward.png", "in the zone chosen");
     }
 
     /// Where a zone named in the tz database is in [`TIME_ZONES`].

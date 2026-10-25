@@ -133,6 +133,21 @@ impl Canvas {
         self.held() == (0..self.h) && self.cols() == (0..self.w)
     }
 
+    /// Write the canvas, which holds all of itself, as a PNG of what the
+    /// panel shows of it: each pixel's color, without its alpha, which the
+    /// panel does not show.
+    pub fn write_png(&self, to: impl std::io::Write) -> anyhow::Result<()> {
+        assert!(self.whole(), "a picture is made of a canvas that holds all of itself");
+        let rgb: Vec<u8> = self.data.as_chunks::<4>().0.iter().flat_map(|&[r, g, b, _]| [r, g, b]).collect();
+        let mut png = png::Encoder::new(to, self.w, self.h);
+        png.set_color(png::ColorType::Rgb);
+        png.set_depth(png::BitDepth::Eight);
+        let mut writer = png.write_header()?;
+        writer.write_image_data(&rgb)?;
+        writer.finish()?;
+        Ok(())
+    }
+
     /// Take on the rows `band` holds, the same columns of them as this
     /// canvas holds, which run on from this canvas's last row or up to its
     /// first.
@@ -1165,6 +1180,22 @@ fn rr_sdf(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_holds_the_colors_the_panel_shows() {
+        let mut c = Canvas::filled(3, 2, Rgba::rgb(243, 243, 243));
+        c.data[..4].copy_from_slice(&[10, 20, 30, 0]);
+        c.data[20..24].copy_from_slice(&[200, 100, 50, 128]);
+        let mut png = Vec::new();
+        c.write_png(&mut png).unwrap();
+        let mut read = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        let mut pixels = vec![0; read.output_buffer_size()];
+        let info = read.next_frame(&mut pixels).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (3, 2, png::ColorType::Rgb));
+        assert_eq!(&pixels[..3], &[10, 20, 30], "the color whatever the alpha, as the panel shows it");
+        assert_eq!(&pixels[15..18], &[200, 100, 50]);
+        assert_eq!(&pixels[3..6], &[243, 243, 243]);
+    }
 
     #[test]
     fn a_shadow_fades_out_from_its_edge_as_the_stock_list_of_choices_casts_one() {

@@ -1769,12 +1769,27 @@ pub enum Key {
     Back,
 }
 
+/// Where a screenshot went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shot {
+    /// Into the gallery's screenshots, in the owner's shared storage.
+    Album,
+    /// Into the recovery's own memory, to go into the gallery's once the
+    /// owner's storage opens.
+    Held,
+}
+
 /// Work the runtime carries out on the UI's behalf.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Reboot(Target),
     /// A short tap of the vibration motor.
     Haptic,
+    /// Save what the panel shows as a picture: into the gallery's
+    /// screenshots in the owner's shared storage where `storage` says it is
+    /// open, and otherwise held until it is, telling how it went with
+    /// [`App::screenshot_saved`].
+    Screenshot { storage: bool },
     /// Offer internal storage to a computer over USB, or stop.
     FileTransfer(bool),
     /// Start receiving a package over USB.
@@ -2081,6 +2096,11 @@ const WAKE_GUARD_MS: u64 = 400;
 /// [`REPEAT_MS`], as the system repeats a key held.
 const REPEAT_DELAY_MS: u64 = 400;
 const REPEAT_MS: u64 = 50;
+/// The power key and volume down pressed within this long of each other
+/// take a screenshot, as the system's key combination does; the first of
+/// the two waits this long, or until it is let go, before it does what it
+/// does alone.
+const CHORD_MS: u64 = 150;
 /// How far along its track the knob of a swipe-to-confirm control has to
 /// be let go to confirm.
 const SLID: f32 = 0.9;
@@ -2364,6 +2384,9 @@ pub struct App {
     keys: bool,
     /// The button held down, and what holding it does.
     button: Option<(Key, Press)>,
+    /// The first of the power key and volume down gone down, waiting for
+    /// the other to take a screenshot, and when it went down.
+    chord: Option<(Key, u64)>,
     /// The page scrolling of its own accord, to show the control the keys
     /// moved to or to fold its search bar whole or not at all: where it
     /// comes to rest, and the spring taking it there.
@@ -2491,6 +2514,7 @@ impl App {
             // out, so its page starts worked with the keys.
             keys: start == Screen::Fastboot,
             button: None,
+            chord: None,
             seek: None,
             knob: None,
             adjusting: false,
@@ -2606,7 +2630,8 @@ impl App {
             _ => None,
         };
         let blink = self.blink_at(now).filter(|_| self.display_on).map(|(_, next)| next);
-        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink, darkens].into_iter().flatten().min()
+        let chord = self.chord.map(|(_, at)| at + CHORD_MS);
+        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink, darkens, chord].into_iter().flatten().min()
     }
 
     /// Whether a text field's cursor shows at `now`, and when it next turns;
@@ -2647,6 +2672,11 @@ impl App {
     /// deadline goes away.
     pub fn tick(&mut self, now: u64) -> Vec<Effect> {
         let mut fx = Vec::new();
+        // The key waiting for its partner in a screenshot, left alone long
+        // enough, does what it does alone.
+        if self.chord.is_some_and(|(_, at)| now >= at + CHORD_MS) {
+            fx.extend(self.let_chord_go());
+        }
         // An entry of the file manager held long enough, under a finger or
         // the power key, opens what can be done with it, a folder as much as
         // a file, with a tap of the motor.
@@ -4222,6 +4252,24 @@ impl App {
         self.say(text, now);
     }
 
+    /// The screenshot [`Effect::Screenshot`] asked for went where `saved`
+    /// says, or did not, as the system says why.
+    pub fn screenshot_saved(&mut self, saved: Result<Shot, String>, now: u64) {
+        let l = self.state.lang;
+        let text = match saved {
+            Ok(Shot::Album) => l.pick(fmt::SCREENSHOT_SAVED).to_string(),
+            Ok(Shot::Held) => l.pick(fmt::SCREENSHOT_HELD).to_string(),
+            Err(why) => fmt::screenshot_failed(l, &why),
+        };
+        self.say(&text, now);
+    }
+
+    /// The screenshots held while the owner's storage was closed did not go
+    /// into the gallery's once it opened, as the system says why.
+    pub fn screenshots_not_kept(&mut self, why: &str, now: u64) {
+        self.say(&fmt::screenshots_not_kept(self.state.lang, why), now);
+    }
+
     /// File transfer could not be turned on or off as the switch says: it
     /// shows how it stands, and why.
     pub fn file_transfer_failed(&mut self, on: bool, why: &str, now: u64) {
@@ -5705,25 +5753,68 @@ impl App {
     /// A button went down. With the keys working the page, the volume keys
     /// move the light from control to control and the power key works the
     /// one lit as it comes back up; otherwise the first volume press lights
-    /// a control, and the power key turns the panel off.
+    /// a control, and the power key turns the panel off. The power key and
+    /// volume down together take a screenshot instead: whichever of the two
+    /// goes down first waits [`CHORD_MS`] for the other, or until it is let
+    /// go, and then does what it does alone, as pressed when it went down.
     pub fn key(&mut self, key: Key, now: u64) -> Vec<Effect> {
         // Any button stops a gliding page, and brings a sliding one to rest.
         self.fling = None;
         self.end_turn();
+        if let Some((first, at)) = self.chord {
+            if matches!((first, key), (Key::Power, Key::VolumeDown) | (Key::VolumeDown, Key::Power)) && now < at + CHORD_MS {
+                return self.screenshot(key, now);
+            }
+        }
+        let mut fx = self.let_chord_go();
         if !self.display_on {
             // Any button lights the dark panel, and does only that.
             self.wake(now);
             self.button = Some((key, Press::Spent));
-            return Vec::new();
+            return fx;
         }
         // A button pressed just after the panel lit only keeps it awake, so
         // a power press meant to wake it does not turn it back off.
         if self.just_woke(now) {
             self.stir(now);
             self.button = Some((key, Press::Spent));
-            return Vec::new();
+            return fx;
         }
         self.stir(now);
+        if matches!(key, Key::Power | Key::VolumeDown) {
+            self.chord = Some((key, now));
+            return fx;
+        }
+        fx.extend(self.key_down(key, now));
+        fx
+    }
+
+    /// The power key and volume down went down together: what the panel
+    /// shows is saved as a picture, with a tap of the motor, and neither key
+    /// does anything more until let go.
+    fn screenshot(&mut self, key: Key, now: u64) -> Vec<Effect> {
+        self.chord = None;
+        self.stir(now);
+        self.button = Some((key, Press::Spent));
+        let mut fx = Vec::new();
+        if self.state.vibrate {
+            fx.push(Effect::Haptic);
+        }
+        fx.push(Effect::Screenshot { storage: self.state.place_open(Place::Storage) });
+        fx
+    }
+
+    /// The key waiting for its partner in a screenshot does what it does
+    /// alone, as pressed when it went down.
+    fn let_chord_go(&mut self) -> Vec<Effect> {
+        match self.chord.take() {
+            Some((key, at)) => self.key_down(key, at),
+            None => Vec::new(),
+        }
+    }
+
+    /// What a button going down does on its own.
+    fn key_down(&mut self, key: Key, now: u64) -> Vec<Effect> {
         match key {
             Key::Back => {
                 self.button = Some((key, Press::Spent));
@@ -5760,27 +5851,34 @@ impl App {
     }
 
     /// A button came back up: the power key works the control it went down
-    /// on, or confirms with the knob it slid far enough.
+    /// on, or confirms with the knob it slid far enough. Let go before its
+    /// partner in a screenshot came, the key waiting for it first does what
+    /// it does alone.
     pub fn key_up(&mut self, key: Key, now: u64) -> Vec<Effect> {
-        let Some((down, press)) = self.button else { return Vec::new() };
+        let mut fx = match self.chord {
+            Some((first, _)) if first == key => self.let_chord_go(),
+            _ => Vec::new(),
+        };
+        let Some((down, press)) = self.button else { return fx };
         if down != key {
-            return Vec::new();
+            return fx;
         }
         self.button = None;
         self.dirty = true;
         match press {
-            Press::Power { spot, .. } => self.work(spot, now),
+            Press::Power { spot, .. } => fx.extend(self.work(spot, now)),
             Press::Slide { which, track, .. } => {
                 let done = self.state.confirm > SLID;
                 self.let_knob_go(which, track);
                 if done {
-                    return self.confirmed(which, now);
+                    fx.extend(self.confirmed(which, now));
+                } else {
+                    self.say(self.state.lang.pick(["请按住电源键", "請按住電源鍵", "Hold the power key"]), now);
                 }
-                self.say(self.state.lang.pick(["请按住电源键", "請按住電源鍵", "Hold the power key"]), now);
-                Vec::new()
             }
-            Press::Volume { .. } | Press::Spent => Vec::new(),
+            Press::Volume { .. } | Press::Spent => {}
         }
+        fx
     }
 
     /// Whatever the button held down was doing comes to nothing until it is
@@ -7992,7 +8090,7 @@ mod tests {
         assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))), "the keys go on working the pages");
         app.touch(Touch::Down(W as f32 / 2.0, 200.0), &f, 0);
         app.touch(Touch::Up, &f, 0);
-        assert!(app.key(Key::Power, 0).is_empty());
+        assert!(press(&mut app, Key::Power, 0).is_empty());
         assert!(!app.display_on(), "with the light put out, power turns the panel off");
     }
 
@@ -8102,7 +8200,9 @@ mod tests {
         assert!(press(&mut app, Key::Power, 0).is_empty());
         assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("请按住电源键"), "a short press says how");
         app.key(Key::Power, 1000);
-        assert_eq!(app.deadline(1000), Some(0), "the knob moves while the key is held");
+        assert_eq!(app.deadline(1000), Some(1000 + CHORD_MS), "it waits for volume down first");
+        app.tick(1000 + CHORD_MS);
+        assert_eq!(app.deadline(1000 + CHORD_MS), Some(0), "then the knob moves while the key is held");
         app.tick(1000 + SLIDE_MS / 2);
         assert!((app.state.confirm - 0.5).abs() < 0.01, "half way after half the time: {}", app.state.confirm);
         assert!(app.key_up(Key::Power, 1000 + SLIDE_MS / 2).is_empty(), "let go short of the end, nothing happens");
@@ -8221,7 +8321,9 @@ mod tests {
         press(&mut app, Key::VolumeDown, 0);
         assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::OpenEntry(0))));
         assert!(app.key(Key::Power, 1000).is_empty());
-        assert_eq!(app.deadline(1000), Some(1000 + LONG_PRESS_MS), "the press is timed");
+        assert_eq!(app.deadline(1000), Some(1000 + CHORD_MS), "it waits for volume down first");
+        assert!(app.tick(1000 + CHORD_MS).is_empty());
+        assert_eq!(app.deadline(1000 + CHORD_MS), Some(1000 + LONG_PRESS_MS), "the press is timed from when it went down");
         assert!(app.tick(1000 + LONG_PRESS_MS - 1).is_empty());
         assert_eq!(app.tick(1000 + LONG_PRESS_MS), vec![Effect::Haptic], "held long enough, the folder's page opens");
         assert_eq!(app.screen(), Screen::FileInfo);
@@ -8261,8 +8363,10 @@ mod tests {
         let mut app = App::new(Screen::Home, W, H, PPD);
         app.frame(&f, &i);
         app.key(Key::VolumeDown, 0);
+        assert_eq!(app.deadline(0), Some(CHORD_MS), "it waits for the power key first");
+        app.tick(CHORD_MS);
         assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))));
-        assert_eq!(app.deadline(0), Some(REPEAT_DELAY_MS));
+        assert_eq!(app.deadline(CHORD_MS), Some(REPEAT_DELAY_MS), "and repeats as from when it went down");
         app.tick(REPEAT_DELAY_MS - 1);
         assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))), "not held long enough yet");
         app.tick(REPEAT_DELAY_MS);
@@ -8323,7 +8427,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::Erase, "there is nothing to go back to");
         app.erase_at(Part::Metadata);
         assert_eq!(app.state.erase.done, 1);
-        app.key(Key::Power, 0);
+        press(&mut app, Key::Power, 0);
         assert!(!app.display_on());
         app.erase_ended(Err(EraseStop::Failed(Part::Metadata, "make_f2fs ended with exit status: 1".into())), 1000);
         assert!(app.display_on(), "what comes next is the user's to choose");
@@ -8391,7 +8495,7 @@ mod tests {
         assert_eq!(app.state.erase.progress, Some((30, 120)));
         app.erase_at(Part::Art);
         assert_eq!(app.state.erase.progress, None, "the next part starts from nothing");
-        app.key(Key::Power, 0);
+        press(&mut app, Key::Power, 0);
         assert!(!app.display_on());
         app.erase_ended(Ok(()), 1000);
         assert!(app.display_on(), "how it ended waits to be read");
@@ -10268,9 +10372,78 @@ mod tests {
     fn power_key_turns_the_panel_off_and_on() {
         let mut app = App::new(Screen::Home, W, H, PPD);
         assert!(app.key(Key::Power, 0).is_empty());
-        assert_eq!(app.panel(0), None);
-        assert!(app.key(Key::Power, 10).is_empty());
-        assert_eq!(app.panel(10), Some(SLIDER_START));
+        assert_eq!(app.panel(0), Some(SLIDER_START), "it waits for volume down first");
+        assert_eq!(app.deadline(0), Some(CHORD_MS));
+        assert!(app.tick(CHORD_MS).is_empty());
+        assert_eq!(app.panel(CHORD_MS), None, "held on alone, it turns the panel off");
+        assert!(app.key_up(Key::Power, CHORD_MS + 50).is_empty());
+        assert!(app.key(Key::Power, CHORD_MS + 60).is_empty());
+        assert_eq!(app.panel(CHORD_MS + 60), Some(SLIDER_START));
+        assert!(app.key_up(Key::Power, CHORD_MS + 100).is_empty());
+        assert!(app.key(Key::Power, 1000).is_empty());
+        assert!(app.key_up(Key::Power, 1050).is_empty());
+        assert_eq!(app.panel(1050), None, "let go sooner, it turns the panel off then");
+    }
+
+    #[test]
+    fn the_power_key_and_volume_down_together_take_a_screenshot() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.frame(&f, &i);
+        app.state.vibrate = true;
+        assert!(app.key(Key::Power, 0).is_empty());
+        let shot = vec![Effect::Haptic, Effect::Screenshot { storage: false }];
+        assert_eq!(app.key(Key::VolumeDown, CHORD_MS - 1), shot, "volume down follows in time");
+        assert_eq!(app.chord, None, "nothing is left waiting");
+        assert!(app.tick(1000).is_empty());
+        assert!(app.key_up(Key::Power, 1000).is_empty());
+        assert!(app.key_up(Key::VolumeDown, 1010).is_empty());
+        assert!(app.display_on(), "the power key did not turn the panel off");
+        assert!(!app.keys, "nor did volume down light a control");
+        // Volume down first works the same, the other key coming up first.
+        assert!(app.key(Key::VolumeDown, 2000).is_empty());
+        assert_eq!(app.key(Key::Power, 2100), shot);
+        assert!(app.key_up(Key::VolumeDown, 2150).is_empty());
+        assert!(app.key_up(Key::Power, 2200).is_empty());
+        assert!(app.display_on());
+        assert!(!app.keys);
+        // Without a tap of the motor where the settings turn it off, and into
+        // the gallery once internal storage is open.
+        app.state.vibrate = false;
+        app.data_waiting(None);
+        app.key(Key::Power, 3000);
+        assert_eq!(app.key(Key::VolumeDown, 3010), vec![Effect::Screenshot { storage: true }]);
+    }
+
+    #[test]
+    fn the_power_key_and_volume_down_too_far_apart_each_do_their_own() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.frame(&f, &i);
+        assert!(app.key(Key::VolumeDown, 0).is_empty());
+        assert!(!app.keys, "volume down waits for the power key first");
+        assert!(app.tick(CHORD_MS).is_empty());
+        assert!(app.keys, "then lights a control on its own");
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Open(Screen::Search))));
+        assert!(app.key(Key::Power, CHORD_MS + 10).is_empty(), "the power key came too late");
+        assert!(app.key_up(Key::VolumeDown, CHORD_MS + 20).is_empty());
+        assert!(app.tick(CHORD_MS * 2 + 10).is_empty());
+        assert_eq!(app.screen(), Screen::Home, "the power key waits on the control lit until it comes up");
+        app.key_up(Key::Power, CHORD_MS * 3);
+        assert_eq!(app.screen(), Screen::Search, "and then works it");
+    }
+
+    #[test]
+    fn a_screenshot_says_where_it_went() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.screenshot_saved(Ok(Shot::Album), 0);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("截图已保存到相册"));
+        app.screenshot_saved(Ok(Shot::Held), 0);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("截图已暂存，解密后存入相册"));
+        app.screenshot_saved(Err("No space left on device".into()), 0);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("截图保存失败：No space left on device"));
+        app.screenshots_not_kept("Read-only file system", 0);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("暂存的截图未能存入相册：Read-only file system"));
     }
 
     /// With the default two minutes, when the panel dims and when it goes
@@ -10339,7 +10512,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
-        app.key(Key::Power, 0);
+        press(&mut app, Key::Power, 0);
         assert!(app.touch(Touch::Down(x, y), &f, 100).is_empty());
         assert_eq!(app.panel(100), Some(SLIDER_START));
         assert!(app.touch(Touch::Move(x, y - 300.0), &f, 120).is_empty());
@@ -10354,7 +10527,7 @@ mod tests {
     fn a_key_lights_the_dark_panel_and_does_nothing_else() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Settings, &f, &i);
-        app.key(Key::Power, 0);
+        press(&mut app, Key::Power, 0);
         assert!(app.key(Key::Back, 10).is_empty());
         assert!(app.display_on());
         assert_eq!(app.screen(), Screen::Settings, "back did not go back");
@@ -10364,7 +10537,7 @@ mod tests {
     fn a_stray_press_just_after_the_panel_lights_only_keeps_it_awake() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Reboot, &f, &i);
-        app.key(Key::Power, 0);
+        press(&mut app, Key::Power, 0);
         // A key wakes the panel; the next, within the guard, does not sleep
         // it again or act.
         app.key(Key::Power, 100);
@@ -10374,7 +10547,7 @@ mod tests {
         assert!(app.key(Key::Back, 350).is_empty());
         assert_eq!(app.screen(), Screen::Reboot, "back did not go back");
         // Past the guard, power turns it off as usual.
-        app.key(Key::Power, 600);
+        press(&mut app, Key::Power, 600);
         assert!(!app.display_on());
     }
 
@@ -10382,7 +10555,7 @@ mod tests {
     fn a_stray_touch_just_after_an_install_lights_the_panel_presses_nothing() {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
-        app.key(Key::Power, 0);
+        press(&mut app, Key::Power, 0);
         app.install(Event::Finished(Outcome::Installed { slot: Slot::A, wipe: false }), 100);
         assert!(app.display_on(), "the finished install lit the panel");
         // A finger reaching for the phone lands on 重启到系统; within the
@@ -10405,7 +10578,7 @@ mod tests {
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
         app.touch(Touch::Move(track.x + track.w * 0.6, y), &f, 10);
         assert!(app.state.confirm > 0.0);
-        app.key(Key::Power, 20);
+        press(&mut app, Key::Power, 20);
         assert_eq!(app.state.confirm, 0.0, "the knob is back at the start");
         app.touch(Touch::Move(track.x + track.w, y), &f, 30);
         assert!(app.touch(Touch::Up, &f, 40).is_empty(), "no reboot from a dark panel");
@@ -10427,14 +10600,14 @@ mod tests {
     fn the_installer_lights_the_panel_when_it_needs_the_user() {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
-        app.key(Key::Power, 0);
+        press(&mut app, Key::Power, 0);
         app.install(Event::Checking { size: 1 << 20 }, 10);
         assert!(!app.display_on(), "reading the package does not light it");
         app.install(Event::Image { kind: ImageKind::Dtbo, size: 1 << 20, partitions: vec!["dtbo"] }, 20);
         assert!(app.display_on(), "an image waiting for its partition does");
         assert_eq!(app.deadline(20), Some(20 + DIMS));
         app.state.install = Install::Flashing { partition: "dtbo", stage: None };
-        app.key(Key::Power, 500);
+        press(&mut app, Key::Power, 500);
         app.install(Event::Progress(Stage::Flashing { done: 1, total: 2 }), 510);
         assert!(!app.display_on(), "progress does not");
         app.install(Event::Finished(Outcome::Flashed { partition: "dtbo", slots: vec![Slot::A] }), 520);
@@ -10446,7 +10619,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = sideloading(&f, &i);
         assert_eq!(app.key(Key::Back, 0), vec![Effect::Cancel]);
-        app.key(Key::Power, 10);
+        press(&mut app, Key::Power, 10);
         app.install(Event::Finished(Outcome::Cancelled), 20);
         assert!(!app.display_on());
         assert_eq!(app.state.install, Install::Idle);

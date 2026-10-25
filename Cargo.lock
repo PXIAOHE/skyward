@@ -2428,6 +2428,7 @@ dependencies = [
  "icu_locale_core",
  "jiff",
  "libc",
+ "png",
  "proc-macro2",
  "skyward-info",
  "skyward-install",
