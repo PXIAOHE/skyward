@@ -204,6 +204,15 @@ pub struct Logd {
     pub libraries: Vec<String>,
 }
 
+/// A name as each language the pages speak writes it: Chinese in
+/// simplified and in traditional characters, and English.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Names {
+    pub hans: String,
+    pub hant: String,
+    pub en: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Device {
     pub codename: String,
@@ -215,7 +224,7 @@ pub struct Device {
     pub ab: bool,
     /// SoC marketing name shown on the About page.
     #[serde(default)]
-    pub soc: Option<String>,
+    pub soc: Option<Names>,
     /// System property that carries the vendor OS version.
     #[serde(default = "default_os_version_prop")]
     pub os_version_prop: String,
@@ -507,7 +516,9 @@ mod tests {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
         assert_eq!(cfg.device.codename, "nezha");
         assert_eq!(cfg.device.os_version_prop, "ro.mi.os.version.incremental");
-        assert_eq!(cfg.device.soc.as_deref(), Some("第五代骁龙®8至尊版移动平台"));
+        let soc = cfg.device.soc.expect("nezha names its SoC");
+        assert_eq!(soc.hans, "第五代骁龙®8至尊版移动平台");
+        assert_eq!(soc.en, "Snapdragon® 8 Elite Gen 5 Mobile Platform");
         assert_eq!(cfg.display.width, 1200);
         assert_eq!(cfg.display.diagonal, Some(6.9));
         assert_eq!(cfg.modules.load, ["synaptics_tcm2"]);

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 ab_glyph = "0.2.32"
+icu_locale_core = { version = "2.4.0", features = ["alloc"] }
 # The recovery carries no time zone files, so the rules come built in.
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 skyward-info = { path = "../skyward-info" }
@@ -16,6 +17,12 @@ skyward-vab = { path = "../skyward-vab" }
 ttf-parser = "0.25.1"
 unicode-width = "0.2.2"
 vt100 = "0.18.1"
+
+[dev-dependencies]
+# The test that the typeface draws every text the pages write reads them
+# from the source.
+proc-macro2 = "1.0.107"
+syn = { version = "2.0.119", features = ["full", "visit"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 drm = "0.15.0"

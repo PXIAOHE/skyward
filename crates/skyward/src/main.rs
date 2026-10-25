@@ -296,7 +296,7 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Clock => {
             let ms = skyward_sys::clock::set_from_rtc()?;
-            println!("{}", skyward_ui::fmt::datetime((ms / 1000) as i64, 0));
+            println!("{}", skyward_ui::fmt::datetime(skyward_ui::Lang::En, (ms / 1000) as i64, 0));
             Ok(())
         }
         #[cfg(target_os = "android")]

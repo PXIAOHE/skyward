@@ -311,6 +311,7 @@ fn info() -> DeviceInfo {
         screen: Some(6.73),
         os_version: None,
         android: None,
+        locale: None,
         security_patch: None,
         kernel: "5.15.178".into(),
         storage: Storage { total: 496_550_785_024, free: None },

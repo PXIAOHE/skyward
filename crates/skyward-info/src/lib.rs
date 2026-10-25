@@ -25,7 +25,7 @@ const SYS_BLOCK: &str = "/sys/class/block";
 pub struct DeviceInfo {
     pub model: String,
     pub codename: String,
-    pub soc: Option<String>,
+    pub soc: Option<skyward_config::Names>,
     pub cpu: Cpu,
     /// `MemTotal` in KiB.
     pub ram_kib: u64,
@@ -35,6 +35,9 @@ pub struct DeviceInfo {
     pub screen: Option<f32>,
     pub os_version: Option<String>,
     pub android: Option<String>,
+    /// The locale the installed system is built to start in, such as
+    /// `zh-CN`.
+    pub locale: Option<String>,
     pub security_patch: Option<PatchLevel>,
     pub kernel: String,
     pub storage: Storage,
@@ -145,6 +148,7 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         screen: d.diagonal,
         os_version: system.get(&cfg.device.os_version_prop),
         android: system.get("ro.build.version.release"),
+        locale: system.get("ro.product.locale"),
         security_patch: system.get("ro.build.version.security_patch").map(|s| s.parse()).transpose()?,
         kernel: kernel_release()?,
         storage: storage()?,

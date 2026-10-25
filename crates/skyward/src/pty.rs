@@ -1,6 +1,7 @@
 //! A shell on a pseudo-terminal, for the terminal page.
 
 use anyhow::{bail, Context, Result};
+use skyward_ui::app::TermEnd;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -145,11 +146,11 @@ fn cd(folder: &str) -> Vec<u8> {
     format!("\x15cd -- '{}'\r", folder.replace('\'', r"'\''")).into_bytes()
 }
 
-/// How a shell's end reads on the terminal page.
-pub fn how(status: ExitStatus) -> String {
+/// How a shell ended, as the terminal page tells it.
+pub fn how(status: ExitStatus) -> TermEnd {
     match (status.code(), status.signal()) {
-        (Some(code), _) => format!("shell 已退出，退出码 {code}"),
-        (None, Some(signal)) => format!("shell 已被信号 {signal} 终止"),
-        (None, None) => format!("shell 已结束：{status}"),
+        (Some(code), _) => TermEnd::Exited(code),
+        (None, Some(signal)) => TermEnd::Signalled(signal),
+        (None, None) => TermEnd::Other(status.to_string()),
     }
 }

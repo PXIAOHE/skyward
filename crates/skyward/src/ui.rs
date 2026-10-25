@@ -32,10 +32,10 @@ use skyward_net::wlan::{Power as WlanPower, Wlan};
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
     FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place,
-    RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe, DATA_PARTITION, DOWNLOADS, USB_DRIVE,
+    RenameRefused, Screen, Target, UsbDrive, UsbLink, Wipe, DATA_OPENING, DATA_PARTITION, DOWNLOADS, INSTALL_UNFINISHED, USB_DRIVE,
 };
 use skyward_ui::surface::kms::KmsSurface;
-use skyward_ui::{Canvas, Fonts, Surface};
+use skyward_ui::{Canvas, Fonts, Lang, Surface};
 use skyward_vab::{Merge, Standing};
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -48,9 +48,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// How long init may take to hand the USB port to another function: the
 /// program behind the new one has to start and get ready first.
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// What the computer calls internal storage, as the stock system names it.
-const STORAGE_NAME: &str = "内部存储设备";
 
 /// How long the page shows that the work the system asked for is done
 /// before the phone starts the system or powers off.
@@ -192,11 +189,13 @@ impl Transfer {
         Ok(Transfer { service, offered: false, zone })
     }
 
-    /// Offer internal storage, or take it back. Once this returns, nothing
-    /// the computer had under way in it goes on.
-    fn offer(&mut self, offer: bool) -> Result<()> {
+    /// Offer internal storage, named for the computer in `lang`, or take it
+    /// back. Once this returns, nothing the computer had under way in it
+    /// goes on.
+    fn offer(&mut self, offer: bool, lang: Lang) -> Result<()> {
         if offer != self.offered {
-            let storage = offer.then(|| skyward_mtp::Storage { top: PathBuf::from(skyward_crypto::data::SDCARD), description: STORAGE_NAME.into() });
+            let description = skyward_ui::fmt::storage_name(lang).into();
+            let storage = offer.then(|| skyward_mtp::Storage { top: PathBuf::from(skyward_crypto::data::SDCARD), description });
             self.service.offer(storage)?;
             self.offered = offer;
         }
@@ -217,11 +216,11 @@ impl Transfer {
 /// work can start, which the page is told otherwise.
 fn withhold(transfer: &mut Option<Transfer>, app: &mut App, now: u64) -> Result<bool> {
     let Some(t) = transfer else { return Ok(true) };
-    match t.offer(false) {
+    match t.offer(false, app.state.lang) {
         Ok(()) => Ok(true),
         Err(e) => {
             skyward_sys::kmsg(&format!("file transfer kept internal storage: {e:#}"))?;
-            app.report(&format!("未能停止文件传输：{e:#}"), now);
+            app.report(&skyward_ui::fmt::transfer_kept(app.state.lang, &format!("{e:#}")), now);
             Ok(false)
         }
     }
@@ -984,6 +983,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     };
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
     app.set_screen_corners(cfg.display.corner_radius as f32);
+    // The pages speak the language the system named with the work it asks
+    // for, or else the one the installed system is built to start in.
+    if let Some(locale) = request.locale.as_deref().or(info.locale.as_deref()) {
+        app.state.lang = Lang::for_locale(locale)?;
+        skyward_sys::kmsg(&format!("the pages speak {:?}, for the locale {locale}", app.state.lang))?;
+    }
     app.set_asked(asked(&request));
     // Opening the data partition, or a user's own files in it, under way,
     // and the users whose own files are still closed once it is open.
@@ -1022,7 +1027,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             Ok(t) => transfer = Some(t),
             Err(e) => {
                 skyward_sys::kmsg(&format!("file transfer did not start: {e:#}"))?;
-                app.file_transfer_failed(false, &format!("无法开启文件传输：{e:#}"), monotonic_ms());
+                app.file_transfer_failed(false, &skyward_ui::fmt::transfer_failed(app.state.lang, &format!("{e:#}")), monotonic_ms());
             }
         }
     }
@@ -1564,7 +1569,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     merge::Event::Failed(why) => {
                         skyward_sys::kmsg(&format!("the update did not merge: {why}"))?;
-                        app.report(&format!("未能合并更新：{why}"), now);
+                        app.report(&skyward_ui::fmt::merge_failed(app.state.lang, &why), now);
                         app.set_update(skyward_vab::standing(slot)?);
                     }
                 }
@@ -1688,7 +1693,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 if !last.is_empty() {
                     app.term_output(&last);
                 }
-                app.term_ended(&pty::how(status));
+                app.term_ended(pty::how(status));
                 shell = None;
             }
         }
@@ -1750,7 +1755,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::Wipe(chosen) => {
                         ensure!(eraser.is_none(), "erasing is under way already");
                         if decryptor.is_some() {
-                            app.report("正在打开 data 分区，请稍后再试", now);
+                            app.report(app.state.lang.pick(DATA_OPENING), now);
                             continue;
                         }
                         if !withhold(&mut transfer, &mut app, now)? {
@@ -1795,7 +1800,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let went = match sh.waiting() {
                             Ok(true) => sh.change_to(&folder),
                             Ok(false) => {
-                                app.report("终端正在运行命令，请结束后重试", now);
+                                app.report(app.state.lang.pick(skyward_ui::fmt::TERMINAL_BUSY), now);
                                 Ok(())
                             }
                             Err(e) => Err(e),
@@ -1918,8 +1923,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                                 app.relabel_started();
                             }
                             Err(e) => match e.downcast_ref::<relabel::Unmounted>() {
-                                Some(relabel::Unmounted(base)) => app.report(&format!("请先在「挂载」中挂载 {base} 分区"), now),
-                                None => app.report(&format!("未能读取系统的 SELinux 规则：{e:#}"), now),
+                                Some(relabel::Unmounted(base)) => app.report(&skyward_ui::fmt::mount_first(app.state.lang, base), now),
+                                None => app.report(&skyward_ui::fmt::rules_unread(app.state.lang, &format!("{e:#}")), now),
                             },
                         }
                     }
@@ -1934,7 +1939,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::Filesystem { name, action } => {
                         ensure!(eraser.is_none() && part_worker.is_none(), "work on partitions is under way already");
                         if name == DATA_PARTITION && decryptor.is_some() {
-                            app.report("正在打开 data 分区，请稍后再试", now);
+                            app.report(app.state.lang.pick(DATA_OPENING), now);
                             continue;
                         }
                         if name == DATA_PARTITION && !withhold(&mut transfer, &mut app, now)? {
@@ -1959,7 +1964,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::Backup { parts, place, compress, verify } => {
                         ensure!(backuper.is_none(), "a backup or restore is under way already");
                         if installer.is_some() {
-                            app.report("上一次安装尚未结束，请稍后再试", now);
+                            app.report(app.state.lang.pick(INSTALL_UNFINISHED), now);
                             continue;
                         }
                         let into = backups_in(place);
@@ -1992,7 +1997,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::Restore { place, name, parts } => {
                         ensure!(backuper.is_none(), "a backup or restore is under way already");
                         if installer.is_some() {
-                            app.report("上一次安装尚未结束，请稍后再试", now);
+                            app.report(app.state.lang.pick(INSTALL_UNFINISHED), now);
                             continue;
                         }
                         let task = backup::RestoreTask {
@@ -2070,8 +2075,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             false => PathBuf::from(TMP_LOGS),
                         };
                         match export_logs(recovery, kernel, &into, app.state.time_zone) {
-                            Ok(folder) => app.report(&format!("已导出到 {}", folder.display()), now),
-                            Err(e) => app.report(&format!("导出失败：{e:#}"), now),
+                            Ok(folder) => app.report(&skyward_ui::fmt::exported(app.state.lang, &folder.display().to_string()), now),
+                            Err(e) => app.report(&skyward_ui::fmt::export_failed(app.state.lang, &format!("{e:#}")), now),
                         }
                     }
                     Effect::SetMode { path, mode } => {
@@ -2145,13 +2150,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                                 }
                                 Err(e) => {
                                     skyward_sys::kmsg(&format!("file transfer did not start: {e:#}"))?;
-                                    app.file_transfer_failed(false, &format!("无法开启文件传输：{e:#}"), now);
+                                    app.file_transfer_failed(false, &skyward_ui::fmt::transfer_failed(app.state.lang, &format!("{e:#}")), now);
                                 }
                             },
                             (false, Some(t)) => {
                                 if let Err(e) = t.stop(rests) {
                                     skyward_sys::kmsg(&format!("file transfer did not stop cleanly: {e:#}"))?;
-                                    app.report(&format!("关闭文件传输失败：{e:#}"), now);
+                                    app.report(&skyward_ui::fmt::transfer_left_on(app.state.lang, &format!("{e:#}")), now);
                                 }
                             }
                             (on, t) => unreachable!("the switch turned file transfer {on} while it was {}", t.is_some()),
@@ -2167,7 +2172,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             Some(t) if !t.service.running() => Err(anyhow!("the file transfer service ended")),
             Some(t) => {
                 let offer = app.state.data.storage_open() && eraser.is_none() && installer.is_none();
-                t.offer(offer).and_then(|()| {
+                t.offer(offer, app.state.lang).and_then(|()| {
                     if t.zone != app.state.time_zone {
                         t.service.set_zone(skyward_ui::fmt::rules(app.state.time_zone).clone())?;
                         t.zone = app.state.time_zone;
@@ -2184,7 +2189,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 Ok(()) => e,
             };
             skyward_sys::kmsg(&format!("file transfer stops: {why:#}"))?;
-            app.file_transfer_failed(false, &format!("文件传输已停止：{why:#}"), now);
+            app.file_transfer_failed(false, &skyward_ui::fmt::transfer_stopped(app.state.lang, &format!("{why:#}")), now);
         }
     }
 }

@@ -940,6 +940,7 @@ checksum = "25d29b57c17c6528d0dc4c2141cfa2d08200465acb537a3909c8b9b8a4a984c0"
 dependencies = [
  "displaydoc",
  "litemap",
+ "serde",
  "tinystr",
  "writeable",
  "zerovec",
@@ -2180,12 +2181,15 @@ dependencies = [
  "anyhow",
  "drm",
  "drm-ffi",
+ "icu_locale_core",
  "jiff",
  "libc",
+ "proc-macro2",
  "skyward-info",
  "skyward-install",
  "skyward-net",
  "skyward-vab",
+ "syn 2.0.119",
  "ttf-parser",
  "unicode-width",
  "vt100",
@@ -2345,6 +2349,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "abc840c238154d58f9e86b2792261edfde565a17696e1cda1a449de27979801a"
 dependencies = [
  "displaydoc",
+ "serde_core",
  "zerovec",
 ]
 
@@ -2893,6 +2898,7 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f58a2799cfe9a1670c7ea8edbd52ef8edb93cb37a7f83bf31ba9e35d9dae6a40"
 dependencies = [
+ "serde",
  "yoke",
  "zerofrom",
  "zerovec-derive",

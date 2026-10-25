@@ -8,12 +8,14 @@ use crate::focus::{self, Group, Spot, Stop};
 use crate::font::Fonts;
 use crate::geom::Rect;
 use crate::glow::{self, GlowClock};
+use crate::lang::{Lang, Text};
 use crate::motion::{self, Spring};
 use crate::pages::{self, Band, Ctx};
 use crate::sprite::{Blurs, Sprite};
 use crate::search;
 use crate::term::{self, Term, TermKey};
 use crate::theme::Theme;
+use crate::tr;
 use crate::widgets::{self, Bar, Cap, Layer, WlanMark};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Refusal, Stage};
@@ -175,8 +177,30 @@ pub const DOWNLOADS: &str = "downloaded_rom";
 /// Where the USB drive plugged in is shown.
 pub const USB_DRIVE: &str = "/mnt/usb";
 
+/// What a USB drive plugged in that cannot be read is said to be, and what
+/// is asked for while none is plugged in.
+pub const USB_DRIVE_UNREADABLE: Text = ["无法读取该 U 盘", "無法讀取這個 USB 隨身碟", "This USB drive can't be read"];
+pub const USB_DRIVE_WANTED: Text = ["请通过 OTG 连接 U 盘", "請透過 OTG 連接 USB 隨身碟", "Connect a USB drive through OTG"];
+
 /// The data partition's name, as the filesystem page lists it.
 pub const DATA_PARTITION: &str = "data";
+
+/// What work that needs the data partition is told while it is being
+/// opened.
+pub const DATA_OPENING: Text = ["正在打开 data 分区，请稍后再试", "正在開啟 data 分割區，請稍後再試", "Opening the data partition. Try again shortly"];
+
+/// What an install is told while the last one has not ended.
+pub const INSTALL_UNFINISHED: Text = ["上一次安装尚未结束，请稍后再试", "上一次安裝尚未結束，請稍後再試", "The last install hasn't ended. Try again shortly"];
+
+/// What work on the data partition is told once it has been erased whole.
+pub const DATA_ERASED: Text = ["data 分区已清除", "data 分割區已清除", "The data partition was wiped"];
+
+/// What work on internal storage is told before the data partition is
+/// decrypted.
+pub const DECRYPT_FIRST: Text = ["请先完成「解密」", "請先完成「解密」", "Decrypt first"];
+
+/// What going back is told while work that can be stopped goes on.
+const WAIT_OR_STOP: Text = ["请等待完成或停止后再返回", "請等待完成或停止後再返回", "Wait for it to finish, or stop it, before going back"];
 
 /// A password typed, which what is printed of it leaves out: the recovery
 /// prints each effect the pages ask for.
@@ -215,10 +239,12 @@ pub const ADDABLE: [Security; 3] = [Security::Open, Security::Psk, Security::Sae
 const SSID_MAX: usize = 32;
 
 /// What turns down a password the protection `security` cannot take.
-fn refused(security: Security, password: &str) -> Option<&'static str> {
+fn refused(l: Lang, security: Security, password: &str) -> Option<&'static str> {
     match security {
-        Security::Psk | Security::PskSae if !(8..=63).contains(&password.len()) => Some("请输入 8 到 63 位密码"),
-        _ if password.is_empty() => Some("请输入密码"),
+        Security::Psk | Security::PskSae if !(8..=63).contains(&password.len()) => {
+            Some(l.pick(["请输入 8 到 63 位密码", "請輸入 8 到 63 個字元的密碼", "Enter a password of 8 to 63 characters"]))
+        }
+        _ if password.is_empty() => Some(l.pick(["请输入密码", "請輸入密碼", "Enter a password"])),
         _ => None,
     }
 }
@@ -303,6 +329,17 @@ pub enum RenameRefused {
     Taken,
     /// What went wrong, as the system says it.
     Failed(String),
+}
+
+/// How the terminal page's shell ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TermEnd {
+    /// It exited with this code.
+    Exited(i32),
+    /// This signal stopped it.
+    Signalled(i32),
+    /// Neither, as the system says it.
+    Other(String),
 }
 
 /// How work on files ended.
@@ -467,7 +504,12 @@ pub enum Switch {
 }
 
 /// What a backup can take, in the order the backup page lists it.
-pub const BACKUP_PARTS: [&str; 4] = ["启动分区", "系统分区", "data 分区", "基带与 EFS"];
+pub const BACKUP_PARTS: [Text; 4] = [
+    ["启动分区", "啟動分割區", "Boot partitions"],
+    ["系统分区", "系統分割區", "System partitions"],
+    ["data 分区", "data 分割區", "data partition"],
+    ["基带与 EFS", "基頻與 EFS", "Modem and EFS"],
+];
 
 /// A backup found in a place's Skyward/backups folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -971,11 +1013,11 @@ pub const TARGETS: [Target; 6] = [Target::System, Target::Recovery, Target::Fast
 
 /// Where the fastboot page goes, in the order it lists them: the volume
 /// keys move between them and the power key takes one.
-pub const FASTBOOT_CHOICES: [(&str, Action); 4] = [
-    ("重启到系统", Action::RebootTo(Target::System)),
-    ("进入恢复模式", Action::EnterRecovery),
-    ("重启到 Bootloader", Action::RebootTo(Target::Bootloader)),
-    ("关机", Action::RebootTo(Target::PowerOff)),
+pub const FASTBOOT_CHOICES: [(Text, Action); 4] = [
+    (["重启到系统", "重新啟動到系統", "Reboot to system"], Action::RebootTo(Target::System)),
+    (["进入恢复模式", "進入復原模式", "Enter recovery"], Action::EnterRecovery),
+    (["重启到 Bootloader", "重新啟動到 Bootloader", "Reboot to bootloader"], Action::RebootTo(Target::Bootloader)),
+    (["关机", "關機", "Power off"], Action::RebootTo(Target::PowerOff)),
 ];
 
 /// How far a computer has the USB port.
@@ -1004,16 +1046,16 @@ pub const SCREEN_OFF: [Option<u64>; 7] = [Some(15_000), Some(30_000), Some(60_00
 /// The time zones the clock and the times on the pages can keep, in the
 /// order their page lists them: the name, the cities it covers, and the
 /// zone's name in the tz database.
-pub const TIME_ZONES: [(&str, &str, &str); 9] = [
-    ("中国标准时间", "北京、上海", "Asia/Shanghai"),
-    ("香港时间", "香港", "Asia/Hong_Kong"),
-    ("台北时间", "台北", "Asia/Taipei"),
-    ("日本标准时间", "东京", "Asia/Tokyo"),
-    ("协调世界时", "UTC", "UTC"),
-    ("英国时间", "伦敦", "Europe/London"),
-    ("中欧时间", "柏林、巴黎", "Europe/Berlin"),
-    ("美国东部时间", "纽约", "America/New_York"),
-    ("美国太平洋时间", "洛杉矶", "America/Los_Angeles"),
+pub const TIME_ZONES: [(Text, Text, &str); 9] = [
+    (["中国标准时间", "中國標準時間", "China Standard Time"], ["北京、上海", "北京、上海", "Beijing, Shanghai"], "Asia/Shanghai"),
+    (["香港时间", "香港時間", "Hong Kong Time"], ["香港", "香港", "Hong Kong"], "Asia/Hong_Kong"),
+    (["台北时间", "台北時間", "Taipei Time"], ["台北", "台北", "Taipei"], "Asia/Taipei"),
+    (["日本标准时间", "日本標準時間", "Japan Standard Time"], ["东京", "東京", "Tokyo"], "Asia/Tokyo"),
+    (["协调世界时", "世界標準時間", "Coordinated Universal Time"], ["UTC", "UTC", "UTC"], "UTC"),
+    (["英国时间", "英國時間", "British Time"], ["伦敦", "倫敦", "London"], "Europe/London"),
+    (["中欧时间", "中歐時間", "Central European Time"], ["柏林、巴黎", "柏林、巴黎", "Berlin, Paris"], "Europe/Berlin"),
+    (["美国东部时间", "美國東部時間", "Eastern Time"], ["纽约", "紐約", "New York"], "America/New_York"),
+    (["美国太平洋时间", "美國太平洋時間", "Pacific Time"], ["洛杉矶", "洛杉磯", "Los Angeles"], "America/Los_Angeles"),
 ];
 
 /// What a control does when touched.
@@ -1058,6 +1100,8 @@ pub enum Action {
     ScreenOff(usize),
     /// Keep the time zone at this place in [`TIME_ZONES`].
     TimeZone(usize),
+    /// Speak this language.
+    Language(Lang),
     /// Tick or untick a part of the backup, by its place in
     /// [`BACKUP_PARTS`].
     BackupPart(usize),
@@ -1321,6 +1365,8 @@ impl Frame {
 /// stands.
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
+    /// The language the pages speak.
+    pub lang: Lang,
     pub dark: bool,
     pub brightness: f32,
     /// How long the screen stays on with nothing touched, by its place in
@@ -1477,6 +1523,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         State {
+            lang: Lang::Hans,
             dark: false,
             brightness: SLIDER_START,
             // Two minutes.
@@ -2836,11 +2883,12 @@ impl App {
         }
     }
 
-    /// The shell has ended, `how` saying how; its screen says so, and that
+    /// The shell has ended as `end` says; its screen says so, and that
     /// Enter starts another.
-    pub fn term_ended(&mut self, how: &str) {
-        let term = self.term.as_mut().expect("only a shell that started ends");
-        term.feed(format!("\r\n[{how}。按「回车」重新启动]\r\n").as_bytes());
+    pub fn term_ended(&mut self, end: TermEnd) {
+        let (l, term) = (self.state.lang, self.term.as_mut().expect("only a shell that started ends"));
+        let how = fmt::term_end(l, &end);
+        term.feed(tr!(l, "\r\n[{how}。按「回车」重新启动]\r\n", "\r\n[{how}。按「Enter」重新啟動]\r\n", "\r\n[{how}. Press Enter to start it again]\r\n").as_bytes());
         term.running = false;
         if self.screen() == Screen::Terminal {
             self.refresh();
@@ -2887,9 +2935,9 @@ impl App {
         let job = self.state.job.as_mut().expect("only work under way ends");
         job.stopping = false;
         let done = match (&end, &job.task) {
-            (JobEnd::Done, FileTask::Copy { .. }) => Some("已复制"),
-            (JobEnd::Done, FileTask::Move { .. }) => Some("已移动"),
-            (JobEnd::Done, FileTask::Delete { .. }) => Some("已删除"),
+            (JobEnd::Done, FileTask::Copy { .. }) => Some(["已复制", "已複製", "Copied"]),
+            (JobEnd::Done, FileTask::Move { .. }) => Some(["已移动", "已移動", "Moved"]),
+            (JobEnd::Done, FileTask::Delete { .. }) => Some(["已删除", "已刪除", "Deleted"]),
             _ => None,
         };
         job.outcome = Some(end);
@@ -2902,7 +2950,7 @@ impl App {
                     self.settle_page();
                 }
                 self.refresh();
-                self.say(said, now);
+                self.say(self.state.lang.pick(said), now);
             }
             None => {
                 self.wake(now);
@@ -3150,7 +3198,7 @@ impl App {
                 self.state.file = None;
                 self.settle_page();
                 self.refresh();
-                self.say("已重命名", now);
+                self.say(self.state.lang.pick(["已重命名", "已重新命名", "Renamed"]), now);
             }
             Err(RenameRefused::Taken) => self.say_taken(now),
             Err(RenameRefused::Failed(why)) => self.report(&why, now),
@@ -3160,9 +3208,10 @@ impl App {
     /// The entry the file page shows was to have the permission bits
     /// `wanted`: those it has now, or why it has not.
     pub fn mode_set(&mut self, wanted: u32, outcome: Result<u32, String>, now: u64) {
+        let l = self.state.lang;
         let bits = match outcome {
             Ok(bits) => bits,
-            Err(why) => return self.report(&format!("修改权限失败：{why}"), now),
+            Err(why) => return self.report(&tr!(l, "修改权限失败：{why}", "修改權限失敗：{why}", "Couldn't change the permissions: {why}"), now),
         };
         let entry = self.state.file.as_mut().expect("the permissions page shows an entry");
         entry.mode = (entry.mode & !0o7777) | bits;
@@ -3173,7 +3222,7 @@ impl App {
             }
         }
         if bits != wanted {
-            self.say("该位置不支持修改权限", now);
+            self.say(l.pick(["该位置不支持修改权限", "這個位置不支援修改權限", "Permissions can't be changed here"]), now);
         }
         self.refresh();
     }
@@ -3183,13 +3232,14 @@ impl App {
     /// opens on the editor page, wrapped to its card; anything else is
     /// turned down, saying why.
     pub fn text_opened(&mut self, f: &Fonts, path: String, read: Result<Option<Vec<u8>>, String>, now: u64) {
+        let l = self.state.lang;
         let bytes = match read {
             Ok(Some(bytes)) => bytes,
-            Ok(None) => return self.say("暂不支持编辑超过 2 MB 的文件", now),
-            Err(why) => return self.report(&format!("读取失败：{why}"), now),
+            Ok(None) => return self.say(l.pick(["暂不支持编辑超过 2 MB 的文件", "尚不支援編輯超過 2 MB 的檔案", "Files over 2 MB can't be edited"]), now),
+            Err(why) => return self.report(&tr!(l, "读取失败：{why}", "讀取失敗：{why}", "Couldn't read it: {why}"), now),
         };
         let Some(text) = String::from_utf8(bytes).ok().filter(|text| !text.contains('\0')) else {
-            return self.say("仅支持编辑 UTF-8 编码的文本文件", now);
+            return self.say(l.pick(["仅支持编辑 UTF-8 编码的文本文件", "僅支援編輯 UTF-8 編碼的文字檔", "Only UTF-8 text files can be edited"]), now);
         };
         let l = editor::layout(&self.theme(), f);
         self.state.editor = Some(Editor::new(path, &text, l.cols as usize, l.rows as usize));
@@ -3205,15 +3255,16 @@ impl App {
             Ok(()) => {
                 self.state.editor.as_mut().expect("the editor page shows a file").saved();
                 self.refresh();
-                self.say("已保存", now);
+                self.say(self.state.lang.pick(["已保存", "已儲存", "Saved"]), now);
             }
-            Err(why) => self.report(&format!("保存失败：{why}"), now),
+            Err(why) => self.report(&tr!(self.state.lang, "保存失败：{why}", "儲存失敗：{why}", "Couldn't save it: {why}"), now),
         }
     }
 
     /// The name typed for an entry is another entry's in the folder.
     fn say_taken(&mut self, now: u64) {
-        let said = format!("该文件夹中已有\"{}\"", self.state.new_name);
+        let name = &self.state.new_name;
+        let said = tr!(self.state.lang, "该文件夹中已有\"{name}\"", "這個資料夾中已有「{name}」", "This folder already has “{name}”");
         self.say(&said, now);
     }
 
@@ -3298,10 +3349,11 @@ impl App {
             Ok(slots) => {
                 self.state.next_slot = None;
                 self.state.boot_slots = Some(Ok(slots));
-                self.say(&format!("下次将从槽位 {} 启动", slots.active.letter()), now);
+                let slot = slots.active.letter();
+                self.say(&tr!(self.state.lang, "下次将从槽位 {slot} 启动", "下次將從槽位 {slot} 啟動", "Slot {slot} starts next"), now);
                 self.refresh();
             }
-            Err(why) => self.say(&format!("切换失败：{why}"), now),
+            Err(why) => self.say(&tr!(self.state.lang, "切换失败：{why}", "切換失敗：{why}", "Couldn't switch: {why}"), now),
         }
     }
 
@@ -3366,11 +3418,11 @@ impl App {
                     self.settle_page();
                 }
                 self.refresh();
-                self.say("已删除", now);
+                self.say(self.state.lang.pick(["已删除", "已刪除", "Deleted"]), now);
                 vec![self.find_backups()]
             }
             Err(why) => {
-                self.report(&format!("删除失败：{why}"), now);
+                self.report(&tr!(self.state.lang, "删除失败：{why}", "刪除失敗：{why}", "Couldn't delete it: {why}"), now);
                 Vec::new()
             }
         }
@@ -3984,7 +4036,7 @@ impl App {
         if let Some((keys, top)) = &morph.keyboard {
             out.put(keys, (*top as f32 + (1.0 - q) * keys.h as f32).round() as i32);
         }
-        widgets::search_capsule(out, &t, f, bar, pages::SEARCH_HINT);
+        widgets::search_capsule(out, &t, f, bar, self.state.lang.pick(pages::SEARCH_HINT));
         // The cursor shows from the start, going up with the field.
         if let Some(caret) = frame.caret.as_ref().filter(|_| morph.into && caret_on) {
             out.lay(&caret.art, caret.x, caret.y + (bar.y - field.y).round() as i32, 1.0);
@@ -4116,7 +4168,7 @@ impl App {
     /// In the file manager, back climbs a folder until it reaches the root,
     /// and in a place, until it reaches the place's top.
     fn back(&mut self, now: u64) -> Vec<Effect> {
-        let mut fx = Vec::new();
+        let (l, mut fx) = (self.state.lang, Vec::new());
         if self.stack.len() <= 1 {
             return fx;
         }
@@ -4151,7 +4203,7 @@ impl App {
                 let changed = self.state.editor.as_ref().expect("the editor page shows a file").changed;
                 if changed && self.unsaved_warned.is_none_or(|at| now >= at + TOAST_MS) {
                     self.unsaved_warned = Some(now);
-                    self.say("修改尚未保存，再次返回将放弃修改", now);
+                    self.say(l.pick(["修改尚未保存，再次返回将放弃修改", "修改尚未儲存，再次返回將捨棄修改", "Changes aren't saved. Go back again to discard them"]), now);
                     return fx;
                 }
                 self.state.editor = None;
@@ -4177,14 +4229,14 @@ impl App {
             }
             Screen::FileJob => {
                 if self.state.job.as_ref().is_some_and(|j| j.outcome.is_none()) {
-                    self.say("请等待完成或停止后再返回", now);
+                    self.say(l.pick(WAIT_OR_STOP), now);
                     return fx;
                 }
                 self.state.job = None;
             }
             Screen::Relabel => {
                 if self.state.relabel.as_ref().is_some_and(|j| j.outcome.is_none()) {
-                    self.say("请等待完成或停止后再返回", now);
+                    self.say(l.pick(WAIT_OR_STOP), now);
                     return fx;
                 }
                 self.state.relabel = None;
@@ -4194,7 +4246,7 @@ impl App {
             // to it is chosen afresh.
             Screen::PartWork => {
                 if self.state.part_work.as_ref().is_some_and(|w| w.outcome.is_none()) {
-                    self.say("请等待完成后再返回", now);
+                    self.say(l.pick(["请等待完成后再返回", "請等待完成後再返回", "Wait for it to finish before going back"]), now);
                     return fx;
                 }
                 self.state.part_work = None;
@@ -4209,7 +4261,8 @@ impl App {
                 let job = self.state.backup_job.as_ref().expect("the backup page shows work");
                 if job.outcome.is_none() {
                     let writing = job.restore && job.at.is_some_and(|a| !a.checking);
-                    self.say(if writing { "正在恢复，请等待恢复完成" } else { "请等待完成或停止后再返回" }, now);
+                    let said = if writing { ["正在恢复，请等待恢复完成", "正在還原，請等待還原完成", "Restoring. Wait for it to finish"] } else { WAIT_OR_STOP };
+                    self.say(l.pick(said), now);
                     return fx;
                 }
                 self.state.backup_job = None;
@@ -4225,27 +4278,23 @@ impl App {
                     fx.push(Effect::Cancel);
                 }
                 Install::Checking { .. } => {
-                    self.say("正在读取文件，请稍后再试", now);
+                    self.say(l.pick(["正在读取文件，请稍后再试", "正在讀取檔案，請稍後再試", "Reading the file. Try again shortly"]), now);
                     return fx;
                 }
-                Install::Updating { .. } => {
-                    self.say("正在安装，请等待安装完成", now);
+                Install::Updating { .. } | Install::Scripting { .. } => {
+                    self.say(l.pick(["正在安装，请等待安装完成", "正在安裝，請等待安裝完成", "Installing. Wait for it to finish"]), now);
                     return fx;
                 }
                 Install::Flashing { .. } => {
-                    self.say("正在刷入，请等待刷入完成", now);
-                    return fx;
-                }
-                Install::Scripting { .. } => {
-                    self.say("正在安装，请等待安装完成", now);
+                    self.say(l.pick(["正在刷入，请等待刷入完成", "正在刷入，請等待刷入完成", "Flashing. Wait for it to finish"]), now);
                     return fx;
                 }
                 Install::Opening => {
-                    self.say("正在打开 data 分区，请稍后再试", now);
+                    self.say(l.pick(DATA_OPENING), now);
                     return fx;
                 }
                 Install::Wiping => {
-                    self.say("正在清除，请等待清除完成", now);
+                    self.say(l.pick(["正在清除，请等待清除完成", "正在清除，請等待清除完成", "Wiping. Wait for it to finish"]), now);
                     return fx;
                 }
                 Install::Starting
@@ -4420,6 +4469,7 @@ impl App {
 
     /// Carry out a tapped control.
     fn act(&mut self, action: Action, now: u64) -> Vec<Effect> {
+        let l = self.state.lang;
         match action {
             Action::Open(s) => {
                 if s == Screen::Search && self.screen() == Screen::Home {
@@ -4505,7 +4555,7 @@ impl App {
                 }
                 self.refresh();
             }
-            Action::Confirm(_) => self.say("请按住圆形按钮向右滑动", now),
+            Action::Confirm(_) => self.say(l.pick(["请按住圆形按钮向右滑动", "請按住圓形按鈕向右滑動", "Hold the round button and slide it right"]), now),
             Action::Slider(_) | Action::Pattern => {}
             Action::Sideload => match self.state.install {
                 Install::Idle | Install::Finished { .. } => {
@@ -4517,7 +4567,7 @@ impl App {
                     }
                     return vec![Effect::Sideload];
                 }
-                _ => self.say("上一次安装尚未结束，请稍后再试", now),
+                _ => self.say(l.pick(INSTALL_UNFINISHED), now),
             },
             Action::FlashPartition(k) => {
                 if let Install::Choosing(choice) = &mut self.state.install {
@@ -4552,9 +4602,9 @@ impl App {
                 let (path, folder) = (std::path::Path::new(&clip.path), std::path::Path::new(&self.state.files.path));
                 let name = path.file_name().map_or_else(|| clip.path.clone(), |n| n.to_string_lossy().into_owned());
                 if folder.starts_with(path) {
-                    self.say(&format!("无法将\"{name}\"放入其自身中"), now);
+                    self.say(&tr!(l, "无法将\"{name}\"放入其自身中", "無法將「{name}」放入其本身中", "“{name}” can't go inside itself"), now);
                 } else if clip.op == FileOp::Move && path.parent() == Some(folder) {
-                    self.say(&format!("\"{name}\"已在该文件夹中"), now);
+                    self.say(&tr!(l, "\"{name}\"已在该文件夹中", "「{name}」已在這個資料夾中", "“{name}” is already in this folder"), now);
                 } else {
                     return vec![Effect::Paste { op: clip.op, path: clip.path, into: self.state.files.path.clone(), clash: None }];
                 }
@@ -4638,6 +4688,10 @@ impl App {
                 self.state.time_zone = k;
                 self.refresh();
             }
+            Action::Language(l) => {
+                self.state.lang = l;
+                self.refresh();
+            }
             Action::BackupPart(k) => {
                 self.state.backup[k] = !self.state.backup[k];
                 self.refresh();
@@ -4678,9 +4732,9 @@ impl App {
             Action::ExportLogs => {
                 let ([recovery, kernel], storage) = (self.state.logs, self.state.logs_to == 1);
                 if !recovery && !kernel {
-                    self.say("请选择要导出的日志", now);
+                    self.say(l.pick(["请选择要导出的日志", "請選擇要匯出的記錄", "Choose the logs to export"]), now);
                 } else if storage && !self.state.data.storage_open() {
-                    self.say("请先完成「解密」", now);
+                    self.say(l.pick(DECRYPT_FIRST), now);
                 } else {
                     return vec![Effect::ExportLogs { recovery, kernel, storage }];
                 }
@@ -4786,8 +4840,10 @@ impl App {
                     return self.act(Action::OpenJoined, now);
                 }
                 match network.security {
-                    Security::Wep => self.say("暂不支持 WEP 加密的网络", now),
-                    Security::Enterprise => self.say("暂不支持需要账号登录的网络", now),
+                    Security::Wep => self.say(l.pick(["暂不支持 WEP 加密的网络", "尚不支援 WEP 加密的網路", "WEP networks aren't supported"]), now),
+                    Security::Enterprise => {
+                        self.say(l.pick(["暂不支持需要账号登录的网络", "尚不支援需要帳號登入的網路", "Networks that need an account sign-in aren't supported"]), now)
+                    }
                     s if s.password() => self.ask_password(network),
                     _ => {
                         return vec![Effect::JoinWlan {
@@ -4964,7 +5020,7 @@ impl App {
                 vec![start]
             }
             _ => {
-                self.say("上一次安装尚未结束，请稍后再试", now);
+                self.say(self.state.lang.pick(INSTALL_UNFINISHED), now);
                 Vec::new()
             }
         }
@@ -5081,7 +5137,7 @@ impl App {
     /// A key of the on-screen keyboard. A capital lasts one letter; return
     /// opens the first result of a search, and runs a terminal's command.
     fn type_key(&mut self, cap: Cap, now: u64) -> Vec<Effect> {
-        let layer = self.state.layer;
+        let (l, layer) = (self.state.lang, self.state.layer);
         match cap {
             Cap::Char(ch) => {
                 let shifted = self.state.layer == Layer::Shifted;
@@ -5105,11 +5161,11 @@ impl App {
             Cap::Show(layer) => self.state.layer = layer,
             Cap::Enter => match self.screen() {
                 Screen::Search => {
-                    if let Some(first) = search::find_on(&self.state.search, self.state.wlan.is_some()).first() {
+                    if let Some(first) = search::find_on(&self.state.search, l, self.state.wlan.is_some()).first() {
                         return self.act(Action::Open(first.screen), now);
                     }
                 }
-                Screen::Decrypt if self.state.code.is_empty() => self.say("请输入锁屏密码", now),
+                Screen::Decrypt if self.state.code.is_empty() => self.say(l.pick(["请输入锁屏密码", "請輸入螢幕鎖定密碼", "Enter the screen lock"]), now),
                 Screen::Decrypt => {
                     let code = std::mem::take(&mut self.state.code);
                     return self.unlock(code);
@@ -5121,9 +5177,9 @@ impl App {
                     let current = &self.state.file.as_ref().expect("the file page shows an entry").name;
                     let taken = self.state.files.entries.as_ref().is_ok_and(|entries| entries.iter().any(|e| e.name == name));
                     match name.as_str() {
-                        "" => self.say("请输入名称", now),
-                        "." | ".." => self.say("名称不能为\".\"或\"..\"", now),
-                        _ if name.contains('/') => self.say("名称不能包含\"/\"", now),
+                        "" => self.say(l.pick(["请输入名称", "請輸入名稱", "Enter a name"]), now),
+                        "." | ".." => self.say(l.pick(["名称不能为\".\"或\"..\"", "名稱不能是「.」或「..」", "A name can't be “.” or “..”"]), now),
+                        _ if name.contains('/') => self.say(l.pick(["名称不能包含\"/\"", "名稱不能包含「/」", "A name can't hold “/”"]), now),
                         _ if name == *current => return self.back(now),
                         _ if taken => self.say_taken(now),
                         _ => return vec![Effect::Rename { path: self.entry_path(), name }],
@@ -5134,7 +5190,7 @@ impl App {
                 // joining goes.
                 Screen::WlanPassword => {
                     let network = self.state.joining.clone().expect("the password page is for a network");
-                    match refused(network.security, &self.state.password) {
+                    match refused(l, network.security, &self.state.password) {
                         Some(why) => self.say(why, now),
                         None => {
                             let password = Secret(std::mem::take(&mut self.state.password));
@@ -5149,9 +5205,12 @@ impl App {
                 Screen::WlanAdd => {
                     let a = self.state.adding.as_mut().expect("the page adds a network");
                     let (field, why) = match a.name.len() {
-                        0 => (Field::Name, Some("请输入网络名称".to_string())),
-                        n if n > SSID_MAX => (Field::Name, Some(format!("网络名称不能超过 {SSID_MAX} 个字符"))),
-                        _ if a.security.password() => (Field::Password, refused(a.security, &self.state.password).map(str::to_string)),
+                        0 => (Field::Name, Some(l.pick(["请输入网络名称", "請輸入網路名稱", "Enter the network's name"]).to_string())),
+                        n if n > SSID_MAX => (
+                            Field::Name,
+                            Some(tr!(l, "网络名称不能超过 {SSID_MAX} 个字符", "網路名稱不能超過 {SSID_MAX} 個字元", "A network's name can't be over {SSID_MAX} characters")),
+                        ),
+                        _ if a.security.password() => (Field::Password, refused(l, a.security, &self.state.password).map(str::to_string)),
                         _ => (Field::Name, None),
                     };
                     match why {
@@ -5560,7 +5619,7 @@ impl App {
                 if done {
                     return self.confirmed(which, now);
                 }
-                self.say("请按住电源键", now);
+                self.say(self.state.lang.pick(["请按住电源键", "請按住電源鍵", "Hold the power key"]), now);
                 Vec::new()
             }
             Press::Volume { .. } | Press::Spent => Vec::new(),
@@ -5587,13 +5646,13 @@ impl App {
 
     /// What a swipe-to-confirm control slid to its end does.
     fn confirmed(&mut self, which: Confirm, now: u64) -> Vec<Effect> {
-        let mut fx = Vec::new();
+        let (l, mut fx) = (self.state.lang, Vec::new());
         match which {
             Confirm::Reboot => fx.push(Effect::Reboot(TARGETS[self.state.reboot])),
             Confirm::Wipe => {
                 let chosen: Vec<Wipe> = WIPES.iter().zip(self.state.wipe).filter(|(_, on)| *on).map(|(&w, _)| w).collect();
                 match chosen.is_empty() {
-                    true => self.say("请选择要清除的内容", now),
+                    true => self.say(l.pick(["请选择要清除的内容", "請選擇要清除的內容", "Choose what to wipe"]), now),
                     false => fx.push(Effect::Wipe(chosen)),
                 }
             }
@@ -5614,22 +5673,22 @@ impl App {
             Confirm::Backup => {
                 let s = &self.state;
                 let refused = if !s.backup.contains(&true) {
-                    Some("请选择要备份的内容")
+                    Some(["请选择要备份的内容", "請選擇要備份的內容", "Choose what to back up"])
                 } else if s.backup[2] && s.data != Data::Open {
-                    Some("备份 data 分区需先完成「解密」")
+                    Some(["备份 data 分区需先完成「解密」", "備份 data 分割區需先完成「解密」", "Decrypt before backing up the data partition"])
                 } else if s.place_open(s.backup_to) {
                     None
                 } else {
                     Some(match (s.backup_to, &s.usb_drive) {
-                        (Place::Storage, _) if s.data == Data::Erased => "data 分区已清除",
-                        (Place::Storage, _) => "请先完成「解密」",
-                        (Place::UsbDrive, Some(UsbDrive::Unreadable(_))) => "无法读取该 U 盘",
-                        (Place::UsbDrive, _) => "请通过 OTG 连接 U 盘",
+                        (Place::Storage, _) if s.data == Data::Erased => DATA_ERASED,
+                        (Place::Storage, _) => DECRYPT_FIRST,
+                        (Place::UsbDrive, Some(UsbDrive::Unreadable(_))) => USB_DRIVE_UNREADABLE,
+                        (Place::UsbDrive, _) => USB_DRIVE_WANTED,
                     })
                 };
                 let backup = Effect::Backup { parts: s.backup, place: s.backup_to, compress: s.compress, verify: s.verify };
                 match refused {
-                    Some(why) => self.say(why, now),
+                    Some(why) => self.say(l.pick(why), now),
                     None => fx.push(backup),
                 }
             }
@@ -5637,9 +5696,9 @@ impl App {
                 let (entry, parts) = self.state.restore.as_ref().expect("the restore page shows a backup");
                 let restore = Effect::Restore { place: entry.place, name: entry.name.clone(), parts: *parts };
                 if !parts.contains(&true) {
-                    self.say("请选择要恢复的内容", now);
+                    self.say(l.pick(["请选择要恢复的内容", "請選擇要還原的內容", "Choose what to restore"]), now);
                 } else if parts[2] && self.state.data != Data::Open {
-                    self.say("恢复 data 分区需先完成「解密」", now);
+                    self.say(l.pick(["恢复 data 分区需先完成「解密」", "還原 data 分割區需先完成「解密」", "Decrypt before restoring the data partition"]), now);
                 } else {
                     fx.push(restore);
                 }
@@ -5651,10 +5710,11 @@ impl App {
             Confirm::Slot => match (&self.state.boot_slots, self.state.next_slot) {
                 (Some(Ok(slots)), Some(pick)) if pick != slots.active => fx.push(Effect::SetSlot(pick)),
                 (Some(Ok(slots)), _) => {
-                    let said = format!("下次已从槽位 {} 启动", slots.active.letter());
+                    let slot = slots.active.letter();
+                    let said = tr!(l, "下次已从槽位 {slot} 启动", "下次已從槽位 {slot} 啟動", "Slot {slot} already starts next");
                     self.say(&said, now);
                 }
-                _ => self.say("无法读取启动槽位", now),
+                _ => self.say(l.pick(["无法读取启动槽位", "無法讀取啟動槽位", "Couldn't read the boot slots"]), now),
             },
             Confirm::FactoryReset => fx.push(Effect::FactoryReset),
             Confirm::Merge => {
@@ -5669,9 +5729,11 @@ impl App {
             // their own files makes no difference.
             Confirm::Relabel => match self.state.data {
                 Data::Open | Data::Locked { .. } => fx.push(Effect::Relabel),
-                Data::Opening => self.say("正在打开 data 分区，请稍后再试", now),
-                Data::Erased => self.say("data 分区已清除", now),
-                Data::Closed | Data::Failed(_) => self.say("请先在「解密」中打开 data 分区", now),
+                Data::Opening => self.say(l.pick(DATA_OPENING), now),
+                Data::Erased => self.say(l.pick(DATA_ERASED), now),
+                Data::Closed | Data::Failed(_) => {
+                    self.say(l.pick(["请先在「解密」中打开 data 分区", "請先在「解密」中開啟 data 分割區", "Open the data partition in Decrypt first"]), now)
+                }
             },
             // The data partition is reached through its own key whether or
             // not it is open, but not while it is being opened or erased.
@@ -5679,8 +5741,8 @@ impl App {
                 let row = self.fs_row().expect("the page of a partition shows one that was read");
                 let data = row.name == DATA_PARTITION;
                 match (&self.state.fs_action, &self.state.data) {
-                    (_, Data::Opening) if data => self.say("正在打开 data 分区，请稍后再试", now),
-                    (FsAction::Repair, Data::Erased) if data => self.say("data 分区已清除", now),
+                    (_, Data::Opening) if data => self.say(l.pick(DATA_OPENING), now),
+                    (FsAction::Repair, Data::Erased) if data => self.say(l.pick(DATA_ERASED), now),
                     (action, _) => fx.push(Effect::Filesystem { name: row.name.clone(), action: action.clone() }),
                 }
             }
@@ -5701,19 +5763,20 @@ impl App {
     /// go, and a pattern's dots are joined one press at a time, a second
     /// press on the last one joined ending the pattern.
     fn work(&mut self, spot: Spot, now: u64) -> Vec<Effect> {
+        let l = self.state.lang;
         match spot.stop {
             Stop::Back => self.act(Action::Back, now),
             Stop::Button(action) => self.act(action, now),
             Stop::Hit(Action::Slider(which)) => {
                 self.adjusting = !self.adjusting;
                 if self.adjusting {
-                    self.say(
-                        match which {
-                            Slider::Brightness => "按音量键调节亮度，按电源键完成",
-                            Slider::Vibration => "按音量键调节振动强度，按电源键完成",
-                        },
-                        now,
-                    );
+                    let said = match which {
+                        Slider::Brightness => ["按音量键调节亮度，按电源键完成", "按音量鍵調整亮度，按電源鍵完成", "Set the brightness with the volume keys, then press the power key"],
+                        Slider::Vibration => {
+                            ["按音量键调节振动强度，按电源键完成", "按音量鍵調整震動強度，按電源鍵完成", "Set the vibration with the volume keys, then press the power key"]
+                        }
+                    };
+                    self.say(l.pick(said), now);
                 }
                 Vec::new()
             }
@@ -5721,7 +5784,7 @@ impl App {
             Stop::Dot(i) if self.state.pattern.last() == Some(&i) => self.drawn(now),
             Stop::Dot(i) => {
                 if self.state.pattern.is_empty() {
-                    self.say("连接完成后，在最后一个点上再按一次电源键", now);
+                    self.say(l.pick(["连接完成后，在最后一个点上再按一次电源键", "連接完成後，在最後一個點上再按一次電源鍵", "When the pattern is done, press the power key again on its last dot"]), now);
                 }
                 self.join(&self.theme(), i);
                 Vec::new()
@@ -5736,7 +5799,7 @@ impl App {
         let drawn = std::mem::take(&mut self.state.pattern);
         self.repaint_pattern(&self.theme());
         if drawn.len() < 4 {
-            self.say("请至少连接 4 个点", now);
+            self.say(self.state.lang.pick(["请至少连接 4 个点", "請至少連接 4 個點", "Connect at least 4 dots"]), now);
             return Vec::new();
         }
         self.unlock(drawn.iter().map(|i| (b'1' + *i as u8) as char).collect())
@@ -6159,6 +6222,7 @@ mod tests {
             screen: Some(6.73),
             os_version: None,
             android: None,
+            locale: None,
             security_patch: None,
             kernel: "5.15.178".into(),
             storage: Storage { total: 496_550_785_024, free: None },
@@ -7298,15 +7362,43 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_features_explain_themselves() {
+    fn a_control_that_cannot_work_explains_itself() {
         let (f, i) = (fonts(), info());
-        let mut app = App::new(Screen::Language, W, H, PPD);
-        tap(&mut app, &f, &i, Action::Unavailable("暂不支持该语言"));
+        let mut app = App::new(Screen::Mount, W, H, PPD);
+        app.set_mounts(Ok(vec![MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: vec!["qseecomd".into()] }]));
+        tap(&mut app, &f, &i, Action::Unavailable("无法卸载正在使用的分区"));
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("无法卸载正在使用的分区"));
         // Once the row tapped has faded back, only the message waits.
         app.tick(1000);
         assert_eq!(app.deadline(1000), Some(TOAST_MS));
         app.tick(TOAST_MS);
         assert_eq!(app.deadline(TOAST_MS), app.idle_due());
+    }
+
+    #[test]
+    fn the_language_chosen_is_spoken_on_every_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Settings, &f, &i);
+        tap(&mut app, &f, &i, Action::Open(Screen::Language));
+        assert_eq!(app.frame(&f, &i).title, "语言");
+        tap(&mut app, &f, &i, Action::Language(Lang::En));
+        assert_eq!((app.state.lang, app.screen()), (Lang::En, Screen::Language), "the page stays");
+        assert_eq!(app.frame(&f, &i).title, "Language");
+        tap(&mut app, &f, &i, Action::Language(Lang::Hant));
+        assert_eq!(app.frame(&f, &i).title, "語言");
+        tap_back(&mut app, &f, &i, 0);
+        app.tick(1000);
+        assert_eq!((app.screen(), app.frame(&f, &i).title), (Screen::Settings, "設定"), "and so does the page gone back to");
+        app.set_mounts(Ok(vec![MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: vec!["qseecomd".into()] }]));
+        tap(&mut app, &f, &i, Action::Open(Screen::Language));
+        tap(&mut app, &f, &i, Action::Language(Lang::En));
+        tap_back(&mut app, &f, &i, 0);
+        app.tick(2000);
+        tap_back(&mut app, &f, &i, 2000);
+        app.tick(3000);
+        tap(&mut app, &f, &i, Action::Open(Screen::Mount));
+        tap(&mut app, &f, &i, Action::Unavailable("A partition in use can't be unmounted"));
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("A partition in use can't be unmounted"), "as do its messages");
     }
 
     /// The installing page, opened from the install page, with the
@@ -8573,7 +8665,7 @@ mod tests {
         app.term_output(b"ishtar:/ # ");
         tap_back(&mut app, &f, &i, 0);
         assert!(tap(&mut app, &f, &i, Action::Open(Screen::Terminal)).is_empty(), "the same shell goes on");
-        app.term_ended("shell 已退出，退出码 0");
+        app.term_ended(TermEnd::Exited(0));
         assert!(tap(&mut app, &f, &i, Action::Type(Cap::Char('l'))).is_empty(), "nothing runs to take the keys");
         assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![Effect::StartShell("/".into())]);
     }
@@ -8588,7 +8680,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::Terminal);
         let (rows, cols) = app.term_size(&f);
         app.term_started(rows, cols);
-        app.term_ended("shell 已退出，退出码 0");
+        app.term_ended(TermEnd::Exited(0));
         assert_eq!(tap(&mut app, &f, &i, Action::Type(Cap::Enter)), vec![Effect::StartShell("/sdcard/Download".into())], "Enter starts it again there");
         app.term_started(rows, cols);
         tap_back(&mut app, &f, &i, 0);
@@ -9301,7 +9393,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::Wlan, "the WLAN page shows how joining goes");
         assert_eq!((app.state.password.as_str(), app.state.joining.as_ref()), ("", None), "the password is not kept");
         app.set_wlan(connected("Skyward"));
-        assert_eq!(fmt::wlan_value(app.state.wlan.as_ref().unwrap()), "Skyward");
+        assert_eq!(fmt::wlan_value(Lang::Hans, app.state.wlan.as_ref().unwrap()), "Skyward");
         tap(&mut app, &f, &i, Action::OpenJoined);
         assert_eq!(app.screen(), Screen::WlanNetwork);
         assert_eq!(tap(&mut app, &f, &i, Action::LeaveNetwork), vec![Effect::LeaveWlan]);
@@ -9545,7 +9637,7 @@ mod tests {
         assert_eq!(tap_at(&mut app, &f, &i, Action::Download, 2000), vec![Effect::Download(newest())], "a download stopped carries on");
         let damaged = skyward_net::download::Failure::Damaged;
         app.download_ended(DownloadEnd::Failed(damaged.clone()), Have::Nothing, 3000);
-        assert_eq!(fmt::download_failure(&damaged), "完整更新包校验失败，已删除，请重新下载。");
+        assert_eq!(fmt::download_failure(Lang::Hans, &damaged), "完整更新包校验失败，已删除，请重新下载。");
         assert_eq!(tap_at(&mut app, &f, &i, Action::Download, 5000), vec![Effect::Download(newest())]);
         app.download_ended(DownloadEnd::Downloaded, Have::Whole(7_572_375_802), 6000);
         let fx = tap_at(&mut app, &f, &i, Action::InstallDownloaded, 8000);

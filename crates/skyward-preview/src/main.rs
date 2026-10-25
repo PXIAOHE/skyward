@@ -10,18 +10,27 @@ use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, T
 use skyward_ui::app::{
     Action, Adding, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, DownloadEnd,
     DownloadJob, EraseStop, Field, FileKind, FileOp, FileRow, FileTask, FsAction, FsRow, Have, Held, Install, ItemEnd, JobEnd, Key, Keys,
-    MountFailure, MountRow, Part, PartKind, PartStop, Pick, Place, Screen, Source, Touch, UsbDrive, UsbLink, SCREEN_OFF,
+    MountFailure, MountRow, Part, PartKind, PartStop, Pick, Place, Screen, Source, TermEnd, Touch, UsbDrive, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Cap, Layer};
-use skyward_ui::{editor, fmt, pages, Canvas, Ctx, Fonts, Theme};
+use skyward_ui::{editor, fmt, pages, Canvas, Ctx, Fonts, Lang, Theme};
 use skyward_vab::{BootSlots, FailureCode, Hold, Slot, SnapshotState, Standing};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 mod matcher;
 
 const CLOCK: &str = "23:46";
+
+/// The language the pages are drawn in, as `--lang` names its locale;
+/// simplified Chinese where it names none.
+static LANG: OnceLock<Lang> = OnceLock::new();
+
+fn lang() -> Lang {
+    *LANG.get().expect("the language is chosen before any page is drawn")
+}
 
 /// What a shell in the recovery writes for a few commands, colours and all.
 const SHELL_SAMPLE: &[u8] = b"ishtar:/ # getprop ro.product.device\r\nishtar\r\n\
@@ -105,6 +114,11 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let out = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("preview-out"));
     std::fs::create_dir_all(&out)?;
+    let lang = match args.iter().position(|a| a == "--lang") {
+        Some(k) => Lang::for_locale(args.get(k + 1).ok_or_else(|| anyhow!("--lang needs a locale"))?)?,
+        None => Lang::Hans,
+    };
+    LANG.set(lang).expect("the language is chosen once");
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let font_path = font_path()?;
@@ -154,6 +168,7 @@ fn main() -> Result<()> {
     ];
     for (name, screen, dark, info, data, pattern) in shots {
         let mut app = App::new(screen, w, h, ppd);
+        app.state.lang = lang;
         app.state.dark = dark;
         app.state.data = data;
         app.state.pattern = pattern.to_vec();
@@ -757,7 +772,7 @@ fn main() -> Result<()> {
             let (rows, cols) = app.term_size(&fonts);
             app.term_started(rows, cols);
             app.term_output(b"ishtar:/ # exit\r\n");
-            app.term_ended("shell 已退出，退出码 0");
+            app.term_ended(TermEnd::Exited(0));
         }),
         ("55-language-light", Screen::Language, false, &|_| {}),
         ("56-time-zone-light", Screen::TimeZone, false, &|_| {}),
@@ -1322,6 +1337,7 @@ fn online(app: &mut App) {
 /// open, its owner's own files with it.
 fn opened(screen: Screen, w: u32, h: u32, ppd: f32) -> App {
     let mut app = App::new(screen, w, h, ppd);
+    app.state.lang = lang();
     app.state.data = Data::Open;
     app
 }
@@ -1368,6 +1384,7 @@ fn nezha(cfg: &DeviceConfig) -> DeviceInfo {
         screen: cfg.display.diagonal,
         os_version: Some("OS4.0.4.0.XPACNXM".into()),
         android: Some("17".into()),
+        locale: Some("zh-CN".into()),
         security_patch: Some(PatchLevel { year: 2026, month: 10, day: 1 }),
         kernel: "6.12.69-android16-6-g43b5ab7e247d-abogki561813157-4k".into(),
         storage: Storage { total: 1_039_535_157_248, free: Some(620_652_802_048) },

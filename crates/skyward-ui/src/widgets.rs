@@ -2,6 +2,7 @@ use crate::canvas::Canvas;
 use crate::color::{blend_over, mix, over, Rgba};
 use crate::font::{Face, Fonts};
 use crate::geom::Rect;
+use crate::lang::Lang;
 use crate::sprite::Sprite;
 use crate::theme::Theme;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
@@ -321,11 +322,11 @@ fn chevron(c: &mut Canvas, t: &Theme, right: f32, cy: f32, color: Rgba) {
 
 /// Punctuation that never starts a line; at the end of a full line it hangs
 /// past the edge instead.
-const NO_LINE_START: &str = "，。、；：！？）」』》%,.;:!?)]>";
+const NO_LINE_START: &str = "，。、；：！？）」』》%,.;:!?)]>”";
 
 /// Opening punctuation that never ends a line; it moves down with what it
 /// opens.
-const NO_LINE_END: &str = "（「『《([<";
+const NO_LINE_END: &str = "（「『《([<“";
 
 pub(crate) fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> Vec<String> {
     let mut lines = Vec::new();
@@ -338,12 +339,12 @@ pub(crate) fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> 
                 line.push(ch);
                 continue;
             }
-            // A Latin word, file names and links among them, moves to the
-            // next line whole, unless it fills the line alone: then a path
-            // breaks after the last of its slashes on the line, and any
-            // other word where the line ends. An opening bracket in front of
-            // what moves goes with it.
-            let word = |r: char| r.is_ascii_alphanumeric() || matches!(r, '_' | '-' | '.' | '/' | ':');
+            // A Latin word, file names, links and English words with an
+            // apostrophe among them, moves to the next line whole, unless it
+            // fills the line alone: then a path breaks after the last of its
+            // slashes on the line, and any other word where the line ends.
+            // An opening bracket in front of what moves goes with it.
+            let word = |r: char| r.is_ascii_alphanumeric() || matches!(r, '_' | '-' | '.' | '/' | ':' | '\'');
             let mut split = line.len();
             if word(ch) {
                 let start = line.char_indices().rev().take_while(|&(_, r)| word(r)).last().map(|(at, _)| at);
@@ -1852,8 +1853,8 @@ pub fn keypad_height(t: &Theme) -> f32 {
 
 /// The keypad a screen lock's code is typed on, its top at `top`: four rows
 /// of three round keys, `pressed` drawn held down, and the last row erasing
-/// and confirming. Returns where each key answers a touch.
-pub fn keypad(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, pressed: Option<Cap>) -> Vec<(Rect, Cap)> {
+/// and confirming, in `l`. Returns where each key answers a touch.
+pub fn keypad(c: &mut Canvas, t: &Theme, f: &Fonts, l: Lang, top: f32, pressed: Option<Cap>) -> Vec<(Rect, Cap)> {
     let m = &t.m;
     let (size, gx, gy) = (m.dp(PAD_KEY_DP), m.dp(PAD_GAP_X_DP), m.dp(PAD_GAP_Y_DP));
     let left = (m.w as f32 - (3.0 * size + 2.0 * gx)) / 2.0;
@@ -1879,8 +1880,8 @@ pub fn keypad(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, pressed: Option<Ca
         }
         match cap {
             Cap::Char(ch) => c.text_center(&f.heading, &ch.to_string(), cx, cy, m.dp(34.0), t.pal.text),
-            Cap::Backspace => c.text_center(&f.body, "删除", cx, cy, m.row_title_px, t.pal.accent),
-            _ => c.text_center(&f.heading, "解密", cx, cy, m.row_title_px, Rgba::rgb(255, 255, 255)),
+            Cap::Backspace => c.text_center(&f.body, l.pick(["删除", "刪除", "Delete"]), cx, cy, m.row_title_px, t.pal.accent),
+            _ => c.text_center(&f.heading, l.pick(["解密", "解密", "Decrypt"]), cx, cy, m.row_title_px, Rgba::rgb(255, 255, 255)),
         }
     }
     keys
@@ -2379,7 +2380,7 @@ pub fn output_row(c: &mut Canvas, t: &Theme, f: &Fonts, lines: &[String], i: usi
 
 /// Light and dark previews side by side; the active one carries an accent
 /// ring and an accent caption. The rows are the light and the dark choice.
-pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32) -> Block {
+pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, l: Lang, top: f32) -> Block {
     let m = &t.m;
     let gap = m.dp(4.0);
     let slot_w = (m.w as f32 - m.margin * 2.0 - gap) / 2.0;
@@ -2390,7 +2391,8 @@ pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32) -> Block {
     let caption_base = top + slot_w + m.dp(11.0) - ink_top;
     let bottom = caption_base + ink_bottom;
     let mut rects = Vec::new();
-    for (i, (label, dark)) in [("浅色模式", false), ("深色模式", true)].into_iter().enumerate() {
+    let modes = [(["浅色模式", "淺色模式", "Light mode"], false), (["深色模式", "深色模式", "Dark mode"], true)];
+    for (i, (label, dark)) in modes.map(|(label, dark)| (l.pick(label), dark)).into_iter().enumerate() {
         let sx = m.margin + (slot_w + gap) * i as f32;
         let on = t.dark == dark;
         if on {
@@ -2458,9 +2460,11 @@ pub fn keyboard_height(t: &Theme) -> f32 {
 
 /// The on-screen keyboard across the bottom of the screen, its top at
 /// `top`: four rows of keys in `layer`, `pressed` drawn held down, and the
-/// return key saying what it does. Returns where each key answers a touch,
-/// the gaps between keys shared out among their neighbours.
-pub fn keyboard(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, layer: Layer, pressed: Option<Cap>, enter: &str) -> Vec<(Rect, Cap)> {
+/// return key saying what it does; its words in `l`. Returns where each
+/// key answers a touch, the gaps between keys shared out among their
+/// neighbours.
+#[allow(clippy::too_many_arguments)]
+pub fn keyboard(c: &mut Canvas, t: &Theme, f: &Fonts, l: Lang, top: f32, layer: Layer, pressed: Option<Cap>, enter: &str) -> Vec<(Rect, Cap)> {
     let m = &t.m;
     let w = m.w as f32;
     let (panel, key, side, ink, shadow) = if t.dark {
@@ -2534,7 +2538,7 @@ pub fn keyboard(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, layer: Layer, pr
                 let label = if layer == Layer::Shifted { ch.to_ascii_uppercase() } else { ch };
                 c.text_center(&f.heading, &label.to_string(), cx, cy, glyph_px, ink);
             }
-            Cap::Space => c.text_center(&f.body, "空格", cx, cy, m.sub_px, ink),
+            Cap::Space => c.text_center(&f.body, l.pick(["空格", "空格", "Space"]), cx, cy, m.sub_px, ink),
             Cap::Enter => c.text_center(&f.heading, enter, cx, cy, m.sub_px, Rgba::rgb(255, 255, 255)),
             Cap::Show(Layer::Digits) => c.text_center(&f.heading, "123", cx, cy, m.sub_px, ink),
             Cap::Show(Layer::Symbols) => c.text_center(&f.heading, "#+=", cx, cy, m.sub_px, ink),
@@ -2838,8 +2842,11 @@ mod tests {
             "Skyward 的界面文字使用小米的 MiSans 字体，按《MiSans 字体知识产权许可协议》免费使用。",
             "boot、init_boot、vendor_boot、dtbo、vbmeta 和 recovery",
             "Copyright 2026 The Kirk Mono Project Authors (https://github.com/kirklin/kirk-mono)",
+            "This phone's system doesn't make an emptied data partition anew when it starts, so it can't be wiped.",
+            "This zip isn't signed. Turn off “Verify zip signatures”, then try again.",
+            "這個刷機包未簽署，請關閉「驗證刷機包簽章」後重試。",
         ];
-        let latin = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':');
+        let latin = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '\'');
         for text in texts {
             for ems in 6..30 {
                 let max_w = ems as f32 * px;
