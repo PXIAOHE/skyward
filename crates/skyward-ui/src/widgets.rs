@@ -41,6 +41,8 @@ pub enum Icon {
     Shield,
     /// The WLAN's fan: a dot and three arcs over it.
     Wlan,
+    /// A battery run low: its body, its cap, and a sliver of charge.
+    Battery,
 }
 
 /// White solid glyph centred on `(cx, cy)` inside a tile of size `tile`.
@@ -152,6 +154,16 @@ pub fn glyph(c: &mut Canvas, icon: Icon, cx: f32, cy: f32, tile: f32, fg: Rgba, 
         Icon::Phone => {
             c.fill_round_rect(cx - 0.24 * g, cy - 0.42 * g, 0.48 * g, 0.84 * g, 0.11 * g, fg);
             c.fill_round_rect(cx - 0.08 * g, cy - 0.33 * g, 0.16 * g, 0.05 * g, 0.025 * g, bg);
+        }
+        Icon::Battery => {
+            // The body's outer edge, the cap past its right end, and the
+            // charge left at its left end, clear of the outline.
+            let (w, h, cap, s) = (0.78 * g, 0.56 * g, 0.08 * g, 0.8 * sw);
+            let (x, y) = (cx - (w + cap) / 2.0, cy - h / 2.0);
+            c.stroke_round_rect(x + s / 2.0, y + s / 2.0, w - s, h - s, 0.12 * g, s, fg);
+            c.fill_round_rect(x + w - 0.02 * g, cy - 0.11 * g, cap + 0.02 * g, 0.22 * g, 0.04 * g, fg);
+            let inset = s + 0.05 * g;
+            c.fill_round_rect(x + inset, y + inset, 0.18 * g, h - inset * 2.0, 0.04 * g, fg);
         }
         Icon::Lock => {
             c.stroke_arc(cx, cy - 0.1 * g, 0.22 * g, std::f32::consts::PI, std::f32::consts::PI, sw, fg);
@@ -386,6 +398,13 @@ pub struct Bar<'a> {
     pub battery: Option<(u8, bool)>,
     /// The network joined, while it has an address.
     pub wlan: Option<WlanMark>,
+    /// The data partition, open or not; nothing once it is wiped, when
+    /// there is nothing in it to open.
+    pub data: Option<bool>,
+    /// The slot the system runs from, on an A/B phone.
+    pub slot: Option<&'a str>,
+    /// The battery's temperature, in whole degrees Celsius.
+    pub temp: Option<i32>,
 }
 
 /// What the status bar shows of the network joined: how many of the fan's
@@ -404,8 +423,10 @@ pub const LOW_BATTERY: u8 = 20;
 
 /// Clock on the left; on the right the battery as the stock status bar draws
 /// it, with a bolt past it while the cable is in, and before it the network
-/// joined and how fast data goes over it. `ink` colours the clock and the
-/// network's marks.
+/// joined and how fast data goes over it, the data partition's lock, the
+/// slot in a tag as the stock bar tags a VPN, and the battery's temperature
+/// in figures over their unit as the stock bar gives a speed. `ink` colours
+/// the clock and every mark but the battery.
 pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) {
     let m = &t.m;
     let cy = m.status_cy;
@@ -423,23 +444,172 @@ pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) {
         c.lay(&art, ox, oy, 1.0);
         right -= m.dp(BATTERY_W_DP + BATTERY_CAP_DP);
     }
+    // From the battery leftwards: the network's fan, the data partition's
+    // lock, the slot's badge, the temperature, and leftmost, as the stock
+    // bar keeps it, how fast data goes.
+    let gap = m.dp(MARK_GAP_DP);
+    let mut left = right;
     if let Some(w) = &bar.wlan {
-        let left = wlan_mark(c, t, w, right, cy, ink);
-        speed(c, t, f, &w.speed, w.unit, left - m.dp(SPEED_GAP_DP), cy, ink);
+        left = wlan_mark(c, t, w, right, cy, ink);
+    }
+    if let Some(open) = bar.data {
+        let (art, ox, oy, w) = lock_mark(t, open, left - gap, cy, ink);
+        c.lay(&art, ox, oy, 1.0);
+        left -= gap + w;
+    }
+    if let Some(slot) = bar.slot {
+        let (art, ox, oy, w) = badge(t, f, slot, left - gap, cy, ink);
+        c.lay(&art, ox, oy, 1.0);
+        left -= gap + w;
+    }
+    if let Some(degrees) = bar.temp {
+        left = speed(c, t, f, &degrees.to_string(), "°C", left - gap, cy, ink);
+    }
+    if let Some(w) = &bar.wlan {
+        speed(c, t, f, &w.speed, w.unit, left - gap, cy, ink);
     }
 }
 
+/// Room between the marks on the bar's right, as the stock bar leaves it
+/// after its network speed and before its battery, in dp.
+const MARK_GAP_DP: f32 = 4.33;
+
+/// The stock status bar icons' corners, which ease into their sides: from
+/// where a side starts to bend to where the next one is straight again,
+/// three cubic pieces, in shares of how far along each side the bend
+/// reaches, in the corner's own frame, the side coming in along x and the
+/// side going out along y. Read off the stock NFC icon.
+const SMOOTH_CORNER: [[(f32, f32); 4]; 3] = [
+    [(-1.0, 0.0), (-0.65, 0.0), (-0.475, 0.0), (-0.341, 0.068)],
+    [(-0.341, 0.068), (-0.2236, 0.128), (-0.128, 0.2236), (-0.068, 0.341)],
+    [(-0.068, 0.341), (0.0, 0.475), (0.0, 0.65), (0.0, 1.0)],
+];
+
+/// Points taken along each cubic piece of a corner.
+const SMOOTH_STEPS: usize = 4;
+
+/// Where the cubic `piece` stands at `s` of the way along it.
+fn cubic([p0, p1, p2, p3]: [(f32, f32); 4], s: f32) -> (f32, f32) {
+    let r = 1.0 - s;
+    let (a, b, c, d) = (r * r * r, 3.0 * r * r * s, 3.0 * r * s * s, s * s * s);
+    (a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0, a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1)
+}
+
+/// The outline of a rectangle whose corners ease into its sides as the
+/// stock status bar's icons' do, bending `bend` along each side from each
+/// corner: points round it, clockwise, for a convex fill.
+fn smooth_rect(x: f32, y: f32, w: f32, h: f32, bend: f32) -> Vec<(f32, f32)> {
+    // Each corner, the way the outline comes into it and the way it leaves.
+    let corners = [
+        ((x + w, y), (1.0, 0.0), (0.0, 1.0)),
+        ((x + w, y + h), (0.0, 1.0), (-1.0, 0.0)),
+        ((x, y + h), (-1.0, 0.0), (0.0, -1.0)),
+        ((x, y), (0.0, -1.0), (1.0, 0.0)),
+    ];
+    let mut pts = Vec::with_capacity(4 * (3 * SMOOTH_STEPS + 1));
+    for ((kx, ky), (ax, ay), (bx, by)) in corners {
+        let at = |(u, v): (f32, f32)| (kx + (u * ax + v * bx) * bend, ky + (u * ay + v * by) * bend);
+        for piece in SMOOTH_CORNER {
+            pts.extend((0..SMOOTH_STEPS).map(|k| at(cubic(piece, k as f32 / SMOOTH_STEPS as f32))));
+        }
+        pts.push(at(SMOOTH_CORNER[2][3]));
+    }
+    pts
+}
+
+/// `shape`'s coverage less `cut`'s, in `ink`: a mark filled, its details
+/// cut out of it, as the stock bar draws its icons.
+fn knock_out(shape: &Canvas, cut: &Canvas, ink: Rgba) -> Canvas {
+    let mut art = Canvas::new(shape.w, shape.h);
+    for (i, px) in art.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (a, hole) = (shape.data[i * 4 + 3] as u32, cut.data[i * 4 + 3] as u32);
+        *px = [ink.r, ink.g, ink.b, (a * (255 - hole) / 255 * ink.a as u32 / 255) as u8];
+    }
+    art
+}
+
+// The slot's badge, as the stock bar's NFC badge, in dp: its side, how far
+// its corners bend, and how tall the capital cut out of it stands.
+const BADGE_DP: f32 = 12.67;
+const BADGE_BEND_DP: f32 = 3.27;
+const BADGE_CAP_DP: f32 = 6.6;
+
+/// `letter` cut out of a filled badge in `ink`, ending at `right` on the
+/// bar's middle `cy`: its own canvas, where it goes, and how wide it is.
+fn badge(t: &Theme, f: &Fonts, letter: &str, right: f32, cy: f32, ink: Rgba) -> (Canvas, i32, i32, f32) {
+    let m = &t.m;
+    let side = m.dp(BADGE_DP);
+    // The size whose capitals stand that tall, from a size large enough to
+    // measure them to a hundredth.
+    let px = m.dp(BADGE_CAP_DP) * 100.0 / f.speed.cap(100.0);
+    let (ox, oy) = ((right - side - 1.0).floor(), (cy - side / 2.0 - 1.0).floor());
+    let n = ((right - ox + 1.0).ceil() as u32).max((cy + side / 2.0 - oy + 1.0).ceil() as u32);
+    let (x, top) = (right - side - ox, cy - side / 2.0 - oy);
+    let white = Rgba::rgb(255, 255, 255);
+    let mut shape = Canvas::new(n, n);
+    shape.fill_convex(&smooth_rect(x, top, side, side, m.dp(BADGE_BEND_DP)), white);
+    // The letter centred in the badge by its ink.
+    let mut cut = Canvas::new(n, n);
+    let (l, r) = f.speed.ink_span(letter, px);
+    cut.text(&f.speed, letter, x + side / 2.0 - (l + r) / 2.0, top + (side + m.dp(BADGE_CAP_DP)) / 2.0, px, white, None);
+    (knock_out(&shape, &cut, ink), ox as i32, oy as i32, side)
+}
+
+// The data partition's lock, drawn as the stock bar draws its icons, in
+// dp: how tall it stands shut, its body's width and height and how far the
+// body's corners bend, its shackle's stroke and outer width, how far an
+// open one rises and how far its right leg reaches below the arc, and the
+// keyhole cut out of the body: its round, and the slot under it.
+const LOCK_MARK_H_DP: f32 = 12.67;
+const LOCK_BODY_W_DP: f32 = 10.0;
+const LOCK_BODY_H_DP: f32 = 7.0;
+const LOCK_BEND_DP: f32 = 2.0;
+const LOCK_STROKE_DP: f32 = 1.5;
+const LOCK_SHACKLE_W_DP: f32 = 7.0;
+const LOCK_RISE_DP: f32 = 2.3;
+const LOCK_STUB_DP: f32 = 0.9;
+const KEYHOLE_R_DP: f32 = 1.0;
+const KEYHOLE_SLOT_DP: (f32, f32) = (0.9, 1.9);
+
+/// The data partition's lock in `ink`, shut, or `open` with its shackle
+/// risen and its right leg out of the body, ending at `right` with the
+/// shut lock on the bar's middle `cy`: its own canvas, where it goes, and
+/// how wide it is.
+fn lock_mark(t: &Theme, open: bool, right: f32, cy: f32, ink: Rgba) -> (Canvas, i32, i32, f32) {
+    let m = &t.m;
+    let (w, h, bh, sw) = (m.dp(LOCK_BODY_W_DP), m.dp(LOCK_MARK_H_DP), m.dp(LOCK_BODY_H_DP), m.dp(LOCK_STROKE_DP));
+    // The canvas has room for the shackle risen, shut or not.
+    let top = cy - h / 2.0;
+    let (ox, oy) = ((right - w - 1.0).floor(), (top - m.dp(LOCK_RISE_DP) - 1.0).floor());
+    let (cw, ch) = ((right - ox + 1.0).ceil() as u32, (top + h - oy + 1.0).ceil() as u32);
+    let (x, top) = (right - w - ox, top - oy);
+    let (mid, body) = (x + w / 2.0, top + h - bh);
+    // The arc through the shackle's middle, and where it centres.
+    let r = (m.dp(LOCK_SHACKLE_W_DP) - sw) / 2.0;
+    let crown = top + sw / 2.0 + r - if open { m.dp(LOCK_RISE_DP) } else { 0.0 };
+    let white = Rgba::rgb(255, 255, 255);
+    let mut shape = Canvas::new(cw, ch);
+    shape.fill_convex(&smooth_rect(x, body, w, bh, m.dp(LOCK_BEND_DP)), white);
+    shape.stroke_arc(mid, crown, r, std::f32::consts::PI, std::f32::consts::PI, sw, white);
+    shape.line(mid - r, crown, mid - r, body + sw, sw, white);
+    let foot = if open { crown + m.dp(LOCK_STUB_DP) } else { body + sw };
+    shape.line(mid + r, crown, mid + r, foot, sw, white);
+    let mut hole = Canvas::new(cw, ch);
+    let (round, (slot_w, slot_h)) = (body + bh * 0.42, (m.dp(KEYHOLE_SLOT_DP.0), m.dp(KEYHOLE_SLOT_DP.1)));
+    hole.fill_circle(mid, round, m.dp(KEYHOLE_R_DP), white);
+    hole.fill_round_rect(mid - slot_w / 2.0, round, slot_w, slot_h, slot_w / 2.0, white);
+    (knock_out(&shape, &hole, ink), ox as i32, oy as i32, w)
+}
+
 // The network's marks in the status bar, as the stock one draws them, in
-// dp: the arrows' middle in from what is right of them, the fan's point
-// left of the arrows and below the bar's middle, and the speed's room
-// before the fan; the fan's slice and its inner and outer arc's edges from
-// its point, either side of straight up; and the arrows' tips and bases
-// from the fan's point, either half of their width, and how round their
-// tips and other corners are.
+// dp: the arrows' middle in from what is right of them, and the fan's point
+// left of the arrows and below the bar's middle; the fan's slice and its
+// inner and outer arc's edges from its point, either side of straight up;
+// and the arrows' tips and bases from the fan's point, either half of their
+// width, and how round their tips and other corners are.
 const ARROWS_IN_DP: f32 = 5.57;
 const FAN_LEFT_OF_ARROWS_DP: f32 = 7.0;
 const FAN_POINT_DP: f32 = 6.06;
-const SPEED_GAP_DP: f32 = 4.0;
 const FAN_SLICE_DP: f32 = 3.81;
 const FAN_INNER_DP: (f32, f32) = (5.49, 7.83);
 const FAN_OUTER_DP: (f32, f32) = (9.51, 11.83);
@@ -514,16 +684,21 @@ const SPEED_PX_DP: f32 = 6.9;
 const SPEED_UNIT_PX_DP: f32 = 6.23;
 const SPEED_BASES_DP: (f32, f32) = (-2.03, 5.97);
 
-/// How fast data goes, its figures over their unit, the two lines centred
-/// on one another and ending at `right`.
+/// Figures over their unit, as the stock bar tells how fast data goes: the
+/// two lines centred on one another and ending at `right`. Returns where
+/// they start.
 #[allow(clippy::too_many_arguments)]
-fn speed(c: &mut Canvas, t: &Theme, f: &Fonts, figures: &str, unit: &str, right: f32, cy: f32, ink: Rgba) {
+fn speed(c: &mut Canvas, t: &Theme, f: &Fonts, figures: &str, unit: &str, right: f32, cy: f32, ink: Rgba) -> f32 {
     let m = &t.m;
     let (px, unit_px) = (m.dp(SPEED_PX_DP), m.dp(SPEED_UNIT_PX_DP));
-    let (w, unit_w) = (c.text_width(&f.speed, figures, px), c.text_width(&f.speed, unit, unit_px));
-    let mid = right - w.max(unit_w) / 2.0;
-    c.text(&f.speed, figures, mid - w / 2.0, cy + m.dp(SPEED_BASES_DP.0), px, ink, None);
-    c.text(&f.speed, unit, mid - unit_w / 2.0, cy + m.dp(SPEED_BASES_DP.1), unit_px, ink, None);
+    // Each line placed by its ink, the room between marks being the room
+    // between their ink.
+    let (a, b) = (f.speed.ink_span(figures, px), f.speed.ink_span(unit, unit_px));
+    let wide = (a.1 - a.0).max(b.1 - b.0);
+    let mid = right - wide / 2.0;
+    c.text(&f.speed, figures, mid - (a.0 + a.1) / 2.0, cy + m.dp(SPEED_BASES_DP.0), px, ink, None);
+    c.text(&f.speed, unit, mid - (b.0 + b.1) / 2.0, cy + m.dp(SPEED_BASES_DP.1), unit_px, ink, None);
+    right - wide
 }
 
 const BOLT_W_DP: f32 = 5.67;
@@ -1601,41 +1776,14 @@ pub fn list_toned(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row], 
     Block { bottom: top + h, rows: rects }
 }
 
-/// Account-style card: avatar, name and detail, then a strip of key
-/// readings (value over caption, spread edge to edge), then optional rows.
-/// The first rect returned covers the name row.
-#[allow(clippy::too_many_arguments)]
-pub fn device_card(
-    c: &mut Canvas,
-    t: &Theme,
-    f: &Fonts,
-    top: f32,
-    title: &str,
-    sub: &str,
-    stats: &[(&str, &str)],
-    rows: &[Row],
-) -> Block {
+/// Account-style card: avatar, name and detail, then optional rows. The
+/// first rect returned covers the name row.
+pub fn device_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, title: &str, sub: &str, rows: &[Row]) -> Block {
     let m = &t.m;
     let lays: Vec<Layout> = rows.iter().map(|r| layout(c, t, f, r)).collect();
-    let strip_h = if stats.is_empty() { 0.0 } else { m.dp(62.0) };
-    let h = m.account_row_h + strip_h + lays.iter().map(|l| l.h).sum::<f32>();
+    let h = m.account_row_h + lays.iter().map(|l| l.h).sum::<f32>();
     let (card_x, right) = (m.margin, m.w as f32 - m.margin);
     c.fill_round_rect(card_x, top, right - card_x, h, m.card_radius, t.pal.card);
-
-    let strip_top = top + m.account_row_h;
-    let widths: Vec<f32> = stats
-        .iter()
-        .map(|(v, cap)| c.text_width(&f.heading, v, m.row_title_px).max(c.text_width(&f.body, cap, m.sub_px)))
-        .collect();
-    let span = right - card_x - m.inner * 2.0;
-    let gap = (span - widths.iter().sum::<f32>()) / (stats.len().max(2) - 1) as f32;
-    let mut x = card_x + m.inner;
-    let base = strip_top + m.dp(20.0);
-    for ((value, caption), w) in stats.iter().zip(&widths) {
-        c.text(&f.heading, value, x, base, m.row_title_px, t.pal.text, None);
-        c.text(&f.body, caption, x, base + m.dp(20.0), m.sub_px, t.pal.subtitle, None);
-        x += w + gap;
-    }
 
     let cy = top + m.account_row_h / 2.0;
     let av = m.avatar;
@@ -1654,7 +1802,7 @@ pub fn device_card(
 
     let tone = Tone::page(t);
     let mut rects = vec![Rect::new(card_x, top, right - card_x, m.account_row_h)];
-    let mut y = strip_top + strip_h;
+    let mut y = top + m.account_row_h;
     for (r, l) in rows.iter().zip(&lays) {
         draw_row(c, t, f, r, l, y, &tone);
         rects.push(Rect::new(card_x, y, right - card_x, l.h));
@@ -2176,10 +2324,24 @@ pub fn wordmark(t: &Theme, f: &Fonts, text: &str, cap_top: f32, px: f32) -> Spri
 
 /// The version line centred under the About wordmark.
 pub fn version_line(t: &Theme, f: &Fonts, text: &str) -> Sprite {
+    hero_line(t, f, text, 0.0)
+}
+
+/// How far below the version, in dp, the author's line stands.
+const AUTHOR_BELOW_DP: f32 = 19.0;
+
+/// Who made the recovery, a line under the version in its type.
+pub fn author_line(t: &Theme, f: &Fonts, text: &str) -> Sprite {
+    hero_line(t, f, text, t.m.dp(AUTHOR_BELOW_DP))
+}
+
+/// A line centred under the About wordmark in the version's type, `below`
+/// the version's place.
+fn hero_line(t: &Theme, f: &Fonts, text: &str, below: f32) -> Sprite {
     let m = &t.m;
     let px = m.dp(13.3);
     let w = Canvas::new(0, 0).text_width(&f.body, text, px);
-    let base = m.dp(296.3) + f.body.cap(px);
+    let base = m.dp(296.3) + f.body.cap(px) + below;
     let (left, top) = ((m.w as f32 - w) / 2.0 - m.dp(2.0), base - px * 1.2);
     Sprite::capture(left, top, (w + m.dp(4.0)).ceil() as u32, (px * 1.6).ceil() as u32, |c, dx, dy| {
         c.text(&f.body, text, (m.w as f32 - w) / 2.0 + dx, base + dy, px, Rgba::rgb(0, 0, 0), None);
@@ -2701,7 +2863,8 @@ mod tests {
         let f = crate::font::bundled();
         let draw = |mark: WlanMark| {
             let mut c = Canvas::filled(1200, 160, t.pal.bg);
-            status_bar(&mut c, &t, &f, &Bar { clock: "01:27", battery: Some((40, true)), wlan: Some(mark) }, t.pal.status);
+            let bar = Bar { clock: "01:27", battery: Some((40, true)), wlan: Some(mark), data: None, slot: None, temp: None };
+            status_bar(&mut c, &t, &f, &bar, t.pal.status);
             c
         };
         let full = WlanMark { level: 3, receiving: true, sending: true, speed: "7.02".into(), unit: "KB/s" };
@@ -2727,6 +2890,78 @@ mod tests {
         assert_eq!(at(954, 75), dim, "the inner arc");
         assert_eq!(at(954, 88), t.pal.status, "the slice");
         assert_eq!((at(975, 84), at(975, 91)), (dim, dim), "the arrows");
+    }
+
+    #[test]
+    fn the_marks_stand_in_the_stock_order_and_spacing_left_of_the_battery() {
+        // On the 17 Ultra's bar, three pixels a dp, the stock network speed
+        // stands 13 pixels short of the next mark, and so does each mark of
+        // its own the next.
+        let t = Theme::dark(1200, 2608, 3.0);
+        let f = crate::font::bundled();
+        let mut c = Canvas::filled(1200, 160, t.pal.bg);
+        let wlan = Some(WlanMark { level: 3, receiving: true, sending: true, speed: "0.00".into(), unit: "KB/s" });
+        let bar = Bar { clock: "01:27", battery: Some((40, false)), wlan, data: Some(false), slot: Some("B"), temp: Some(36) };
+        status_bar(&mut c, &t, &f, &bar, t.pal.status);
+        // Runs of inked columns on the bar's right half, those a few pixels
+        // apart taken as one mark.
+        let inked = |x: u32| (40..120).any(|y| c.data[((y * 1200 + x) * 4) as usize] > 60);
+        let mut marks: Vec<(u32, u32)> = Vec::new();
+        for x in (600..1200).filter(|&x| inked(x)) {
+            match marks.last_mut() {
+                Some(m) if x <= m.1 + 5 => m.1 = x + 1,
+                _ => marks.push((x, x + 1)),
+            }
+        }
+        assert_eq!(marks.len(), 6, "speed, temperature, badge, lock, fan and battery: {marks:?}");
+        for k in 0..4 {
+            let gap = marks[k + 1].0 - marks[k].1;
+            assert!((gap as i32 - 13).abs() <= 1, "mark {k} stands 13 pixels short of the next: {marks:?}");
+        }
+    }
+
+    #[test]
+    fn the_slot_is_cut_out_of_a_badge_as_the_stock_bar_draws_nfc() {
+        // The stock NFC badge, three pixels a dp: 38 pixels square over the
+        // bar's middle, here with a capital 20 tall cut out of it.
+        let t = Theme::dark(1200, 2608, 3.0);
+        let f = crate::font::bundled();
+        let (art, _, oy, side) = badge(&t, &f, "B", 1000.0, t.m.status_cy, Rgba::rgb(255, 255, 255));
+        assert!((side - 38.0).abs() < 0.1);
+        let alpha = |x: u32, y: u32| art.data[((y * art.w + x) * 4 + 3) as usize];
+        let rows: Vec<u32> = (0..art.h).filter(|&y| (0..art.w).any(|x| alpha(x, y) > 128)).collect();
+        let cols = (0..art.w).filter(|&x| (0..art.h).any(|y| alpha(x, y) > 128)).count();
+        assert!((rows.len() as i32 - 38).abs() <= 1 && (cols as i32 - 38).abs() <= 1, "{} by {cols}", rows.len());
+        let middle = oy as f32 + (rows[0] + rows[rows.len() - 1] + 1) as f32 / 2.0;
+        assert!((middle - t.m.status_cy).abs() <= 1.0, "on the bar's middle: {middle}");
+        // Rows of the badge, clear of its corners, where the letter lets what
+        // is behind show through.
+        let inner = rows[0] + 6..rows[rows.len() - 1] - 5;
+        let cut = inner.filter(|&y| (6..art.w - 6).any(|x| alpha(x, y) < 64)).count();
+        assert!((cut as i32 - 20).abs() <= 1, "the capital cut out: {cut} rows");
+    }
+
+    #[test]
+    fn the_lock_opens_its_shackle_up_with_its_right_leg_out_and_its_keyhole_cut() {
+        let t = Theme::dark(1200, 2608, 3.0);
+        let (m, white, cy) = (&t.m, Rgba::rgb(255, 255, 255), t.m.status_cy);
+        let (shut, ox, oy, w) = lock_mark(&t, false, 1000.0, cy, white);
+        let (open, _, _, _) = lock_mark(&t, true, 1000.0, cy, white);
+        let alpha = |art: &Canvas, x: f32, y: f32| art.data[(((y - oy as f32) as u32 * art.w + (x - ox as f32) as u32) * 4 + 3) as usize];
+        let rows = |art: &Canvas| -> Vec<u32> { (0..art.h).filter(|&y| (0..art.w).any(|x| art.data[((y * art.w + x) * 4 + 3) as usize] > 128)).collect() };
+        let (shut_rows, open_rows) = (rows(&shut), rows(&open));
+        assert!((shut_rows.len() as i32 - 38).abs() <= 1, "12.67 dp tall shut: {}", shut_rows.len());
+        let middle = oy as f32 + (shut_rows[0] + shut_rows[shut_rows.len() - 1] + 1) as f32 / 2.0;
+        assert!((middle - cy).abs() <= 1.0, "on the bar's middle: {middle}");
+        assert!(((shut_rows[0] - open_rows[0]) as f32 - m.dp(LOCK_RISE_DP)).abs() <= 1.0, "open, the shackle rises");
+        assert_eq!(shut_rows.last(), open_rows.last(), "on the same body");
+        // Just above the body, down the right leg: inked shut, clear open.
+        let (mid, body) = (1000.0 - w / 2.0, cy + m.dp(LOCK_MARK_H_DP) / 2.0 - m.dp(LOCK_BODY_H_DP));
+        let leg = mid + (m.dp(LOCK_SHACKLE_W_DP) - m.dp(LOCK_STROKE_DP)) / 2.0;
+        assert!(alpha(&shut, leg, body - 2.0) > 200 && alpha(&open, leg, body - 2.0) < 30);
+        // The keyhole lets what is behind show through the body.
+        let keyhole = body + m.dp(LOCK_BODY_H_DP) * 0.42;
+        assert!(alpha(&shut, mid, keyhole) < 30 && alpha(&shut, mid - m.dp(3.0), keyhole) > 200);
     }
 
     #[test]

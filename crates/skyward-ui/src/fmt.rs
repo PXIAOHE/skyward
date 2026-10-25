@@ -223,6 +223,26 @@ pub fn snapshot_note(l: Lang, s: &SnapshotState) -> Option<&'static str> {
     Some(l.pick(text))
 }
 
+/// The home page's warning of a battery too low to install on: how low it
+/// is, and what installing waits for.
+pub fn battery_low(l: Lang, level: u8, charging: bool) -> (String, String) {
+    let least = skyward_install::least_charge(charging);
+    (
+        tr!(l, "电量仅剩 {level}%", "電量僅剩 {level}%", "Battery at {level}%"),
+        tr!(l, "充电至 {least}% 以上才能安装", "充電至 {least}% 以上才能安裝", "Charge it past {least}% to install"),
+    )
+}
+
+/// The home page's word that the phone restarts from the slot it does not
+/// run from now.
+pub fn next_boot(l: Lang, next: Slot, now: Slot) -> (String, String) {
+    let (next, now) = (next.letter(), now.letter());
+    (
+        tr!(l, "重启后从 {next} 槽位启动", "重新啟動後從 {next} 槽位啟動", "Restarts from slot {next}"),
+        tr!(l, "当前运行的是 {now} 槽位", "目前執行的是 {now} 槽位", "Running from slot {now} now"),
+    )
+}
+
 /// Why the slot to start next stays as an update in flight set it; `None`
 /// when none is.
 pub fn snapshot_slot_note(l: Lang, s: &SnapshotState) -> Option<&'static str> {
@@ -995,18 +1015,15 @@ pub fn refusal(l: Lang, r: &Refusal, codename: &str, source: Source, zone: usize
             "This package's security patch is {package}, older than the current system's {installed}."
         ),
         Refusal::NoPartition => l.pick(["本机没有可刷入该镜像的分区。", "本機沒有可刷入這個映像檔的分割區。", "This phone has no partition this image can be flashed to."]).into(),
-        Refusal::Battery { level, charging: true } => tr!(
-            l,
-            "电量仅剩 {level}%，请充电至 15% 以上后重试。",
-            "電量僅剩 {level}%，請充電至 15% 以上後重試。",
-            "The battery is at {level}%. Charge it past 15%, then try again."
-        ),
-        Refusal::Battery { level, charging: false } => tr!(
-            l,
-            "电量仅剩 {level}%，请充电至 20% 以上后重试。",
-            "電量僅剩 {level}%，請充電至 20% 以上後重試。",
-            "The battery is at {level}%. Charge it past 20%, then try again."
-        ),
+        Refusal::Battery { level, charging } => {
+            let least = skyward_install::least_charge(*charging);
+            tr!(
+                l,
+                "电量仅剩 {level}%，请充电至 {least}% 以上后重试。",
+                "電量僅剩 {level}%，請充電至 {least}% 以上後重試。",
+                "The battery is at {level}%. Charge it past {least}%, then try again."
+            )
+        }
         Refusal::Pending(state) => {
             let standing = snapshot(l, state);
             tr!(

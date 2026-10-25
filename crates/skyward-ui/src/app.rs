@@ -1383,11 +1383,13 @@ impl Fold {
     }
 }
 
-/// What the About page lays over its field: the wordmark and version, which
-/// stay put while the cards scroll, and the cards' coverage row by row.
+/// What the About page lays over its field: the wordmark, the version and
+/// who made the recovery, which stay put while the cards scroll, and the
+/// cards' coverage row by row.
 pub struct HeroArt {
     pub wordmark: Sprite,
     pub version: Sprite,
+    pub author: Sprite,
     pub runs: Vec<Vec<Run>>,
 }
 
@@ -3245,6 +3247,25 @@ impl App {
 
     /// What the status bar shows of the WLAN: the network joined, while it
     /// has an address.
+    /// What the status bar shows, its clock reading `clock`: the battery,
+    /// the network joined, the data partition's lock, the slot the system
+    /// runs from, and the battery's temperature.
+    pub fn bar<'a>(&self, clock: &'a str, info: &DeviceInfo) -> Bar<'a> {
+        let battery = info.battery.as_ref();
+        Bar {
+            clock,
+            battery: battery.map(|b| (b.level, b.plugged())),
+            wlan: self.wlan_mark(),
+            data: match self.state.data {
+                Data::Erased => None,
+                Data::Open => Some(true),
+                Data::Closed | Data::Opening | Data::Failed(_) | Data::Locked { .. } => Some(false),
+            },
+            slot: info.slot.map(Slot::letter),
+            temp: battery.and_then(|b| b.temp).map(|tenths| (tenths as f32 / 10.0).round() as i32),
+        }
+    }
+
     pub fn wlan_mark(&self) -> Option<WlanMark> {
         let Some(Joined { stage: Joining::Connected(link), .. }) = self.state.wlan.as_ref()?.joined.as_ref() else { return None };
         let t = self.state.traffic;
@@ -3899,8 +3920,7 @@ impl App {
         }
         self.shown = Some(view);
 
-        let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
-        widgets::status_bar(out, &t, f, &Bar { clock, battery, wlan: self.wlan_mark() }, t.pal.status);
+        widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
         }
@@ -3947,8 +3967,8 @@ impl App {
 
         if let Some(art) = &frame.hero {
             // The field fills the screen and fades as the page scrolls; the
-            // cards scroll over it. The version fades and shrinks away
-            // first, then the wordmark.
+            // cards scroll over it. The version and the author's line fade
+            // and shrink away first, then the wordmark.
             let glow = self.glow.as_ref().expect("the About page keeps its field");
             let fade = (1.0 - scroll / m.dp(ABOUT_FIELD_DP)).clamp(0.0, 1.0);
             let top = (widgets::bar_bottom(t) + m.dp(ABOUT_FIELD_DP)) / m.h as f32;
@@ -3959,6 +3979,7 @@ impl App {
             let range = m.dp(ABOUT_LOGO_DP) - widgets::bar_bottom(t);
             let v = (scroll / range).clamp(0.0, 1.0);
             art.version.draw_scaled(out, 0.0, 0.0, 1.0 - 0.1 * v, t.hero.version, 1.0 - v);
+            art.author.draw_scaled(out, 0.0, 0.0, 1.0 - 0.1 * v, t.hero.version, 1.0 - v);
             let l = ((scroll - range) / m.dp(ABOUT_LOGO_FADE_DP)).clamp(0.0, 1.0);
             glow::ink_wordmark(out, &field, &glow.look().ink, &art.wordmark, 1.0 - 0.1 * l, 1.0 - l, fade, dither);
         } else {
@@ -4169,8 +4190,7 @@ impl App {
         draw_faded(out, disc, 0.0, 0.0, t.pal.search, shown, blur);
         draw_faded(out, cross, 0.0, 0.0, t.pal.text, shown, blur);
         self.morph = Some(morph);
-        let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
-        widgets::status_bar(out, &t, f, &Bar { clock, battery, wlan: self.wlan_mark() }, t.pal.status);
+        widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
         }
@@ -6608,19 +6628,76 @@ mod tests {
         assert_eq!(app.screen(), Screen::Mount);
     }
 
+    /// A battery at `level`, as `charge` has it, 35.2 °C.
+    fn battery_at(level: u8, charge: Charge) -> skyward_info::Battery {
+        skyward_info::Battery { level, charge, temp: Some(352), health: None, cycles: None, design: None, full: None, voltage: None }
+    }
+
+    #[test]
+    fn the_home_card_tells_of_a_battery_too_low_to_install_on() {
+        let f = fonts();
+        // Where the first row under the card starts: the card is that much
+        // taller with a notice in it.
+        let under = |i: &DeviceInfo| {
+            let mut app = App::new(Screen::Home, W, H, PPD);
+            app.frame(&f, i).hits.iter().find(|h| h.action == Action::Open(Screen::Install)).expect("an install row").rect.y
+        };
+        let plain = under(&info());
+        assert!(under(&DeviceInfo { battery: Some(battery_at(19, Charge::Discharging)), ..info() }) > plain, "short of 20% unplugged");
+        assert_eq!(under(&DeviceInfo { battery: Some(battery_at(20, Charge::Discharging)), ..info() }), plain);
+        assert!(under(&DeviceInfo { battery: Some(battery_at(14, Charge::Charging)), ..info() }) > plain, "short of 15% charging");
+        assert_eq!(under(&DeviceInfo { battery: Some(battery_at(16, Charge::Charging)), ..info() }), plain);
+        let (title, note) = fmt::battery_low(Lang::Hans, 14, true);
+        assert_eq!((title.as_str(), note.as_str()), ("电量仅剩 14%", "充电至 15% 以上才能安装"));
+    }
+
+    #[test]
+    fn the_home_card_tells_of_a_restart_into_the_other_slot_and_opens_the_slot_page() {
+        let f = fonts();
+        let i = DeviceInfo { slot: Some(Slot::B), ..info() };
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let slots = |active| BootSlots { active, bootable: [true, true], successful: [true, true] };
+        app.set_boot_slots(Ok(slots(Slot::B)));
+        assert!(app.frame(&f, &i).hits.iter().all(|h| h.action != Action::Open(Screen::Slot)), "the slot it runs from starts next");
+        app.set_boot_slots(Ok(slots(Slot::A)));
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Slot)), vec![Effect::ReadSlots]);
+        assert_eq!(app.screen(), Screen::Slot);
+        assert_eq!(fmt::next_boot(Lang::Hans, Slot::A, Slot::B), ("重启后从 A 槽位启动".into(), "当前运行的是 B 槽位".into()));
+    }
+
+    #[test]
+    fn the_status_bar_carries_the_slot_the_data_partitions_lock_and_the_temperature() {
+        let i = DeviceInfo { slot: Some(Slot::B), battery: Some(battery_at(64, Charge::Charging)), ..info() };
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let bar = app.bar("12:00", &i);
+        assert_eq!((bar.slot, bar.temp, bar.battery), (Some("B"), Some(35), Some((64, true))));
+        let lock = |app: &mut App, data: Data| {
+            app.state.data = data;
+            app.bar("12:00", &i).data
+        };
+        assert_eq!(lock(&mut app, Data::Locked { user: 0, keys: Keys::Digits, checking: false }), Some(false), "shut while its files are out of reach");
+        assert_eq!(lock(&mut app, Data::Open), Some(true));
+        assert_eq!(lock(&mut app, Data::Erased), None, "nothing to open once wiped");
+        let none = app.bar("12:00", &info());
+        assert_eq!((none.slot, none.temp), (None, None), "a phone without slots or a fuel gauge");
+    }
+
+    /// A screen the home page's rows fit on with a little room to spare.
+    const SNUG: u32 = 3000;
+
     #[test]
     fn a_home_page_grown_by_an_update_notice_scrolls_down_to_its_last_row() {
         let f = fonts();
         let plain = info();
-        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut app = App::new(Screen::Home, W, SNUG, PPD);
         let fr = app.frame(&f, &plain);
         let reboot = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("a reboot row").rect;
-        assert!(reboot.y + reboot.h <= H as f32, "without the notice the rows fit the screen");
+        assert!(reboot.y + reboot.h <= SNUG as f32, "without the notice the rows fit the screen");
         let i = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info() };
-        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut app = App::new(Screen::Home, W, SNUG, PPD);
         let fr = app.frame(&f, &i);
         let reboot = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("a reboot row").rect;
-        assert!(reboot.y + reboot.h > H as f32, "the notice pushes the last row below the screen");
+        assert!(reboot.y + reboot.h > SNUG as f32, "the notice pushes the last row below the screen");
         assert!(reboot.y + reboot.h <= fr.canvas.h as f32, "the page is drawn down to it");
         app.touch(Touch::Down(700.0, 2800.0), &f, 0);
         app.touch(Touch::Move(700.0, 2000.0), &f, 0);
@@ -6630,7 +6707,7 @@ mod tests {
             app.tick(ms);
         }
         let (_, y) = spot(&mut app, &f, &i, Action::Open(Screen::Reboot));
-        assert!(y < H as f32, "scrolled up into view");
+        assert!(y < SNUG as f32, "scrolled up into view");
         tap_at(&mut app, &f, &i, Action::Open(Screen::Reboot), 3000);
         assert_eq!(app.screen(), Screen::Reboot);
     }
@@ -7865,14 +7942,15 @@ mod tests {
     fn the_keys_reach_the_last_row_of_a_home_page_grown_by_an_update_notice() {
         let f = fonts();
         let i = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info() };
-        let mut app = App::new(Screen::Home, W, H, PPD);
-        app.frame(&f, &i);
+        let mut app = App::new(Screen::Home, W, SNUG, PPD);
+        let (_, y) = spot(&mut app, &f, &i, Action::Open(Screen::Reboot));
+        assert!(y > SNUG as f32, "below the screen to start with");
         light_on(&mut app, &f, &i, Stop::Hit(Action::Open(Screen::Reboot)));
         for ms in (0..3000).step_by(8) {
             app.tick(ms);
         }
         let (_, y) = spot(&mut app, &f, &i, Action::Open(Screen::Reboot));
-        assert!(y < H as f32, "the page scrolled the lit row into view");
+        assert!(y < SNUG as f32, "the page scrolled the lit row into view");
         press(&mut app, Key::Power, 3000);
         assert_eq!(app.screen(), Screen::Reboot);
     }

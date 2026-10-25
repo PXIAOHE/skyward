@@ -23,7 +23,30 @@ mod run;
 pub use image::{ImageKind, Ramdisk};
 #[cfg(target_os = "android")]
 pub use run::{Detach, Installer};
+use skyward_info::{Battery, Charge};
 use skyward_vab::{Slot, SnapshotState};
+
+/// The least charge to install on, without and with a charger, as
+/// Android's recovery asks.
+const BATTERY_ALONE: u8 = 20;
+const BATTERY_CHARGING: u8 = 15;
+
+/// The least charge to install on, with a charger in or not.
+pub fn least_charge(charging: bool) -> u8 {
+    if charging {
+        BATTERY_CHARGING
+    } else {
+        BATTERY_ALONE
+    }
+}
+
+/// Why `battery` holds too little charge to install on, if it does. A
+/// charger is in while the battery charges, is full, or is held from
+/// charging.
+pub fn battery_refusal(battery: &Battery) -> Option<Refusal> {
+    let charging = matches!(battery.charge, Charge::Charging | Charge::Full | Charge::NotCharging);
+    (battery.level < least_charge(charging)).then_some(Refusal::Battery { level: battery.level, charging })
+}
 
 /// Where the installer keeps what update_engine wrote while it last
 /// installed an update.

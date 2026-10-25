@@ -1,4 +1,4 @@
-use ab_glyph::{Font, FontRef, GlyphId, PxScale, VariableFont};
+use ab_glyph::{Font, FontRef, GlyphId, PxScale, ScaleFont, VariableFont};
 use anyhow::{anyhow, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -124,6 +124,29 @@ impl Face {
     /// placed by its cap line.
     pub fn cap(&self, em_px: f32) -> f32 {
         -self.bounds('H', em_px).0
+    }
+
+    /// Where the ink of `text` set at `em_px` starts and ends along the
+    /// line, from where the pen starts: its glyphs' leftmost ink and their
+    /// rightmost, from their outlines, unrounded. The pen moves as a run of
+    /// text is drawn, kerning and all.
+    pub fn ink_span(&self, text: &str, em_px: f32) -> (f32, f32) {
+        let scale = self.scale(em_px);
+        let scaled = self.font.as_scaled(scale);
+        let k = em_px / self.upem;
+        let (mut pen, mut prev, mut span) = (0.0, None, (f32::MAX, f32::MIN));
+        for ch in text.chars() {
+            let (id, advance) = self.glyph(ch, scale);
+            if let Some(p) = prev {
+                pen += scaled.kern(p, id);
+            }
+            if let Some(o) = self.font.outline(id) {
+                span = (span.0.min(pen + o.bounds.min.x * k), span.1.max(pen + o.bounds.max.x * k));
+            }
+            pen += advance;
+            prev = Some(id);
+        }
+        span
     }
 
     fn bounds(&self, ch: char, em_px: f32) -> (f32, f32) {

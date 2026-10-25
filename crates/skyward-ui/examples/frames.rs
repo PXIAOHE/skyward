@@ -1,9 +1,9 @@
-use skyward_info::{Boot, Cpu, DeviceInfo, Storage};
+use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, Storage};
 use skyward_ui::app::{Action, FileKind, FileRow, Screen, Touch};
 use skyward_ui::pages::Band;
 use skyward_ui::widgets::{self, Cap};
 use skyward_ui::{pages, App, Canvas, Ctx, Fonts, Theme};
-use skyward_vab::SnapshotState;
+use skyward_vab::{Slot, SnapshotState};
 use std::time::Instant;
 
 // A Xiaomi 13 Ultra panel: 1440 × 3200 at 560 dpi, 120 frames a second.
@@ -321,8 +321,19 @@ fn info() -> DeviceInfo {
         security_patch: None,
         kernel: "5.15.178".into(),
         storage: Storage { total: 496_550_785_024, free: None },
-        battery: None,
-        slot: None,
+        // A battery with a temperature and an A/B phone, as the status bar
+        // shows them on every frame.
+        battery: Some(Battery {
+            level: 64,
+            charge: Charge::Charging,
+            temp: Some(352),
+            health: None,
+            cycles: None,
+            design: None,
+            full: None,
+            voltage: None,
+        }),
+        slot: Some(Slot::B),
         snapshot: SnapshotState::None,
         boot: Boot { unlocked: None, verified: None },
     }

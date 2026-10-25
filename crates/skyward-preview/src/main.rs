@@ -947,10 +947,10 @@ fn main() -> Result<()> {
         ("185-home-search-folding-dark-late", Screen::Home, true, &|app, f| hold(app, f, 1900.0, 1790.0)),
         ("186-home-search-folded-light", Screen::Home, false, &|app, f| drag(app, f, 1900.0, 1750.0)),
         ("187-home-title-going-dark", Screen::Home, true, &|app, f| {
-            // The WLAN's row makes the page long enough to go on past the
-            // fold.
+            // The WLAN's row and a restart into the other slot make the page
+            // long enough to go on past the fold.
             app.state.wlan = Some(joined(Joining::Connected(router_link())));
-            app.refresh();
+            app.set_boot_slots(Ok(BootSlots { active: Slot::A, bootable: [true, true], successful: [true, true] }));
             app.frame(f, &info);
             hold(app, f, 1900.0, 1700.0)
         }),
@@ -1020,6 +1020,21 @@ fn main() -> Result<()> {
         println!("wrote {}", path.display());
     }
 
+    // The home page's card with each notice it gives: a battery too low to
+    // install on, an update waiting to merge, and a restart into the other
+    // slot; the data partition still shut.
+    let battery = info.battery.clone().map(|b| Battery { level: 12, charge: Charge::Discharging, ..b });
+    let wanting = DeviceInfo { battery, snapshot: SnapshotState::Snapshotted, ..info.clone() };
+    for (name, dark) in [("188-home-notices-light", false), ("189-home-notices-dark", true)] {
+        let mut app = App::new(Screen::Home, w, h, ppd);
+        app.state.lang = lang;
+        app.state.dark = dark;
+        app.set_boot_slots(Ok(BootSlots { active: Slot::A, bootable: [true, true], successful: [true, true] }));
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &whole_page(&mut app, &fonts, &wanting))?;
+        println!("wrote {}", path.display());
+    }
+
     // The status bar's battery in each state, light and dark, one bar a row.
     for (name, theme) in [("66-battery-light", light), ("67-battery-dark", Theme::dark(w, h, ppd))] {
         let path = out.join(format!("{name}.png"));
@@ -1038,7 +1053,7 @@ fn battery_states(f: &Fonts, t: &Theme) -> Canvas {
     for (k, &battery) in states.iter().enumerate() {
         let mut bar = Canvas::new(t.m.w, row);
         bar.clear(t.pal.bg);
-        widgets::status_bar(&mut bar, t, f, &Bar { clock: CLOCK, battery: Some(battery), wlan: None }, t.pal.status);
+        widgets::status_bar(&mut bar, t, f, &Bar { clock: CLOCK, battery: Some(battery), wlan: None, data: None, slot: None, temp: None }, t.pal.status);
         sheet.put(&bar, (row as usize * k) as i32);
     }
     sheet
@@ -1383,8 +1398,7 @@ fn whole_page(app: &mut App, f: &Fonts, info: &DeviceInfo) -> Canvas {
     if let Some(d) = &frame.dock {
         c.put(&d.canvas, (c.h - d.canvas.h) as i32);
     }
-    let battery = info.battery.as_ref().map(|b| (b.level, b.plugged()));
-    widgets::status_bar(&mut c, &t, f, &Bar { clock: CLOCK, battery, wlan: app.wlan_mark() }, t.pal.status);
+    widgets::status_bar(&mut c, &t, f, &app.bar(CLOCK, info), t.pal.status);
     c
 }
 

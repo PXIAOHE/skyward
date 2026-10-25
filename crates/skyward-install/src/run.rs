@@ -17,7 +17,6 @@ use crate::script::{self, Bar, Request};
 use crate::signature::{self, Verdict};
 use crate::{Command, Event, Failure, Options, Outcome, Reflash, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
-use skyward_info::Charge;
 use skyward_sys::{kmsg, prop};
 use skyward_vab::{Slot, SlotMaps, SnapshotState};
 use std::collections::HashSet;
@@ -56,11 +55,6 @@ const SCRIPT_PATH: &str = "/sbin:/system/bin:/system/xbin";
 /// once the script has ended, before it is ended too; and after that, how
 /// long its output is waited on before it is let go.
 const LINGER: Duration = Duration::from_secs(1);
-
-/// The least charge to install on, without and with a charger, as
-/// Android's recovery asks.
-const BATTERY_ALONE: u8 = 20;
-const BATTERY_CHARGING: u8 = 15;
 
 /// The most often progress is told.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
@@ -618,10 +612,7 @@ fn phone(slot: Slot) -> Result<Phone> {
 
 /// Why there is too little charge to install, if there is.
 fn battery() -> Result<Option<Refusal>> {
-    let Some(b) = skyward_info::battery_now()? else { return Ok(None) };
-    let charging = matches!(b.charge, Charge::Charging | Charge::Full | Charge::NotCharging);
-    let least = if charging { BATTERY_CHARGING } else { BATTERY_ALONE };
-    Ok((b.level < least).then_some(Refusal::Battery { level: b.level, charging }))
+    Ok(skyward_info::battery_now()?.as_ref().and_then(crate::battery_refusal))
 }
 
 /// A line update_engine wrote that matters here.

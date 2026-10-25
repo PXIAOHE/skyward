@@ -989,6 +989,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         app.state.lang = Lang::for_locale(locale)?;
         skyward_sys::kmsg(&format!("the pages speak {:?}, for the locale {locale}", app.state.lang))?;
     }
+    // The home page tells of a restart into the slot the system does not
+    // run from now: an update or a switch left for the next boot.
+    if info.slot.is_some() {
+        app.set_boot_slots(read_slots());
+    }
     app.set_asked(asked(&request));
     // Opening the data partition, or a user's own files in it, under way,
     // and the users whose own files are still closed once it is open.

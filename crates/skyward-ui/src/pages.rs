@@ -17,8 +17,8 @@ use crate::term::{self, Term};
 use crate::theme::Theme;
 use crate::tr;
 use crate::widgets::{self, Caption, Detail, Fact, Icon, Outline, Row, Spec, Tone, Trail};
-use skyward_info::{Charge, DeviceInfo, VERSION};
-use skyward_install::{Outcome, Reflash, Stage};
+use skyward_info::{DeviceInfo, VERSION};
+use skyward_install::{Outcome, Reflash, Refusal, Stage};
 use skyward_net::download::Progress;
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Network, Power, Stage as Joining};
@@ -200,7 +200,8 @@ fn hits(rects: &[Rect], actions: &[Action]) -> Vec<Hit> {
 }
 
 /// Recovery home, laid out like the Settings root: title, search, a device
-/// card with the readings that matter before flashing, then grouped entries.
+/// card, then grouped entries. The status bar carries the readings: the
+/// slot, the data partition's lock and the battery's temperature.
 pub fn home(cx: &Ctx) -> Frame {
     let (t, f, i, l) = (cx.t, cx.f, cx.info, cx.state.lang);
     let mut c = long_page(cx);
@@ -217,33 +218,34 @@ pub fn home(cx: &Ctx) -> Frame {
         Some(v) => format!("{} · {v}", i.codename),
         None => i.codename.clone(),
     };
-    let free = i.storage.free.map(fmt::gb);
-    let level = i.battery.as_ref().map(|b| format!("{}%", b.level));
-    let mut stats = Vec::new();
-    if let Some(s) = i.slot {
-        stats.push((s.letter(), l.pick(["当前槽位", "目前槽位", "Current slot"])));
-    }
-    stats.push((fmt::data(l, &cx.state.data), l.pick(["data 分区", "data 分割區", "data partition"])));
-    if let Some(v) = &free {
-        stats.push((v.as_str(), l.pick(["可用空间", "可用空間", "Free"])));
-    }
-    if let (Some(v), Some(b)) = (&level, &i.battery) {
-        let caption = match b.charge {
-            Charge::Charging => ["充电中", "充電中", "Charging"],
-            Charge::Full => ["已充满", "已充滿", "Full"],
-            _ => ["电量", "電量", "Battery"],
-        };
-        stats.push((v.as_str(), l.pick(caption)));
-    }
+    // Under the phone's name the card holds only what asks for something to
+    // be done: a battery too low to install on, an update waiting to merge,
+    // and a restart into the slot the system does not run from now.
+    let low = match i.battery.as_ref().and_then(skyward_install::battery_refusal) {
+        Some(Refusal::Battery { level, charging }) => Some(fmt::battery_low(l, level, charging)),
+        _ => None,
+    };
+    let next = match (i.slot, &cx.state.boot_slots) {
+        (Some(now), Some(Ok(slots))) if slots.active != now => Some(fmt::next_boot(l, slots.active, now)),
+        _ => None,
+    };
     let mut rows = Vec::new();
+    let mut opens = Vec::new();
+    if let Some((title, note)) = &low {
+        rows.push(Row::new(title).icon(RED, Icon::Battery).subtitle(note).trail(Trail::None));
+        opens.push(None);
+    }
     if let Some(note) = fmt::snapshot_note(l, &i.snapshot) {
         rows.push(Row::new(fmt::snapshot(l, &i.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::Arrow));
+        opens.push(Some(Action::Open(Screen::Update)));
     }
-    let card = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &stats, &rows);
+    if let Some((title, note)) = &next {
+        rows.push(Row::new(title).icon(ORANGE, Icon::Power).subtitle(note).trail(Trail::Arrow));
+        opens.push(Some(Action::Open(Screen::Slot)));
+    }
+    let card = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &rows);
     out.push(Hit { rect: card.rows[0], action: Action::Open(Screen::About) });
-    if let Some(&rect) = card.rows.get(1) {
-        out.push(Hit { rect, action: Action::Open(Screen::Update) });
-    }
+    out.extend(card.rows[1..].iter().zip(&opens).filter_map(|(&rect, open)| open.map(|action| Hit { rect, action })));
     y = card.bottom + t.m.card_gap;
     // On a phone whose WLAN the recovery brings up, the WLAN comes first
     // under the device, as on the stock settings home.
@@ -441,10 +443,13 @@ pub fn mount(cx: &Ctx) -> Frame {
     Frame::new(t, fit(c, t, bottom), out, l.pick(["挂载", "掛載", "Mount"]), top)
 }
 
-/// About this device, modelled on the stock「我的设备」: the wordmark and
-/// version over a moving colour field, and the summary, hardware and link
-/// cards scrolling over it. Only the cards are drawn here; the canvas is
-/// clear wherever the field shows.
+/// Who made the recovery, as the About page names them under its version.
+const AUTHOR: &str = "© 2026 Kirk Lin";
+
+/// About this device, modelled on the stock「我的设备」: the wordmark, the
+/// version and its author over a moving colour field, and the summary,
+/// hardware and link cards scrolling over it. Only the cards are drawn
+/// here; the canvas is clear wherever the field shows.
 pub fn about(cx: &Ctx) -> Frame {
     let (t, f) = (cx.t, cx.f);
     let m = &t.m;
@@ -457,6 +462,7 @@ pub fn about(cx: &Ctx) -> Frame {
     let art = HeroArt {
         wordmark: widgets::wordmark(t, f, "Skyward", m.dp(233.7), m.dp(37.8)),
         version: widgets::version_line(t, f, VERSION),
+        author: widgets::author_line(t, f, AUTHOR),
         runs: canvas.runs(),
     };
     Frame { header: false, hero: Some(art), ..Frame::new(t, canvas, out, cx.state.lang.pick(ABOUT), summary_top) }
