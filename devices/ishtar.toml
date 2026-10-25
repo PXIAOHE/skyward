@@ -95,10 +95,12 @@ service = "android.hardware.wifi.supplicant.ISupplicant/default"
 server = "https://update.miui.com/updates/miotaV3.php"
 
 # qcom-hv-haptics. Waveform 0 is the click: 8 pattern samples at 6667 µs
-# each (its debugfs entry, haptics/effect0).
+# each (its debugfs entry, haptics/effect0). Qualcomm's vibrator HAL plays
+# its light strength at half of a waveform's drive and its strong one at
+# the whole of it.
 [haptics]
 click = 0
-click_ms = 53
+strength = { lightest = 0.5, strongest = 1.0 }
 
 # The partitions a backup of the baseband and EFS takes: the baseband's
 # settings, with the IMEI, and the sensors' calibration. And what of the

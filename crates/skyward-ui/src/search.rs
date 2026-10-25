@@ -51,6 +51,7 @@ pub const ENTRIES: &[Entry] = &[
     entry("深色模式", "设置", Screen::Settings, &["shensemoshi", "ssms", "dark", "theme"]),
     entry("屏幕亮度", "设置", Screen::Settings, &["pingmuliangdu", "pmld", "liangdu", "ld", "brightness"]),
     entry("息屏时间", "设置", Screen::ScreenOff, &["xipingshijian", "xpsj", "timeout"]),
+    entry("振动强度", "设置", Screen::Settings, &["zhendongqiangdu", "zdqd", "qiangdu", "qd", "intensity", "strength"]),
     entry("触摸振动", "设置", Screen::Settings, &["chumozhendong", "cmzd", "zhendong", "vibrate", "haptic"]),
     entry("文件传输", "设置", Screen::Settings, &["wenjianchuanshu", "wjcs", "chuanshu", "mtp", "usb"]),
     entry("语言", "设置", Screen::Language, &["yuyan", "yy", "language"]),

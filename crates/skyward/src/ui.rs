@@ -985,12 +985,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
     app.set_screen_corners(cfg.display.corner_radius as f32);
     app.set_asked(asked(&request));
-    // Keep the level the boot splash had, so the panel does not jump, or
-    // the slider's top when it was brighter; a dark panel gets the
-    // slider's default.
-    if backlight.level > 0 {
-        app.state.brightness = (backlight.level as f32 / backlight.top as f32).min(1.0);
-    }
     // Opening the data partition, or a user's own files in it, under way,
     // and the users whose own files are still closed once it is open.
     let mut decryptor: Option<Decryptor> = None;
@@ -1206,7 +1200,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             match fx {
                 Effect::Haptic => {
                     if let Some(h) = &mut haptics {
-                        h.click()?;
+                        h.click(app.state.vibration)?;
                     }
                 }
                 other => unreachable!("time passing asks for nothing but a tap of the motor, not {other:?}"),
@@ -1812,7 +1806,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::Haptic => {
                         if let Some(h) = &mut haptics {
-                            h.click()?;
+                            h.click(app.state.vibration)?;
                         }
                     }
                     Effect::Sideload => {

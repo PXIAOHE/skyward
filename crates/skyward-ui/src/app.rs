@@ -438,6 +438,14 @@ pub enum PartStop {
     Failed(String),
 }
 
+/// The settings' sliders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slider {
+    Brightness,
+    /// How strongly the motor taps.
+    Vibration,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Vibrate,
@@ -1024,8 +1032,8 @@ pub enum Action {
     RebootTarget(usize),
     /// Choose or leave out what the wipe page erases.
     WipeItem(Wipe),
-    /// The brightness track: touching or dragging it sets the level.
-    Brightness,
+    /// A slider's track: touching or dragging it sets the slider's level.
+    Slider(Slider),
     /// Mount or unmount the mount page's partition at this index.
     MountToggle(usize),
     /// A swipe-to-confirm track; dragging the knob to the far end confirms.
@@ -1322,6 +1330,9 @@ pub struct State {
     /// place in [`TIME_ZONES`].
     pub time_zone: usize,
     pub vibrate: bool,
+    /// How strongly the motor taps, from 0 at the slider's left end to 1
+    /// at its right.
+    pub vibration: f32,
     /// A computer connected over USB is offered internal storage.
     pub file_transfer: bool,
     pub reboot: usize,
@@ -1467,11 +1478,12 @@ impl Default for State {
     fn default() -> Self {
         State {
             dark: false,
-            brightness: 0.5,
+            brightness: SLIDER_START,
             // Two minutes.
             screen_off: 3,
             time_zone: 0,
             vibrate: true,
+            vibration: SLIDER_START,
             file_transfer: true,
             reboot: 0,
             wipe: [false; WIPES.len()],
@@ -1778,7 +1790,7 @@ enum Drag {
     /// keeps to height `cy`, set by where the swipe began. Past the
     /// threshold, lifting goes back.
     Edge { start: f32, from_left: bool, armed: bool, x: f32, cy: f32 },
-    Slider(Rect),
+    Slider(Slider, Rect),
     Confirm { which: Confirm, track: Rect, grab: f32 },
     /// Scrolling a terminal's screen back through what the shell wrote, or
     /// the editor's text, `carry` being the part of a row not yet scrolled.
@@ -1902,9 +1914,10 @@ const DIM_DROP: f32 = 0.04;
 const DIM_CEILING: f32 = 0.05;
 /// The lowest brightness the slider sets.
 const MIN_BRIGHTNESS: f32 = 0.02;
-/// How much of the slider's span a volume key turns the brightness up or
-/// down.
-const BRIGHTNESS_STEP: f32 = 0.1;
+/// How much of a slider's span a volume key moves it.
+const SLIDER_STEP: f32 = 0.1;
+/// Where both sliders start: one step of the keys from their left end.
+pub const SLIDER_START: f32 = SLIDER_STEP;
 /// While the backlight eases, it steps once a frame of a 120 Hz panel.
 const BACKLIGHT_STEP_MS: u64 = 8;
 /// Just after the panel lights, a touch or key only keeps it awake: the
@@ -2204,8 +2217,8 @@ pub struct App {
     /// A swipe-to-confirm control whose knob the power key moved, to draw
     /// again with the page.
     knob: Option<(Confirm, Rect)>,
-    /// The brightness slider lit takes the volume keys, until the power
-    /// key lets it go.
+    /// The slider lit takes the volume keys, until the power key lets it
+    /// go.
     adjusting: bool,
     /// How tall the page was when last drawn: one being drawn again, as
     /// work under way tells how far it has come, scrolls as far meanwhile.
@@ -2575,7 +2588,7 @@ impl App {
         if let Some((key, Press::Volume { down, next })) = self.button {
             if now >= next && self.frame.is_some() {
                 self.button = Some((key, Press::Volume { down, next: now + REPEAT_MS }));
-                self.volume(down, now);
+                fx.extend(self.volume(down, now));
             }
         }
         if let Some((_, _, s)) = self.cue {
@@ -4493,7 +4506,7 @@ impl App {
                 self.refresh();
             }
             Action::Confirm(_) => self.say("请按住圆形按钮向右滑动", now),
-            Action::Brightness | Action::Pattern => {}
+            Action::Slider(_) | Action::Pattern => {}
             Action::Sideload => match self.state.install {
                 Install::Idle | Install::Finished { .. } => {
                     self.begin_install(Install::Starting, Source::Computer, None);
@@ -5275,9 +5288,9 @@ impl App {
                     .filter(|&(a, r)| row_wide(&t, r) && !matches!(a, Action::Open(Screen::Search) | Action::Confirm(_) | Action::TypeInto(_)))
                     .map(|(_, r)| r);
                 self.drag = match hit {
-                    Some((Action::Brightness, track)) => {
-                        self.set_brightness(&t, track, x);
-                        Drag::Slider(track)
+                    Some((Action::Slider(which), track)) => {
+                        self.set_slider(&t, which, track, x);
+                        Drag::Slider(which, track)
                     }
                     Some((Action::Confirm(which), track)) if self.on_knob(track, x) => {
                         let knob_x = track.x + (track.w - track.h) * self.state.confirm;
@@ -5342,9 +5355,9 @@ impl App {
                     self.drag = Drag::Edge { start, from_left, armed: ready, x, cy };
                     self.dirty = true;
                 }
-                Drag::Slider(track) => {
-                    self.set_brightness(&t, track, x);
-                    self.drag = Drag::Slider(track);
+                Drag::Slider(which, track) => {
+                    self.set_slider(&t, which, track, x);
+                    self.drag = Drag::Slider(which, track);
                 }
                 Drag::Confirm { which, track, grab } => {
                     let travel = (track.w - track.h).max(1.0);
@@ -5412,6 +5425,9 @@ impl App {
                     }
                 }
                 Drag::Pattern => fx.extend(self.drawn(now)),
+                // Let go, the strength slider taps the motor as strongly as
+                // it was left at.
+                Drag::Slider(Slider::Vibration, _) if self.state.vibrate => fx.push(Effect::Haptic),
                 _ => {}
             },
         }
@@ -5500,8 +5516,7 @@ impl App {
             Key::VolumeUp | Key::VolumeDown => {
                 let down = key == Key::VolumeDown;
                 self.button = Some((key, Press::Volume { down, next: now + REPEAT_DELAY_MS }));
-                self.volume(down, now);
-                Vec::new()
+                self.volume(down, now)
             }
             // A press before the page it lands on is drawn is lost, rather
             // than taken for one on nothing.
@@ -5689,10 +5704,16 @@ impl App {
         match spot.stop {
             Stop::Back => self.act(Action::Back, now),
             Stop::Button(action) => self.act(action, now),
-            Stop::Hit(Action::Brightness) => {
+            Stop::Hit(Action::Slider(which)) => {
                 self.adjusting = !self.adjusting;
                 if self.adjusting {
-                    self.say("按音量键调节亮度，按电源键完成", now);
+                    self.say(
+                        match which {
+                            Slider::Brightness => "按音量键调节亮度，按电源键完成",
+                            Slider::Vibration => "按音量键调节振动强度，按电源键完成",
+                        },
+                        now,
+                    );
                 }
                 Vec::new()
             }
@@ -5723,21 +5744,25 @@ impl App {
 
     /// A volume key: the first lights the control the keys were last on
     /// if it shows, or else the first in view; each after moves the light
-    /// down the page or up it, or turns the brightness up or down while
-    /// its slider takes the keys.
-    fn volume(&mut self, down: bool, now: u64) {
+    /// down the page or up it, or moves a slider that takes the keys, the
+    /// strength slider tapping the motor as strongly as it was moved to.
+    fn volume(&mut self, down: bool, now: u64) -> Vec<Effect> {
         if self.frame.is_none() {
-            return;
+            return Vec::new();
         }
         if self.adjusting {
-            if let Some(Spot { stop: Stop::Hit(Action::Brightness), rect, .. }) = self.lit() {
-                let level = self.state.brightness + if down { -BRIGHTNESS_STEP } else { BRIGHTNESS_STEP };
-                self.set_level(&self.theme(), rect, level);
+            if let Some(Spot { stop: Stop::Hit(Action::Slider(which)), rect, .. }) = self.lit() {
+                let level = self.level(which) + if down { -SLIDER_STEP } else { SLIDER_STEP };
+                self.set_level(&self.theme(), which, rect, level);
+                if which == Slider::Vibration && self.state.vibrate {
+                    return vec![Effect::Haptic];
+                }
             }
-            return;
+            return Vec::new();
         }
         if self.keys {
-            return self.step(down, now);
+            self.step(down, now);
+            return Vec::new();
         }
         self.keys = true;
         self.dirty = true;
@@ -5747,6 +5772,7 @@ impl App {
             self.top_mut().2 = Focus::Unset;
             self.lit();
         }
+        Vec::new()
     }
 
     /// Move the light to the next control down the page, or up it. A
@@ -6014,17 +6040,30 @@ impl App {
         x >= knob_x && x <= knob_x + track.h
     }
 
-    fn set_brightness(&mut self, t: &Theme, track: Rect, x: f32) {
-        self.set_level(t, track, (x - track.x) / track.w);
+    fn set_slider(&mut self, t: &Theme, which: Slider, track: Rect, x: f32) {
+        self.set_level(t, which, track, (x - track.x) / track.w);
     }
 
-    /// Set the brightness to `level` of the slider's top, no lower than
+    /// Where a slider stands, as a share of its span.
+    fn level(&self, which: Slider) -> f32 {
+        match which {
+            Slider::Brightness => self.state.brightness,
+            Slider::Vibration => self.state.vibration,
+        }
+    }
+
+    /// Set a slider to `level` of its span, the brightness no lower than
     /// its floor, and draw the slider at `track` on the page again.
-    fn set_level(&mut self, t: &Theme, track: Rect, level: f32) {
-        self.state.brightness = level.clamp(MIN_BRIGHTNESS, 1.0);
+    fn set_level(&mut self, t: &Theme, which: Slider, track: Rect, level: f32) {
+        let value = match which {
+            Slider::Brightness => &mut self.state.brightness,
+            Slider::Vibration => &mut self.state.vibration,
+        };
+        *value = level.clamp(if which == Slider::Brightness { MIN_BRIGHTNESS } else { 0.0 }, 1.0);
+        let value = *value;
         if let Some(fr) = self.frame.as_mut() {
             fr.canvas.fill_rect(track.x, track.y, track.w, track.h, t.pal.card);
-            widgets::slider(&mut fr.canvas, t, track.x, track.y, track.w, self.state.brightness);
+            widgets::slider(&mut fr.canvas, t, track.x, track.y, track.w, value);
         }
         self.layer = None;
         self.dirty = true;
@@ -7118,12 +7157,14 @@ mod tests {
 
     /// Drag the page to scroll `to`, resting before lifting so it does not
     /// glide, and let the time pass. The finger first goes 100 px, past the
-    /// touch slop, and comes back to the mark.
+    /// touch slop, and comes back to the mark. It runs down the page's
+    /// margin, clear of the sliders, which a finger landing on moves
+    /// instead of the page.
     fn scroll_to(app: &mut App, f: &Fonts, to: f32, now: u64) {
-        let from = app.top().1;
-        app.touch(Touch::Down(700.0, 2400.0), f, now);
-        app.touch(Touch::Move(700.0, 2300.0), f, now + 200);
-        app.touch(Touch::Move(700.0, 2400.0 - (to - from)), f, now + 400);
+        let (from, x) = (app.top().1, app.theme().m.margin / 2.0);
+        app.touch(Touch::Down(x, 2400.0), f, now);
+        app.touch(Touch::Move(x, 2300.0), f, now + 200);
+        app.touch(Touch::Move(x, 2400.0 - (to - from)), f, now + 400);
         app.touch(Touch::Up, f, now + 800);
         app.tick(now + 800);
         assert!((app.top().1 - to).abs() < 0.01, "{} {to}", app.top().1);
@@ -7201,14 +7242,32 @@ mod tests {
     fn dragging_the_track_sets_brightness() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Brightness).unwrap().rect;
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Slider(Slider::Brightness)).unwrap().rect;
         let y = track.centre().1 - app.top().1;
         assert!(app.touch(Touch::Down(track.x + track.w * 0.25, y), &f, 0).is_empty());
         assert_eq!(app.panel(0), Some(0.25));
         assert!(app.touch(Touch::Move(track.x + track.w * 0.75, y + 40.0), &f, 0).is_empty());
         assert_eq!(app.panel(0), Some(0.75));
-        app.touch(Touch::Up, &f, 0);
+        assert!(app.touch(Touch::Up, &f, 0).is_empty(), "the panel shows the brightness");
         assert_eq!(app.state.brightness, 0.75);
+    }
+
+    #[test]
+    fn the_strength_slider_taps_the_motor_as_strongly_as_it_is_let_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Slider(Slider::Vibration)).unwrap().rect;
+        let y = track.centre().1 - app.top().1;
+        assert!(app.touch(Touch::Down(track.x + track.w * 0.25, y), &f, 0).is_empty());
+        assert!(app.touch(Touch::Move(track.x + track.w * 0.8, y + 40.0), &f, 0).is_empty(), "nothing taps while the finger moves");
+        assert_eq!(app.touch(Touch::Up, &f, 0), vec![Effect::Haptic], "let go, the motor taps");
+        assert!((app.state.vibration - 0.8).abs() < 1e-5);
+        assert!(app.touch(Touch::Down(track.x - 50.0, y), &f, 0).is_empty());
+        assert!(app.touch(Touch::Up, &f, 0).is_empty(), "touched beside the track, the slider stays");
+        app.state.vibrate = false;
+        app.touch(Touch::Down(track.x, y), &f, 0);
+        assert!(app.touch(Touch::Up, &f, 0).is_empty(), "with touch vibration off, the motor stays still");
+        assert_eq!(app.state.vibration, 0.0, "the strength still moves, down to the slider's left end");
     }
 
     #[test]
@@ -7571,24 +7630,40 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Settings, W, H, PPD);
         app.frame(&f, &i);
-        light_on(&mut app, &f, &i, Stop::Hit(Action::Brightness));
-        let level = app.state.brightness;
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Slider(Slider::Brightness)));
+        assert_eq!(app.state.brightness, SLIDER_START, "it starts a step from its left end");
         press(&mut app, Key::Power, 0);
         assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("按音量键调节亮度，按电源键完成"));
-        press(&mut app, Key::VolumeUp, 0);
-        assert!((app.state.brightness - (level + BRIGHTNESS_STEP)).abs() < 1e-5, "up turns it up");
+        assert!(press(&mut app, Key::VolumeUp, 0).is_empty(), "the panel shows the brightness");
+        assert!((app.state.brightness - (SLIDER_START + SLIDER_STEP)).abs() < 1e-5, "up turns it up");
         press(&mut app, Key::VolumeDown, 0);
+        assert!((app.state.brightness - SLIDER_START).abs() < 1e-5, "down turns it down");
         press(&mut app, Key::VolumeDown, 0);
-        assert!((app.state.brightness - (level - BRIGHTNESS_STEP)).abs() < 1e-5, "down turns it down");
-        for _ in 0..20 {
-            press(&mut app, Key::VolumeDown, 0);
-        }
         assert_eq!(app.state.brightness, MIN_BRIGHTNESS, "no lower than the slider's floor");
-        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Brightness)), "the light stays on the slider");
+        assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Slider(Slider::Brightness))), "the light stays on the slider");
         press(&mut app, Key::Power, 0);
         press(&mut app, Key::VolumeDown, 0);
         assert_eq!(app.state.brightness, MIN_BRIGHTNESS, "let go, the slider keeps its level");
-        assert_ne!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Brightness)), "and the keys move the light again");
+        assert_ne!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Slider(Slider::Brightness))), "and the keys move the light again");
+    }
+
+    #[test]
+    fn the_strength_slider_taps_the_motor_at_each_step_of_the_keys() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i);
+        light_on(&mut app, &f, &i, Stop::Hit(Action::Slider(Slider::Vibration)));
+        press(&mut app, Key::Power, 0);
+        assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("按音量键调节振动强度，按电源键完成"));
+        assert_eq!(press(&mut app, Key::VolumeDown, 0), vec![Effect::Haptic], "each step taps at the strength reached");
+        assert_eq!(app.state.vibration, 0.0, "it starts a step from its left end, the lightest");
+        for _ in 0..20 {
+            press(&mut app, Key::VolumeUp, 0);
+        }
+        assert_eq!(app.state.vibration, 1.0, "up to its right end, the strongest");
+        press(&mut app, Key::Power, 0);
+        assert!(press(&mut app, Key::VolumeDown, 0).is_empty(), "let go, the keys move the light");
+        assert_eq!(app.state.vibration, 1.0);
     }
 
     #[test]
@@ -9700,7 +9775,7 @@ mod tests {
         assert!(app.key(Key::Power, 0).is_empty());
         assert_eq!(app.panel(0), None);
         assert!(app.key(Key::Power, 10).is_empty());
-        assert_eq!(app.panel(10), Some(0.5));
+        assert_eq!(app.panel(10), Some(SLIDER_START));
     }
 
     /// With the default two minutes, when the panel dims and when it goes
@@ -9714,12 +9789,12 @@ mod tests {
         app.tick(0);
         assert_eq!(app.deadline(0), Some(DIMS));
         app.tick(DIMS - 1);
-        assert_eq!(app.panel(DIMS - 1), Some(0.5));
+        assert_eq!(app.panel(DIMS - 1), Some(SLIDER_START));
         app.tick(DIMS);
         assert_eq!(app.deadline(DIMS), Some(DIMS + BACKLIGHT_STEP_MS), "the backlight steps down a frame at a time");
         let midway = app.panel(DIMS + 250).unwrap();
-        assert!(midway < 0.5 && midway > dim_level(0.5), "{midway}");
-        assert_eq!(app.panel(DIMS + 500), Some(dim_level(0.5)));
+        assert!(midway < SLIDER_START && midway > dim_level(SLIDER_START), "{midway}");
+        assert_eq!(app.panel(DIMS + 500), Some(dim_level(SLIDER_START)));
         assert_eq!(app.deadline(DIMS + 500), Some(OFF), "dim until it goes off");
         app.tick(OFF);
         assert_eq!(app.panel(OFF), None);
@@ -9733,7 +9808,7 @@ mod tests {
         // The UI started long after boot; the idle clock begins at the
         // first tick, not at zero.
         app.tick(5_000_000);
-        assert_eq!(app.panel(5_000_000), Some(0.5));
+        assert_eq!(app.panel(5_000_000), Some(SLIDER_START));
         assert_eq!(app.deadline(5_000_000), Some(5_000_000 + DIMS));
         app.tick(5_000_000 + OFF);
         assert_eq!(app.panel(5_000_000 + OFF), None);
@@ -9755,12 +9830,12 @@ mod tests {
         let mut app = App::new(Screen::Home, W, H, PPD);
         app.tick(0);
         app.tick(DIMS);
-        assert_eq!(app.panel(DIMS + 500), Some(dim_level(0.5)));
+        assert_eq!(app.panel(DIMS + 500), Some(dim_level(SLIDER_START)));
         let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
         app.touch(Touch::Down(x, y), &f, DIMS + 600);
         app.touch(Touch::Up, &f, DIMS + 650);
         assert_eq!(app.screen(), Screen::Settings, "the tap counts");
-        assert_eq!(app.panel(DIMS + 800), Some(0.5), "back to full brightness");
+        assert_eq!(app.panel(DIMS + 800), Some(SLIDER_START), "back to full brightness");
         assert_eq!(app.deadline(DIMS + 800), Some(DIMS + 650 + DIMS), "the wait starts over");
     }
 
@@ -9771,7 +9846,7 @@ mod tests {
         let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
         app.key(Key::Power, 0);
         assert!(app.touch(Touch::Down(x, y), &f, 100).is_empty());
-        assert_eq!(app.panel(100), Some(0.5));
+        assert_eq!(app.panel(100), Some(SLIDER_START));
         assert!(app.touch(Touch::Move(x, y - 300.0), &f, 120).is_empty());
         assert!(app.touch(Touch::Up, &f, 140).is_empty());
         assert_eq!(app.screen(), Screen::Home, "the waking tap pressed nothing");
@@ -9850,7 +9925,7 @@ mod tests {
         assert_eq!(app.deadline(0), None);
         let day = 24 * 3600 * 1000;
         app.tick(day);
-        assert_eq!(app.panel(day), Some(0.5));
+        assert_eq!(app.panel(day), Some(SLIDER_START));
     }
 
     #[test]

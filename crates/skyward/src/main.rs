@@ -119,16 +119,16 @@ enum Cmd {
         #[arg(long, default_value = "/dev/dri/card0")]
         card: String,
     },
-    /// Play a waveform of the vibration motor once, saying what its driver
-    /// reports of it.
+    /// Play the vibration motor's click once, saying how strongly and for
+    /// how long.
     #[cfg(target_os = "android")]
     Haptic {
-        /// The driver's waveform number; 0 is the click.
-        #[arg(default_value_t = 0)]
-        effect: i16,
-        /// Stop it after this many milliseconds.
-        #[arg(long, default_value_t = 60)]
-        stop: u64,
+        #[arg(long, default_value = "/skyward/device.toml")]
+        config: String,
+        /// Where on the strength slider, from 0 at its left end to 1 at its
+        /// right.
+        #[arg(long, default_value_t = skyward_ui::app::SLIDER_START)]
+        position: f32,
     },
     /// Save what the panel shows, as raw RGBA files cap-000.rgba onwards.
     #[cfg(target_os = "android")]
@@ -276,7 +276,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(target_os = "android")]
-        Cmd::Haptic { effect, stop } => haptics::probe(effect, stop),
+        Cmd::Haptic { config, position } => {
+            let haptics = DeviceConfig::load(&config)?.haptics.context("the configuration describes no vibration motor")?;
+            haptics::probe(&haptics, position)
+        }
         #[cfg(target_os = "android")]
         Cmd::Capture { out, count, interval, card } => {
             std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;

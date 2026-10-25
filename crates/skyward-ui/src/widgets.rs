@@ -32,7 +32,6 @@ pub enum Icon {
     Phone,
     Lock,
     Sliders,
-    Vibrate,
     Folder,
     File,
     /// A page of text lines.
@@ -165,16 +164,6 @@ pub fn glyph(c: &mut Canvas, icon: Icon, cx: f32, cy: f32, tile: f32, fg: Rgba, 
                 c.line(cx - 0.4 * g, cy + dy * g, cx + 0.4 * g, cy + dy * g, sw * 0.85, fg);
                 c.fill_circle(cx + knob * g, cy + dy * g, 0.12 * g, fg);
                 c.fill_circle(cx + knob * g, cy + dy * g, 0.05 * g, bg);
-            }
-        }
-        Icon::Vibrate => {
-            c.fill_round_rect(cx - 0.17 * g, cy - 0.38 * g, 0.34 * g, 0.76 * g, 0.08 * g, fg);
-            c.fill_round_rect(cx - 0.09 * g, cy - 0.28 * g, 0.18 * g, 0.5 * g, 0.03 * g, bg);
-            for side in [-1.0f32, 1.0] {
-                let x = cx + side * 0.3 * g;
-                c.line(x, cy - 0.2 * g, x + side * 0.07 * g, cy - 0.07 * g, sw * 0.8, fg);
-                c.line(x + side * 0.07 * g, cy - 0.07 * g, x, cy + 0.07 * g, sw * 0.8, fg);
-                c.line(x, cy + 0.07 * g, x + side * 0.07 * g, cy + 0.2 * g, sw * 0.8, fg);
             }
         }
         Icon::Folder => {
@@ -1690,8 +1679,17 @@ pub struct SliderBlock {
     pub below: Option<Rect>,
 }
 
+/// The monochrome icon beside a slider card's caption.
+#[derive(Clone, Copy)]
+pub enum Caption {
+    Sun,
+    /// A phone between the lines of its shaking.
+    Vibrate,
+}
+
 /// Card with a monochrome icon caption, a slider, and an optional row below.
-pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str, value: f32, below: Option<Row>) -> SliderBlock {
+#[allow(clippy::too_many_arguments)]
+pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, caption: Caption, label: &str, value: f32, below: Option<Row>) -> SliderBlock {
     let m = &t.m;
     let (card_x, right) = (m.margin, m.w as f32 - m.margin);
     let below_lay = below.as_ref().map(|r| layout(c, t, f, r));
@@ -1706,11 +1704,27 @@ pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, label: &str, 
 
     let lcy = top + m.dp(31.2);
     let scx = card_x + m.dp(28.0);
-    c.fill_circle(scx, lcy, m.dp(5.7), t.pal.mono_icon);
-    for k in 0..8 {
-        let a = k as f32 * FRAC_PI_4;
-        let (ux, uy) = (a.cos(), a.sin());
-        c.line(scx + ux * m.dp(8.3), lcy + uy * m.dp(8.3), scx + ux * m.dp(8.9), lcy + uy * m.dp(8.9), m.dp(2.0), t.pal.mono_icon);
+    match caption {
+        Caption::Sun => {
+            c.fill_circle(scx, lcy, m.dp(5.7), t.pal.mono_icon);
+            for k in 0..8 {
+                let a = k as f32 * FRAC_PI_4;
+                let (ux, uy) = (a.cos(), a.sin());
+                c.line(scx + ux * m.dp(8.3), lcy + uy * m.dp(8.3), scx + ux * m.dp(8.9), lcy + uy * m.dp(8.9), m.dp(2.0), t.pal.mono_icon);
+            }
+        }
+        Caption::Vibrate => {
+            c.stroke_round_rect(scx - m.dp(4.3), lcy - m.dp(7.7), m.dp(8.6), m.dp(15.4), m.dp(2.2), m.dp(2.0), t.pal.mono_icon);
+            for side in [-1.0f32, 1.0] {
+                let x = scx + side * m.dp(8.0);
+                let (out, step) = (side * m.dp(1.7), m.dp(3.2));
+                let ys = [lcy - step * 1.5, lcy - step * 0.5, lcy + step * 0.5, lcy + step * 1.5];
+                for (k, pair) in ys.windows(2).enumerate() {
+                    let (a, b) = if k % 2 == 0 { (0.0, out) } else { (out, 0.0) };
+                    c.line(x + a, pair[0], x + b, pair[1], m.dp(1.8), t.pal.mono_icon);
+                }
+            }
+        }
     }
     // The caption is set like the account name, in the softer text colour.
     c.text_vc(&f.heading, label, card_x + m.dp(53.7), lcy, m.account_title_px, t.pal.info, None);

@@ -160,12 +160,18 @@ service = "android.hardware.wifi.supplicant.ISupplicant/default"
 [update]
 server = "https://update.miui.com/updates/miotaV3.php"
 
-# qcom-hv-haptics. Waveform 0 is the click: 4 FIFO samples at the motor's
-# resonant period, 22220 µs in all (the driver's dump of its predefined
-# effects as it probes).
+# qcom-hv-haptics. The waveforms the driver keeps play nothing in a
+# recovery, though the driver loads and plays them without complaint, and
+# it would drive them at the period its device tree gives, 5555 µs, while
+# the motor swings at its own frequency, 172.4 Hz on one phone, which the
+# phone measures as it boots and the driver keeps. The click is made from
+# samples at that frequency instead, which the driver plays at up to the
+# 8500 mV its device tree gives samples. The system's own clicks feel as
+# one at a quarter of that does, lighter ones can hardly be felt, and past
+# three quarters the motor rattles.
 [haptics]
-click = 0
-click_ms = 22
+resonance = "/sys/class/qcom-haptics/lra_frequency_hz"
+strength = { lightest = 0.25, strongest = 0.75 }
 
 # The partitions a backup of the baseband and EFS takes: the baseband's
 # settings, with the IMEI, and the sensors' calibration. And what of the

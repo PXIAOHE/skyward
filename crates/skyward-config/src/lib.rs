@@ -166,15 +166,30 @@ pub struct Wipe {
 /// The data partition, which the folders erasing takes in are in.
 const DATA: &str = "/data";
 
-/// A waveform the vibration motor's driver keeps, played through the
-/// kernel's force-feedback events. The driver plays it until told to stop
-/// and does not say how long it is, so its length is given here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// The vibration motor's click, played through the kernel's force-feedback
+/// events: a waveform its driver keeps, or one made from samples at the
+/// motor's resonant frequency, which the driver plays as they are given.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Haptics {
-    /// The driver's number for its click waveform.
-    pub click: i16,
-    /// How long the click plays, in milliseconds.
-    pub click_ms: u64,
+    /// The driver's number for a click waveform it keeps, on phones whose
+    /// driver plays the waveforms it keeps.
+    #[serde(default)]
+    pub click: Option<i16>,
+    /// The file the driver says the motor's resonant frequency in, in
+    /// tenths of a hertz whatever its label, on phones whose click is made
+    /// from samples.
+    #[serde(default)]
+    pub resonance: Option<String>,
+    pub strength: Strength,
+}
+
+/// How strongly the click plays, each as a share of the most its waveform
+/// drives the motor with. The strength slider goes from the lightest to the
+/// strongest, each step the same factor stronger.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct Strength {
+    pub lightest: f32,
+    pub strongest: f32,
 }
 
 /// What the recovery's own logd, which keeps what programs log for
@@ -381,6 +396,20 @@ impl DeviceConfig {
             let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
+        if let Some(haptics) = &cfg.haptics {
+            ensure!(
+                haptics.click.is_some() != haptics.resonance.is_some(),
+                "[haptics] names either a waveform the driver keeps or the file it says the motor's resonant frequency in"
+            );
+            if let Some(file) = &haptics.resonance {
+                ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
+            }
+            let Strength { lightest, strongest } = haptics.strength;
+            ensure!(
+                0.0 < lightest && lightest < strongest && strongest <= 1.0,
+                "[haptics] strength: {lightest} and {strongest} are not shares rising from above 0 to at most 1"
+            );
+        }
         if let Some(logd) = &cfg.logd {
             for library in &logd.libraries {
                 let path = Path::new(library);
@@ -434,6 +463,30 @@ mod tests {
         assert_eq!(logd.libraries, ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]);
         let ishtar = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
         assert_eq!(ishtar.logd, None, "the 13 Ultra's recovery carries both");
+    }
+
+    #[test]
+    fn ishtar_clicks_with_a_waveform_its_driver_keeps() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        let haptics = cfg.haptics.expect("the 13 Ultra has a motor");
+        assert_eq!((haptics.click, haptics.resonance), (Some(0), None));
+        assert_eq!(haptics.strength, Strength { lightest: 0.5, strongest: 1.0 });
+    }
+
+    #[test]
+    fn a_click_is_kept_or_made_and_its_strengths_rise() {
+        let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[haptics]\n{body}\n"));
+        let strength = "strength = { lightest = 0.25, strongest = 1.0 }";
+        assert!(with(&format!("click = 0\n{strength}")).is_ok());
+        assert!(with(&format!("resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"\n{strength}")).is_ok());
+        assert!(with(strength).is_err(), "a click of neither kind");
+        assert!(with(&format!("click = 0\nresonance = \"/sys/f\"\n{strength}")).is_err(), "a click of both kinds");
+        assert!(with(&format!("resonance = \"sys/f\"\n{strength}")).is_err(), "a file named from nowhere");
+        assert!(with("click = 0").is_err(), "a click without its strengths");
+        for (lightest, strongest) in [(0.0, 0.5), (0.5, 0.5), (0.5, 0.25), (0.25, 1.5)] {
+            let s = format!("click = 0\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
+            assert!(with(&s).is_err(), "{lightest} to {strongest} is refused");
+        }
     }
 
     #[test]
@@ -493,7 +546,9 @@ mod tests {
         assert_eq!(element.description.as_deref(), Some("/odm/etc/secure_element-service-goodixsp.xml"));
         assert_eq!(weaver.ready_service.as_deref(), Some("android.hardware.weaver.IWeaver/default"));
         assert_eq!(boot.ready_service.as_deref(), Some("android.hardware.boot.IBootControl/default"));
-        assert_eq!(cfg.haptics, Some(Haptics { click: 0, click_ms: 22 }));
+        let haptics = cfg.haptics.expect("the 17 Ultra has a motor");
+        assert_eq!((haptics.click, haptics.resonance.as_deref()), (None, Some("/sys/class/qcom-haptics/lra_frequency_hz")), "its click is made");
+        assert_eq!(haptics.strength, Strength { lightest: 0.25, strongest: 0.75 }, "past three quarters the motor rattles");
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
         assert!(cfg.backup.data_skipped.contains(&"vendor/goodix".to_string()));
         assert!(cfg.wipe.logs.contains(&"/data/vendor/bsplog".to_string()));

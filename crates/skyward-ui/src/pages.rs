@@ -1,8 +1,8 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
     FileOp, FileTask, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
-    Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, ADDABLE, BACKUP_PARTS, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF,
-    TARGETS, TIME_ZONES, WIPES, installs,
+    Slider, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, ADDABLE, BACKUP_PARTS, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES,
+    SCREEN_OFF, TARGETS, TIME_ZONES, WIPES, installs,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -14,7 +14,7 @@ use crate::geom::Rect;
 use crate::search;
 use crate::term::{self, Term};
 use crate::theme::Theme;
-use crate::widgets::{self, Detail, Fact, Icon, Outline, Row, Spec, Tone, Trail};
+use crate::widgets::{self, Caption, Detail, Fact, Icon, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{Charge, DeviceInfo, VERSION};
 use skyward_install::{Outcome, Reflash, Stage};
 use skyward_net::download::Progress;
@@ -281,22 +281,23 @@ pub fn settings(cx: &Ctx) -> Frame {
     out.extend(hits(&themes.rows, &[Action::Theme { dark: false }, Action::Theme { dark: true }]));
     let mut y = widgets::section(&mut c, t, f, themes.bottom, "亮度");
     let off = fmt::screen_off(SCREEN_OFF[s.screen_off]);
-    let slider = widgets::slider_card(&mut c, t, f, y, "屏幕亮度", s.brightness, Some(Row::new("息屏时间").trail(Trail::Value(&off))));
-    out.push(Hit { rect: slider.track, action: Action::Brightness });
+    let slider = widgets::slider_card(&mut c, t, f, y, Caption::Sun, "屏幕亮度", s.brightness, Some(Row::new("息屏时间").trail(Trail::Value(&off))));
+    out.push(Hit { rect: slider.track, action: Action::Slider(Slider::Brightness) });
     if let Some(r) = slider.below {
         out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
-    y = widgets::section(&mut c, t, f, slider.bottom, "通用");
+    y = widgets::section(&mut c, t, f, slider.bottom, "振动");
+    let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, "振动强度", s.vibration, Some(Row::new("触摸振动").trail(Trail::Switch(s.vibrate))));
+    out.push(Hit { rect: vibration.track, action: Action::Slider(Slider::Vibration) });
+    if let Some(r) = vibration.below {
+        out.push(Hit { rect: r, action: Action::Toggle(Switch::Vibrate) });
+    }
+    y = widgets::section(&mut c, t, f, vibration.bottom, "通用");
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new("语言").icon(BLUE, Icon::Globe).trail(Trail::Value("简体中文")),
         Row::new("时区").icon(ORANGE, Icon::Clock).trail(Trail::Value(TIME_ZONES[s.time_zone].0)),
-        Row::new("触摸振动").icon(PURPLE, Icon::Vibrate).trail(Trail::Switch(s.vibrate)),
     ]);
-    out.extend(hits(&general.rows, &[
-        Action::Open(Screen::Language),
-        Action::Open(Screen::TimeZone),
-        Action::Toggle(Switch::Vibrate),
-    ]));
+    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new("文件传输").icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
