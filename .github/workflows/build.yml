@@ -150,11 +150,14 @@ jobs:
     steps:
       # The devices' configurations say which phone each zip is for.
       - uses: actions/checkout@v7
+      # Each artifact is a zip, which the download keeps whole under its
+      # name, as it is handed out.
       - uses: actions/download-artifact@v8
         with:
           pattern: skyward-*
           path: images
           merge-multiple: true
+          skip-decompress: true
       - name: Sum the zips
         working-directory: images
         run: sha256sum -- *.zip > SHA256SUMS
