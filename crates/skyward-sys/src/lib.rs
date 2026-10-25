@@ -181,11 +181,12 @@ const KEPT_RAW: &str = "/dev/block/by-name/oops";
 #[cfg(target_os = "android")]
 static RAW: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
-/// Where a copy of the log is kept that the system booted next reads itself:
-/// the partition it mounts for its own bookkeeping, then the one holding the
-/// phone's firmware, then the ramdisk for whatever is left.
+/// Where a copy of the log is kept that the next boot reads: the cache
+/// partition, which the recovery mounts to write, then the partition the
+/// system keeps its own bookkeeping in, then the one holding the phone's
+/// firmware, then the ramdisk for whatever is left.
 #[cfg(target_os = "android")]
-const KEPT_FILES: [&str; 3] = ["/metadata/skyward.log", "/persist/skyward.log", "/tmp/skyward.log"];
+const KEPT_FILES: [&str; 4] = ["/cache/skyward.log", "/metadata/skyward.log", "/persist/skyward.log", "/tmp/skyward.log"];
 
 /// The same lines in the first of [`KEPT_FILES`] that could be written.
 #[cfg(target_os = "android")]

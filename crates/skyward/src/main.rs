@@ -488,9 +488,14 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     // The drivers ask for their firmware by name, and the kernel looks only
     // in folders of its own unless told to pass on what it does not find
     // there to ueventd, which looks in the recovery's firmware folders.
-    std::fs::write(FIRMWARE_FALLBACK, "1").with_context(|| format!("write 1 to {FIRMWARE_FALLBACK}"))?;
-    if let Some(firmware) = &cfg.firmware {
-        mount_firmware(&firmware.partition)?;
+    // Nothing below stops the screen from showing, so a failure is written
+    // down and the rest still runs.
+    if let Err(e) = std::fs::write(FIRMWARE_FALLBACK, "1") {
+        skyward_sys::kmsg(&format!("firmware asked of ueventd not set: {e:#}"))?;
+    }
+    let firmware = cfg.firmware.as_ref().map(|firmware| mount_firmware(&firmware.partition).with_context(|| format!("{} not mounted for firmware", firmware.partition)));
+    if let Some(Err(e)) = firmware {
+        skyward_sys::kmsg(&format!("{e:#}"))?;
     }
     for name in &cfg.partitions.mounted {
         let at = skyward_block::fstab::mount(name)?;
@@ -502,8 +507,13 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
         .collect();
     skyward_sys::kmsg(&format!("mounted points: {}", points.join(" ")))?;
-    for path in load_modules(cfg, &cfg.modules.load)? {
-        skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
+    match load_modules(cfg, &cfg.modules.load) {
+        Ok(paths) => {
+            for path in paths {
+                skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
+            }
+        }
+        Err(e) => skyward_sys::kmsg(&format!("modules not loaded: {e:#}"))?,
     }
     let hardware: Vec<String> = services.iter().filter_map(|s| s.ready_hardware_service.clone()).collect();
     if !hardware.is_empty() {
