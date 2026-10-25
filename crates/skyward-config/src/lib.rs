@@ -760,6 +760,10 @@ mod tests {
         for (text, version) in [
             (include_str!("../../../devices/nezha.toml"), "OS4.0.4.0.XPACNXM"),
             (include_str!("../../../devices/ishtar.toml"), "OS3.0.308.0.WMACNXM"),
+            (include_str!("../../../devices/pudding.toml"), "OS4.0.4.0.XPCCNXM"),
+            (include_str!("../../../devices/pandora.toml"), "OS4.0.4.0.XBLCNXM"),
+            (include_str!("../../../devices/popsicle.toml"), "OS4.0.4.0.XPBCNXM"),
+            (include_str!("../../../devices/myron.toml"), "OS4.0.4.0.XPMCNXM"),
         ] {
             let stock = DeviceConfig::parse(text).unwrap().stock.expect("a stock build to build on");
             assert_eq!(stock.version, version);
