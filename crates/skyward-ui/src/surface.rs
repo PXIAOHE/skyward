@@ -92,6 +92,20 @@ pub mod kms {
     /// How long the display may take to complete a commit.
     const COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
 
+    /// Say in the kernel log what the display did. While the screen is black
+    /// it is the only place the recovery can be read from, through adb; the
+    /// copy beside the phone's firmware is what a phone without a cable can
+    /// read afterwards, from the persist partition.
+    fn note(msg: &str) {
+        use std::io::Write;
+        if let Ok(mut log) = OpenOptions::new().write(true).open("/dev/kmsg") {
+            let _ = writeln!(log, "skyward-ui: {msg}");
+        }
+        if let Ok(mut log) = OpenOptions::new().create(true).append(true).open("/firmware/skyward-ui.log") {
+            let _ = writeln!(log, "skyward-ui: {msg}");
+        }
+    }
+
     struct Card(File);
 
     impl AsFd for Card {
@@ -344,6 +358,9 @@ pub mod kms {
         back: usize,
         /// A frame was committed whose flip has not come yet.
         flipping: bool,
+        /// Whether the display posts a flip event for every commit. One that
+        /// shows frames but posts none is committed to and waited on instead.
+        flips: bool,
         /// The planes showing the buffer, one per layer mixer, with their
         /// FB_ID properties.
         planes: Vec<(plane::Handle, property::Handle)>,
@@ -354,7 +371,25 @@ pub mod kms {
     }
 
     impl KmsSurface {
+        /// The panel's fastest mode on the CRTC driving it, three dumb buffers
+        /// taken in turn on one primary plane per layer mixer.
+        ///
+        /// The split layout is what Android's compositor sets up and what
+        /// keeps a dual-pipe panel from tearing, but it needs Qualcomm's
+        /// topology out of `mode_properties` and a plane per strip to be
+        /// accepted as written. Where any of that does not hold the screen
+        /// would stay black, so a failure falls back to `open_single`.
         pub fn open(path: &str) -> Result<Self> {
+            match Self::open_split(path) {
+                Ok(surface) => Ok(surface),
+                Err(split) => {
+                    note(&format!("the split layout did not work: {split:#}"));
+                    Self::open_single(path).with_context(|| format!("one plane across the whole screen, after {split:#}"))
+                }
+            }
+        }
+
+        fn open_split(path: &str) -> Result<Self> {
             let card = open_card(path)?;
             let res = card.resource_handles().context("read KMS resources")?;
 
@@ -414,6 +449,13 @@ pub mod kms {
             // mixers, no DSC selection and the default trigger, the 13
             // Ultra's panel tore while scrolling.
             let conn_props = Props::read(&card, conn.handle())?;
+            let described = match conn_props.get("mode_properties") {
+                Ok((_, blob)) => card.get_property_blob(blob).ok().map(|text| String::from_utf8_lossy(&text).replace('\n', " | ")),
+                Err(_) => None,
+            };
+            if let Some(text) = described {
+                note(&format!("mode_properties: {text}"));
+            }
             let layout = match conn_props.get("mode_properties") {
                 Ok((_, blob)) => {
                     let text = card.get_property_blob(blob).context("read mode_properties")?;
@@ -425,6 +467,7 @@ pub mod kms {
             if w % layout.mixers != 0 {
                 return Err(anyhow!("{w} pixels do not split into {strips} strips"));
             }
+            note(&format!("split layout: {strips} strip(s) of {} px, dsc {}, mode {:?} {} Hz", w / layout.mixers, layout.dsc, mode.name(), mode.vrefresh()));
 
             // Primary planes that can drive the CRTC, those already on it
             // first so the boot splash's planes are reused; planes on the
@@ -528,6 +571,7 @@ pub mod kms {
             // TEs. Switching a running panel sends it the commands for the
             // new rate, as Android's switches do.
             commit(&card, req, AtomicCommitFlags::ALLOW_MODESET).context("set the panel mode")?;
+            note("the split layout is on");
             if mode.vrefresh() != preferred.vrefresh() {
                 let mut req = atomic::AtomicModeReq::new();
                 req.add_property(crtc, crtc_props.handle("MODE_ID")?, blob);
@@ -544,11 +588,143 @@ pub mod kms {
                 u32::from(crtc),
                 fourcc
             );
-            Ok(KmsSurface { card, bufs, back: 1, flipping: false, planes, w, h, order, summary })
+            Ok(KmsSurface { card, bufs, back: 1, flipping: false, flips: true, planes, w, h, order, summary })
         }
 
         pub fn describe(&self) -> &str {
             &self.summary
+        }
+
+        /// One primary plane across the whole screen in the panel's preferred
+        /// mode, the way Android's own recovery draws: no topology from
+        /// `mode_properties`, no DSC selection, no second plane, and the first
+        /// commit blocking instead of waiting for a flip event. Enough to fill
+        /// the screen on hardware the split layout does not fit.
+        fn open_single(path: &str) -> Result<Self> {
+            let card = open_card(path)?;
+            let res = card.resource_handles().context("read KMS resources")?;
+            let mut panel = None;
+            for &h in res.connectors() {
+                let info = card.get_connector(h, true).context("read connector")?;
+                if is_panel(info.interface()) && info.state() == connector::State::Connected {
+                    panel = Some(info);
+                    break;
+                }
+            }
+            let conn = panel.ok_or_else(|| anyhow!("no connected built-in panel"))?;
+            let mode = *conn
+                .modes()
+                .iter()
+                .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+                .or_else(|| conn.modes().first())
+                .ok_or_else(|| anyhow!("the panel reports no mode"))?;
+            let (w, h) = (mode.size().0 as u32, mode.size().1 as u32);
+            note(&format!("one plane: {:?} mode {:?} {w}x{h} {} Hz", conn.interface(), mode.name(), mode.vrefresh()));
+
+            let current = match conn.current_encoder() {
+                Some(e) => card.get_encoder(e).context("read encoder")?.crtc(),
+                None => None,
+            };
+            let crtc = match current {
+                Some(c) => c,
+                None => {
+                    let mut found = None;
+                    for &e in conn.encoders() {
+                        let enc = card.get_encoder(e).context("read encoder")?;
+                        if let Some(&c) = res.filter_crtcs(enc.possible_crtcs()).first() {
+                            found = Some(c);
+                            break;
+                        }
+                    }
+                    found.ok_or_else(|| anyhow!("no CRTC can drive the panel"))?
+                }
+            };
+
+            let mut attached = Vec::new();
+            let mut candidates: Vec<(plane::Handle, Vec<u32>, Props, bool)> = Vec::new();
+            for p in card.plane_handles().context("list planes")? {
+                let info = card.get_plane(p).context("read plane")?;
+                let props = Props::read(&card, p)?;
+                let on_crtc = info.crtc() == Some(crtc);
+                if on_crtc {
+                    attached.push(p);
+                }
+                if props.value("type")? == PlaneType::Primary as u64 && res.filter_crtcs(info.possible_crtcs()).contains(&crtc) {
+                    candidates.push((p, info.formats().to_vec(), props, on_crtc));
+                }
+            }
+            candidates.sort_by_key(|c| !c.3);
+            let (plane, formats, props, _) = candidates.into_iter().next().ok_or_else(|| anyhow!("no primary plane can drive the CRTC"))?;
+
+            let pick = [
+                (DrmFourcc::Xbgr8888, Order::Rgba),
+                (DrmFourcc::Abgr8888, Order::Rgba),
+                (DrmFourcc::Xrgb8888, Order::Bgra),
+                (DrmFourcc::Argb8888, Order::Bgra),
+            ];
+            let (fourcc, order) = pick
+                .into_iter()
+                .find(|(f, _)| formats.contains(&(*f as u32)))
+                .ok_or_else(|| anyhow!("the primary plane supports none of the 32-bit RGB formats"))?;
+
+            let make = || -> Result<Buf> {
+                let db = card.create_dumb_buffer((w, h), fourcc, 32).context("create dumb buffer")?;
+                let fb = card.add_planar_framebuffer(&Planar(&db), FbCmd2Flags::empty()).context("add framebuffer")?;
+                let len = buffer::Buffer::pitch(&db) as usize * h as usize;
+                let offset = drm_ffi::mode::dumbbuffer::map(card.as_fd(), buffer::Buffer::handle(&db).into(), 0, 0).context("map dumb buffer")?.offset;
+                let fd = card.as_fd().as_raw_fd();
+                let map = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, offset as libc::off_t) };
+                if map == libc::MAP_FAILED {
+                    return Err(std::io::Error::last_os_error()).context("mmap dumb buffer");
+                }
+                Ok(Buf { db, fb, map: map.cast(), len })
+            };
+            let bufs = [make()?, make()?, make()?];
+
+            let crtc_props = Props::read(&card, crtc)?;
+            let conn_props = Props::read(&card, conn.handle())?;
+            let blob = card.create_property_blob(&mode).context("create mode blob")?;
+            let mut req = atomic::AtomicModeReq::new();
+            let crtc_id = u64::from(u32::from(crtc));
+            for &other in res.connectors().iter().filter(|&&c| c != conn.handle()) {
+                let props = Props::read(&card, other)?;
+                if props.value("CRTC_ID")? == crtc_id {
+                    req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
+                }
+            }
+            req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
+            req.add_property(crtc, crtc_props.handle("MODE_ID")?, blob);
+            req.add_property(crtc, crtc_props.handle("ACTIVE")?, property::Value::Boolean(true));
+            for &other in attached.iter().filter(|&&p| p != plane) {
+                let props = Props::read(&card, other)?;
+                req.add_property(other, props.handle("FB_ID")?, property::Value::Framebuffer(None));
+                req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
+            }
+            let fb_prop = props.handle("FB_ID")?;
+            req.add_property(plane, fb_prop, property::Value::Framebuffer(Some(bufs[0].fb)));
+            req.add_property(plane, props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
+            req.add_property(plane, props.handle("SRC_X")?, property::Value::UnsignedRange(0));
+            req.add_property(plane, props.handle("SRC_Y")?, property::Value::UnsignedRange(0));
+            req.add_property(plane, props.handle("SRC_W")?, property::Value::UnsignedRange((w as u64) << 16));
+            req.add_property(plane, props.handle("SRC_H")?, property::Value::UnsignedRange((h as u64) << 16));
+            req.add_property(plane, props.handle("CRTC_X")?, property::Value::SignedRange(0));
+            req.add_property(plane, props.handle("CRTC_Y")?, property::Value::SignedRange(0));
+            req.add_property(plane, props.handle("CRTC_W")?, property::Value::UnsignedRange(w as u64));
+            req.add_property(plane, props.handle("CRTC_H")?, property::Value::UnsignedRange(h as u64));
+            card.atomic_commit(AtomicCommitFlags::ALLOW_MODESET, req).context("set the panel mode")?;
+            note(&format!("one plane: crtc {} plane {} {:?} is on", u32::from(crtc), u32::from(plane), fourcc));
+
+            let summary = format!(
+                "one plane {:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, plane {}, {:?}",
+                conn.interface(),
+                u32::from(conn.handle()),
+                mode.name(),
+                mode.vrefresh(),
+                u32::from(crtc),
+                u32::from(plane),
+                fourcc
+            );
+            Ok(KmsSurface { card, bufs, back: 1, flipping: false, flips: true, planes: vec![(plane, fb_prop)], w, h, order, summary })
         }
     }
 
@@ -598,17 +774,24 @@ pub mod kms {
                 req.add_property(plane, fb_prop, property::Value::Framebuffer(Some(buf.fb)));
             }
             self.settle()?;
-            let flags = AtomicCommitFlags::NONBLOCK | AtomicCommitFlags::PAGE_FLIP_EVENT;
-            self.card.atomic_commit(flags, req).context("flip")?;
-            self.flipping = true;
+            if self.flips {
+                let flags = AtomicCommitFlags::NONBLOCK | AtomicCommitFlags::PAGE_FLIP_EVENT;
+                self.card.atomic_commit(flags, req).context("flip")?;
+                self.flipping = true;
+            } else {
+                self.card.atomic_commit(AtomicCommitFlags::empty(), req).context("flip")?;
+            }
             self.back = (self.back + 1) % self.bufs.len();
             Ok(())
         }
 
         fn settle(&mut self) -> Result<()> {
             if self.flipping {
-                flipped(&self.card).context("flip")?;
                 self.flipping = false;
+                if let Err(e) = flipped(&self.card) {
+                    note(&format!("no flip event: {e:#}; committing without waiting for one"));
+                    self.flips = false;
+                }
             }
             Ok(())
         }
