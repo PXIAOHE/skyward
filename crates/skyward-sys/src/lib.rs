@@ -171,6 +171,31 @@ pub fn keep_log(path: &Path) -> Result<()> {
     KEPT.set(Mutex::new(file)).map_err(|_| anyhow!("the log is kept in a file already"))
 }
 
+/// The phone's own raw report partition: no filesystem, nothing to mount,
+/// and what is written here is still there on the next boot. A recovery that
+/// never draws its screen has nowhere else to be read from.
+#[cfg(target_os = "android")]
+const KEPT_RAW: &str = "/dev/block/by-name/oops";
+
+/// The same lines in [`KEPT_RAW`], opened on the first one written.
+#[cfg(target_os = "android")]
+static RAW: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+
+/// Append a line to [`KEPT_RAW`], in the same shape as the file [`keep_log`]
+/// opened, from the start of the partition on. Nothing here is fatal.
+#[cfg(target_os = "android")]
+fn kept_raw(line: &str) {
+    let opened = RAW.get_or_init(|| Mutex::new(OpenOptions::new().write(true).open(KEPT_RAW).ok()));
+    let Ok(mut raw) = opened.lock() else { return };
+    if raw.is_none() {
+        *raw = OpenOptions::new().write(true).open(KEPT_RAW).ok();
+    }
+    if let Some(file) = raw.as_mut() {
+        let stamp = since_boot().map(|d| d.as_secs_f64()).unwrap_or_default();
+        let _ = writeln!(file, "[{stamp:>12.6}] {line}");
+    }
+}
+
 /// Append a line to the kernel log, where it survives until the next boot
 /// and shows in `dmesg`, and to the file [`keep_log`] opened, stamped with
 /// the seconds since the phone started as the kernel log stamps it.
@@ -181,6 +206,8 @@ pub fn kmsg(line: &str) -> Result<()> {
         let mut kept = kept.lock().expect("nothing panics while writing the log");
         writeln!(kept, "[{:>12.6}] {line}", since_boot()?.as_secs_f64()).with_context(|| format!("write {LOG}"))?;
     }
+    #[cfg(target_os = "android")]
+    kept_raw(line);
     Ok(())
 }
 

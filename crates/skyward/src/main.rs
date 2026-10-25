@@ -633,6 +633,12 @@ fn adopt_installed_version(props: &std::collections::HashMap<String, String>) ->
 /// once, so that any reboot from here boots the system. Failures go to the
 /// kernel log and still end the process, which init then starts again.
 fn recovery() -> Result<()> {
+    // A panic aborts the recovery where nothing the phone keeps would show
+    // it; the kernel log and the report partition outlive the next boot.
+    std::panic::set_hook(Box::new(|info| {
+        let _ = skyward_sys::kmsg(&format!("the recovery panicked: {info}"));
+    }));
+    let _ = skyward_sys::kmsg("the recovery service started");
     let run = || -> Result<()> {
         skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
         // A recovery that ended with a function of its own in the port took

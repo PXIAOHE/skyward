@@ -92,18 +92,10 @@ pub mod kms {
     /// How long the display may take to complete a commit.
     const COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
 
-    /// Say in the kernel log what the display did. While the screen is black
-    /// it is the only place the recovery can be read from, through adb; the
-    /// copy beside the phone's firmware is what a phone without a cable can
-    /// read afterwards, from the persist partition.
+    /// Say what the display did where it outlives the next boot: a screen
+    /// that stays black leaves nowhere else to read the recovery from.
     fn note(msg: &str) {
-        use std::io::Write;
-        if let Ok(mut log) = OpenOptions::new().write(true).open("/dev/kmsg") {
-            let _ = writeln!(log, "skyward-ui: {msg}");
-        }
-        if let Ok(mut log) = OpenOptions::new().create(true).append(true).open("/firmware/skyward-ui.log") {
-            let _ = writeln!(log, "skyward-ui: {msg}");
-        }
+        let _ = skyward_sys::kmsg(&format!("display: {msg}"));
     }
 
     struct Card(File);

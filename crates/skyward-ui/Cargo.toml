@@ -35,5 +35,6 @@ syn = { version = "2.0.119", features = ["full", "visit"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 drm = "0.15.0"
+skyward-sys = { path = "../skyward-sys" }
 drm-ffi = "0.9.1"
 libc = { workspace = true }
