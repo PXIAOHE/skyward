@@ -35,14 +35,15 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 
 ## 安装
 
-Skyward 需要已解锁的 bootloader。从 [Releases](https://github.com/kirklin/skyward/releases) 下载对应机型的镜像，使用 `SHA256SUMS` 核对之后，在手机处于 fastboot 模式的时候刷入当前运行槽位的 recovery 分区：
+Skyward 需要已解锁的 bootloader。从 [Releases](https://github.com/kirklin/skyward/releases) 下载对应机型的 zip，每个文件都标有机型和代号，例如 Xiaomi 17 Ultra (nezha)。使用 `SHA256SUMS` 核对并解压之后，在手机处于 fastboot 模式的时候，把其中的镜像刷入当前运行槽位的 recovery 分区：
 
 ```sh
-fastboot flash recovery skyward-v0.1.0-nezha-OS4.0.4.0.XPACNXM.img
+unzip skyward-v0.1.1-nezha-OS4.0.4.0.XPACNXM.zip
+fastboot flash recovery skyward-v0.1.1-nezha-OS4.0.4.0.XPACNXM.img
 fastboot reboot recovery
 ```
 
-之后可以在 Skyward 自己的“安装”页面安装更新的镜像。打开 **自动重新刷入 Skyward** 之后，系统更新或者刷机包覆盖 recovery 分区的时候，Skyward 会重新刷回这些分区。
+之后可以在 Skyward 自己的“安装”页面安装解压出来的新版镜像。打开 **自动重新刷入 Skyward** 之后，系统更新或者刷机包覆盖 recovery 分区的时候，Skyward 会重新刷回这些分区。
 
 super 中没有系统的时候，Skyward 仍然可以启动：屏幕和按键、adb、`adb sideload` 和 fastbootd 都能使用，足够装回一个系统。触摸、WLAN 和解密依赖已安装系统中的程序，系统装回之后随之恢复。
 

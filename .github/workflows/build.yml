@@ -1,8 +1,9 @@
 name: Build
 
 # Every push is linted and tested, and the recovery is built for every
-# device in devices/. A tag starting with v publishes those images as a
-# release. Run by hand, it can build for one device alone.
+# device in devices/, each image zipped. A tag starting with v publishes
+# those zips as a release, each shown as the phone it is for. Run by hand,
+# it can build for one device alone.
 on:
   push:
     branches: ["**"]
@@ -118,17 +119,23 @@ jobs:
           STOCK: ${{ steps.stock.outputs.version }}
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
-          image="skyward-$version-$DEVICE-$STOCK.img"
+          name="skyward-$version-$DEVICE-$STOCK"
           mkdir out
           tools/skyward-pack recovery --stock stock/recovery.img --binary tools/skyward --config "devices/$DEVICE.toml" \
             --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
-            --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$image"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      # The image as it is flashed, the whole partition: the artifact takes
-      # its name.
+            --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      # The image is the whole partition, flashed as it is, and most of it
+      # is the room the recovery leaves empty; it is handed out zipped.
+      - name: Zip the image
+        working-directory: out
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+        run: zip -9 "$NAME.zip" "$NAME.img"
+      # The artifact takes the zip's name.
       - uses: actions/upload-artifact@v7
         with:
-          path: out/${{ steps.pack.outputs.image }}
+          path: out/${{ steps.pack.outputs.name }}.zip
           archive: false
           if-no-files-found: error
           retention-days: 7
@@ -141,18 +148,29 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The devices' configurations say which phone each zip is for.
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: skyward-*
           path: images
           merge-multiple: true
-      - name: Sum the images
+      - name: Sum the zips
         working-directory: images
-        run: sha256sum -- *.img > SHA256SUMS
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            images/*.img
-            images/SHA256SUMS
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+        run: sha256sum -- *.zip > SHA256SUMS
+      # Each zip shows on the release as the phone it is for, its model and
+      # then its codename, which is how people look for theirs; a device
+      # whose zip is missing stops the release.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          zips=()
+          for config in devices/*.toml; do
+            device=$(basename "$config" .toml)
+            model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["device"]["model"])' "$config")
+            zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip)
+            zips+=("$zip#$model ($device)")
+          done
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${zips[@]}" images/SHA256SUMS
