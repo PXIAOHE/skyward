@@ -18,7 +18,7 @@ use crate::widgets::{self, Bar, Cap, Layer, WlanMark};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Refusal, Stage};
 use skyward_net::download::{Failure, Progress};
-use skyward_net::release::Release;
+use skyward_net::release::{Release, Unanswered};
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Joined, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_vab::{BootSlots, Hold, Slot, SnapshotState, Standing};
@@ -131,7 +131,7 @@ pub enum Check {
     #[default]
     Idle,
     Asking,
-    Failed(String),
+    Failed(Unanswered),
     /// The newest system the server knows; none when it knows of none for
     /// the installed one.
     Answered(Option<Release>),
@@ -3096,7 +3096,7 @@ impl App {
 
     /// What the update server answered, and what internal storage holds of
     /// the full package of the newest system it told of.
-    pub fn update_checked(&mut self, answer: Result<Option<Release>, String>, have: Have) {
+    pub fn update_checked(&mut self, answer: Result<Option<Release>, Unanswered>, have: Have) {
         self.state.check = match answer {
             Ok(newest) => Check::Answered(newest),
             Err(why) => Check::Failed(why),
@@ -6136,6 +6136,7 @@ mod tests {
     use crate::fmt;
     use skyward_info::{Boot, Charge, Cpu, Storage};
     use skyward_install::{Failure, Refusal};
+    use skyward_net::reach::Reach;
     use skyward_vab::SnapshotState;
 
     // A Xiaomi 13 Ultra panel: 1440 × 3200 at 560 dpi.
@@ -9258,6 +9259,7 @@ mod tests {
                 speed: Some(866),
                 generation: Some(5),
                 mac: "02:00:00:00:00:04".into(),
+                reach: Some(Reach::Online),
             }),
         )
     }
@@ -9560,7 +9562,7 @@ mod tests {
         app.key(Key::Back, 0);
         app.state.update_server = true;
         assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate, Effect::CheckUpdate]);
-        app.update_checked(Err("update.miui.com did not answer".into()), Have::Nothing);
+        app.update_checked(Err(Unanswered::Failed("update.miui.com did not answer".into())), Have::Nothing);
         app.key(Key::Back, 0);
         assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate, Effect::CheckUpdate], "a failed check is tried again");
     }

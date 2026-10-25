@@ -27,7 +27,7 @@ use skyward_files::Ownership;
 use skyward_block::usb::{self, Drive};
 use skyward_net::download::{self, Failure};
 use skyward_net::http::Servers;
-use skyward_net::release::{Installed, Release};
+use skyward_net::release::{Installed, Release, Unanswered};
 use skyward_net::wlan::{Power as WlanPower, Wlan};
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
@@ -2041,9 +2041,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::CheckUpdate => {
                         ensure!(checker.is_none(), "the update server is being asked already");
                         let server = cfg.update.as_ref().context("the phone's update server is not known")?.server.clone();
+                        let probe = cfg.wlan.as_ref().context("the phone's WLAN is not brought up")?.probe.clone();
                         match installed(cfg, &info) {
-                            Ok(installed) => checker = Some(updates::Worker::start(updates::Task::Check { server, installed }, servers.clone())?),
-                            Err(e) => app.update_checked(Err(format!("{e:#}")), Have::Nothing),
+                            Ok(installed) => {
+                                checker = Some(updates::Worker::start(updates::Task::Check { server, probe, installed }, servers.clone())?)
+                            }
+                            Err(e) => app.update_checked(Err(Unanswered::Failed(format!("{e:#}"))), Have::Nothing),
                         }
                     }
                     Effect::Download(release) => {

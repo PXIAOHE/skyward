@@ -8,6 +8,8 @@ use skyward_info::{Battery, Charge, Cpu, PatchLevel, Storage};
 use skyward_install::ota::Trouble;
 use skyward_install::{Failure, ImageKind, Ramdisk, Refusal};
 use skyward_net::download::Failure as DownloadFailure;
+use skyward_net::reach::Reach;
+use skyward_net::release::Unanswered;
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Joined, Power, Stage as WlanStage, Wlan};
 use skyward_vab::{Hold, Slot, SnapshotState, Standing};
@@ -728,16 +730,44 @@ pub fn wlan_value(w: &Wlan) -> &str {
     }
 }
 
-/// How joining the network chosen goes, under its name.
+/// How joining the network chosen goes, under its name; joined, how far it
+/// reaches, as the system's WLAN page says it.
 pub fn joining(stage: &WlanStage) -> &'static str {
     match stage {
         WlanStage::Joining => "正在连接",
         WlanStage::Addressing => "正在获取 IP 地址",
-        WlanStage::Connected(_) => "已连接",
+        WlanStage::Connected(link) => match link.reach {
+            Some(Reach::Login(_)) => "需要登录",
+            Some(Reach::Offline(_)) => "已连接，但无法访问互联网",
+            Some(Reach::Online) | None => "已连接",
+        },
         WlanStage::WrongPassword => "密码错误",
         WlanStage::NotFound => "未找到该网络",
         WlanStage::Failed => "连接失败",
         WlanStage::NoAddress(_) => "无法获取 IP 地址",
+    }
+}
+
+/// What a network that wants a login in a browser first leaves to do,
+/// with a recovery that has no browser to log in with.
+const LOGIN: &str = "需要先在网页上登录才能访问互联网，Skyward 无法打开网页登录。可以改用无需登录的网络，例如手机热点。";
+
+/// What the WLAN page says under the network joined of how far it reaches,
+/// where it reaches short of the internet.
+pub fn reach(reach: &Reach) -> Option<String> {
+    match reach {
+        Reach::Online => None,
+        Reach::Login(_) => Some(format!("该网络{LOGIN}")),
+        Reach::Offline(why) => Some(format!("该网络无法访问互联网：{why}")),
+    }
+}
+
+/// Why the update server gave no answer, as the update page says it.
+pub fn unanswered(why: &Unanswered) -> String {
+    match why {
+        Unanswered::Login => format!("检查更新失败，当前 WLAN {LOGIN}"),
+        Unanswered::Offline(why) => format!("检查更新失败，当前 WLAN 无法访问互联网：{why}"),
+        Unanswered::Failed(why) => format!("检查更新失败：{why}"),
     }
 }
 
@@ -1034,5 +1064,35 @@ mod tests {
         assert_eq!(s(1_023_000), "999 KB/s");
         assert_eq!(s(1_024_000), "0.98 MB/s", "past 999 KB/s the unit grows");
         assert_eq!(s(42_772_090), "40.8 MB/s");
+    }
+
+    #[test]
+    fn a_network_short_of_the_internet_says_how_and_what_is_left_to_do() {
+        use std::net::Ipv4Addr;
+        let joined = |reach: Option<Reach>| {
+            WlanStage::Connected(skyward_net::wlan::Link {
+                address: Ipv4Addr::new(192, 168, 72, 76),
+                mask: Ipv4Addr::new(255, 255, 240, 0),
+                router: Some(Ipv4Addr::new(192, 168, 64, 254)),
+                dns: vec![Ipv4Addr::new(119, 29, 29, 29)],
+                signal: -52,
+                frequency: 5745,
+                speed: None,
+                generation: None,
+                mac: "02:00:00:00:00:05".into(),
+                reach,
+            })
+        };
+        assert_eq!(joining(&joined(None)), "已连接", "until it has been looked at");
+        assert_eq!(joining(&joined(Some(Reach::Online))), "已连接");
+        assert_eq!(joining(&joined(Some(Reach::Login(None)))), "需要登录");
+        assert_eq!(joining(&joined(Some(Reach::Offline("no answer in 5 s".into())))), "已连接，但无法访问互联网");
+        assert_eq!(reach(&Reach::Online), None, "the page says nothing of a network that reaches the internet");
+        let login = reach(&Reach::Login(Some("http://192.168.64.254:2060/redirect/".into()))).expect("a login is said");
+        assert_eq!(login, "该网络需要先在网页上登录才能访问互联网，Skyward 无法打开网页登录。可以改用无需登录的网络，例如手机热点。");
+        assert_eq!(reach(&Reach::Offline("no answer in 5 s".into())).as_deref(), Some("该网络无法访问互联网：no answer in 5 s"));
+        assert!(unanswered(&Unanswered::Login).starts_with("检查更新失败，当前 WLAN 需要先在网页上登录"));
+        assert_eq!(unanswered(&Unanswered::Offline("could not reach connect.rom.miui.com".into())), "检查更新失败，当前 WLAN 无法访问互联网：could not reach connect.rom.miui.com");
+        assert_eq!(unanswered(&Unanswered::Failed("io: received fatal alert: HandshakeFailure".into())), "检查更新失败：io: received fatal alert: HandshakeFailure", "a network that reaches the internet leaves how asking failed");
     }
 }

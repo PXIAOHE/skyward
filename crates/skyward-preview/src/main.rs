@@ -3,7 +3,8 @@ use skyward_config::DeviceConfig;
 use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Reflash, Refusal, Stage};
 use skyward_net::download::{Failure as DownloadFailure, Progress};
-use skyward_net::release::Release;
+use skyward_net::reach::Reach;
+use skyward_net::release::{Release, Unanswered};
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_ui::app::{
@@ -348,7 +349,7 @@ fn main() -> Result<()> {
     let adding = |app: &mut App, name: &str, security: Security, field: Field, choosing: bool| {
         app.state.adding = Some(Adding { name: name.into(), security, field, choosing });
     };
-    let pages: [PageShot; 158] = [
+    let pages: [PageShot; 160] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -584,6 +585,10 @@ fn main() -> Result<()> {
             app.state.wlan = Some(joined(Joining::Connected(router_link())));
             app.state.traffic = Traffic { rx: 5000, tx: 2188 };
         }),
+        ("182-wlan-light-login", Screen::Wlan, false, &|app| {
+            let login = Reach::Login(Some("http://192.168.64.254:2060/redirect/?pip=192.168.72.76".into()));
+            app.state.wlan = Some(joined(Joining::Connected(Link { reach: Some(login), ..router_link() })));
+        }),
         ("159-filesystems-light", Screen::Filesystems, false, &|app| app.set_filesystems(Ok(phone_filesystems(true)))),
         ("160-filesystems-dark-closed", Screen::Filesystems, true, &|app| {
             app.state.data = Data::Closed;
@@ -741,7 +746,12 @@ fn main() -> Result<()> {
         }),
         ("151-update-light-unanswered", Screen::Update, false, &|app| {
             online(app);
-            app.update_checked(Err("ask https://update.miui.com/updates/miotaV3.php: io: the DNS server at 192.168.1.1:53 did not answer".into()), Have::Nothing);
+            let why = "ask https://update.miui.com/updates/miotaV3.php: io: the DNS server at 192.168.1.1:53 did not answer";
+            app.update_checked(Err(Unanswered::Failed(why.into())), Have::Nothing);
+        }),
+        ("183-update-light-login", Screen::Update, false, &|app| {
+            online(app);
+            app.update_checked(Err(Unanswered::Login), Have::Nothing);
         }),
         ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
             let (rows, cols) = app.term_size(&fonts);
@@ -1285,6 +1295,7 @@ fn router_link() -> Link {
         speed: Some(866),
         generation: Some(5),
         mac: "02:00:00:00:00:04".into(),
+        reach: Some(Reach::Online),
     }
 }
 

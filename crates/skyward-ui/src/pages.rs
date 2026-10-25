@@ -1949,7 +1949,7 @@ fn online(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
             let check = widgets::list(c, t, f, y, &[row]);
             out.extend(hits(&check.rows, &[Action::CheckUpdate]));
             return match other {
-                Check::Failed(why) => widgets::footnote(c, t, f, check.bottom, &format!("检查更新失败：{why}")),
+                Check::Failed(why) => widgets::footnote(c, t, f, check.bottom, &fmt::unanswered(why)),
                 Check::Answered(None) => widgets::footnote(c, t, f, check.bottom, "暂无本机的系统更新信息。"),
                 _ => check.bottom,
             };
@@ -2060,6 +2060,11 @@ pub fn wlan(cx: &Ctx) -> Frame {
                 out.extend(hits(&joined.rows, &[Action::OpenJoined]));
                 out.push(Hit { rect: widgets::round_button(t, joined.rows[0]), action: Action::OpenJoined });
                 y = joined.bottom;
+                if let Joining::Connected(link) = &j.stage {
+                    if let Some(note) = link.reach.as_ref().and_then(fmt::reach) {
+                        y = widgets::footnote(&mut c, t, f, y, &note);
+                    }
+                }
             }
             let others: Vec<(usize, &Network)> =
                 w.networks.iter().enumerate().filter(|(_, n)| w.joined.as_ref().is_none_or(|j| j.ssid != n.ssid)).collect();

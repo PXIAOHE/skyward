@@ -2,6 +2,7 @@
 //! supplicant tells and the address the network gives.
 
 use crate::dhcp::Lease;
+use crate::reach::Reach;
 use crate::supplicant::{Bss, Event, Security};
 use std::net::Ipv4Addr;
 
@@ -100,6 +101,8 @@ pub struct Link {
     pub generation: Option<u8>,
     /// The phone's own hardware address.
     pub mac: String,
+    /// How far the network reaches, once looked at.
+    pub reach: Option<Reach>,
 }
 
 impl Link {
@@ -114,6 +117,7 @@ impl Link {
             speed: None,
             generation: None,
             mac: mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":"),
+            reach: None,
         }
     }
 }

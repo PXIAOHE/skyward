@@ -113,6 +113,17 @@ pub struct Release {
     pub length: Option<u64>,
 }
 
+/// Why the server gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unanswered {
+    /// The network joined wants a login in a browser first.
+    Login,
+    /// The network joined does not reach the internet: why.
+    Offline(String),
+    /// The server could not be asked, or its answer not read: why.
+    Failed(String),
+}
+
 #[derive(Deserialize)]
 struct Answer {
     #[serde(rename = "Code")]

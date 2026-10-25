@@ -77,7 +77,8 @@ ready_hardware_service = "android.hardware.boot@1.2::IBootControl/default"
 # the modem's, so they are given to the loader again: the settings from
 # the vendor partition, the address from persist. wpa_supplicant runs on
 # the recovery's own libraries, with libnl and its own interface library
-# from the vendor interface's bundle.
+# from the vendor interface's bundle. Whether a network joined reaches the
+# internet is asked of the page Xiaomi's Chinese system asks.
 [wlan]
 modules = ["qca_cld3_kiwi_v2"]
 writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
@@ -89,6 +90,7 @@ interface = "wlan0"
 supplicant = "/vendor/bin/hw/wpa_supplicant"
 libraries = ["/vendor/lib64", "/system/lib64"]
 service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
 
 # The update server the stock updater of the Chinese system asks.
 [update]

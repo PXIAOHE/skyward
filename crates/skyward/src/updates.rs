@@ -5,7 +5,8 @@
 use anyhow::{Context, Result};
 use skyward_net::download::{self, Damaged, Failure, NoRoom, Progress, Refused};
 use skyward_net::http::{self, Servers};
-use skyward_net::release::{self, Installed, Release};
+use skyward_net::reach::{self, Reach};
+use skyward_net::release::{self, Installed, Release, Unanswered};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,14 +27,17 @@ const TRIES: u32 = 5;
 const BETWEEN: Duration = Duration::from_secs(3);
 
 pub enum Task {
-    Check { server: String, installed: Installed },
+    /// Ask `server` for the newest system for `installed`. Where that
+    /// fails, `probe`, the page that tells whether the network joined
+    /// reaches the internet, says whether the network is why.
+    Check { server: String, probe: String, installed: Installed },
     /// Download `release`'s full package to `path`; `server` is asked again
     /// for where it is when the addresses it gave have run out.
     Download { server: String, installed: Installed, release: Release, path: PathBuf },
 }
 
 pub enum Event {
-    Checked(Result<Option<Release>, String>),
+    Checked(Result<Option<Release>, Unanswered>),
     /// How far the download has come, and how fast it goes, in bytes a
     /// second.
     Progress(Progress, u64),
@@ -80,10 +84,10 @@ impl Worker {
                     // The package's exact length is asked of where it is
                     // downloaded from: the server gives it rounded, in units
                     // of 1024. Without it the rounded one shows.
-                    Task::Check { server, installed } => {
-                        let a = http::agent(servers);
+                    Task::Check { server, probe, installed } => {
+                        let a = http::agent(servers.clone());
                         *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
-                        let mut answer = release::ask(&a, &server, &installed).map_err(|e| format!("{e:#}"));
+                        let mut answer = release::ask(&a, &server, &installed).map_err(|e| unanswered(&e, &server, &probe, &servers));
                         if let Ok(Some(r)) = &mut answer {
                             match release::length(&a, &r.urls[0]) {
                                 Ok(length) => r.length = Some(length),
@@ -131,6 +135,20 @@ impl Drop for Worker {
         if let Some(thread) = self.thread.take() {
             thread.join().expect("the update worker does not panic");
         }
+    }
+}
+
+/// Why `server` gave no answer: that the network joined wants a login
+/// first, or reaches nothing, where `probe` shows it, rather than how
+/// asking failed through such a network.
+fn unanswered(e: &anyhow::Error, server: &str, probe: &str, servers: &Servers) -> Unanswered {
+    let dns = servers.lock().expect("the DNS servers are not held by a thread that panicked").clone();
+    let reach = reach::probe(probe, &dns);
+    let _ = skyward_sys::kmsg(&format!("asking {server}: {e:#}; the network joined {reach}"));
+    match reach {
+        Reach::Online => Unanswered::Failed(format!("{e:#}")),
+        Reach::Login(_) => Unanswered::Login,
+        Reach::Offline(why) => Unanswered::Offline(why),
     }
 }
 

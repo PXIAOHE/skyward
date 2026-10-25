@@ -94,6 +94,9 @@ pub struct Wlan {
     /// which the directory takes only from a program the running system
     /// describes.
     pub service: String,
+    /// The page the stock system asks over plain HTTP to tell whether a
+    /// network reaches the internet, which answers 204 with nothing.
+    pub probe: String,
 }
 
 /// A value written to a file, such as a switch in sysfs.
@@ -418,6 +421,7 @@ impl DeviceConfig {
             }
         }
         if let Some(wlan) = &cfg.wlan {
+            ensure!(wlan.probe.starts_with("http://"), "[wlan] probe: {} is not a plain HTTP address", wlan.probe);
             for file in &wlan.firmware {
                 let name = Path::new(&file.name);
                 let plain = name.components().all(|c| matches!(c, std::path::Component::Normal(_)));
@@ -685,6 +689,7 @@ mod tests {
         assert_eq!(wlan.firmware[1].path, "kiwi_v2/wlan_mac.bin");
         assert_eq!(wlan.interface, "wlan0");
         assert_eq!(wlan.service, "android.hardware.wifi.supplicant.ISupplicant/default");
+        assert_eq!(wlan.probe, "http://connect.rom.miui.com/generate_204");
         assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
     }
 
@@ -697,12 +702,21 @@ mod tests {
         assert_eq!(wlan.writes, [Write { path: "/sys/kernel/cnss/fs_ready".into(), value: "1".into() }]);
         assert!(wlan.firmware.is_empty(), "the vendor's own links reach its settings and persist's MAC address");
         assert_eq!(wlan.libraries, ["/system/lib64", "/vendor/lib64"], "the recovery's own libraries come first");
+        assert_eq!(wlan.probe, "http://connect.rom.miui.com/generate_204", "as the stock system asks it");
         assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
     }
 
     #[test]
-    fn firmware_is_named_from_the_loaders_folders_and_found_plainly() {
+    fn a_wlan_is_probed_over_plain_http() {
         let base = "[device]\ncodename = \"x\"\n[wlan]\nmodules = []\ninterface = \"wlan0\"\nsupplicant = \"/s\"\nservice = \"a/b\"\n";
+        assert!(DeviceConfig::parse(&format!("{base}probe = \"http://connect.rom.miui.com/generate_204\"\n")).is_ok());
+        assert!(DeviceConfig::parse(&format!("{base}probe = \"https://connect.rom.miui.com/generate_204\"\n")).is_err(), "a login cannot answer in its stead");
+        assert!(DeviceConfig::parse(base).is_err(), "a WLAN says how it is probed");
+    }
+
+    #[test]
+    fn firmware_is_named_from_the_loaders_folders_and_found_plainly() {
+        let base = "[device]\ncodename = \"x\"\n[wlan]\nmodules = []\ninterface = \"wlan0\"\nsupplicant = \"/s\"\nservice = \"a/b\"\nprobe = \"http://p/\"\n";
         let with = |file: &str| DeviceConfig::parse(&format!("{base}firmware = [{file}]\n"));
         assert!(with("{ name = \"wlan/a.ini\", path = \"/vendor/etc/a.ini\" }").is_ok());
         assert!(with("{ name = \"wlan/mac.bin\", partition = \"persist\", path = \"kiwi/mac.bin\" }").is_ok());

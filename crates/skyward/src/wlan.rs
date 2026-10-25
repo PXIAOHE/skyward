@@ -8,9 +8,11 @@ use skyward_config::{Firmware, Wlan as Config};
 use skyward_net::dhcp::{self, Kept, Lease};
 use skyward_net::http::Servers;
 use skyward_net::iface;
+use skyward_net::reach::{self, Reach};
 use skyward_net::supplicant::{self, Bss, Control, Event as Told, Security};
 use skyward_net::wlan::{self, Joined, Link, Next, Power, Stage, Traffic, Wlan};
 use std::fs;
+use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -65,10 +67,12 @@ pub enum Command {
 }
 
 /// What comes to the thread: a command, how asking for an address went,
-/// or that the screen has let the thread go.
+/// how far the network joined reaches, or that the screen has let the
+/// thread go.
 enum Inbox {
     Command(Command),
     Address(u64, Result<Asked>),
+    Reach(u64, Reach),
     End,
 }
 
@@ -193,6 +197,9 @@ struct Running {
     /// what an earlier one answers is let go.
     asking: Option<(u64, Arc<AtomicBool>)>,
     asked: u64,
+    /// The number of the last look at how far the network reaches; what an
+    /// earlier one finds is let go.
+    probed: u64,
     /// When to ask for an address again after the network gave none.
     retry_at: Option<Instant>,
     polled_at: Instant,
@@ -258,6 +265,7 @@ impl Station {
                 match message {
                     Inbox::Command(c) => self.command(c),
                     Inbox::Address(n, answer) => self.addressed(n, answer),
+                    Inbox::Reach(n, reach) => self.reached(n, reach),
                     Inbox::End => return self.off(),
                 }
             }
@@ -359,6 +367,7 @@ impl Station {
             lease: None,
             asking: None,
             asked: 0,
+            probed: 0,
             retry_at: None,
             polled_at: Instant::now(),
             counted: None,
@@ -518,12 +527,45 @@ impl Station {
             self.cfg.interface, lease.address, lease.mask, lease.router, lease.seconds, lease.renew
         ));
         *self.servers.lock().expect("the DNS servers are not held by a thread that panicked") = lease.dns.clone();
-        let link = Link::new(&lease, r.mac);
+        let mut link = Link::new(&lease, r.mac);
+        // An address kept keeps how far its network was found to reach; a
+        // new one has it looked at.
+        link.reach = match &self.state.joined {
+            Some(Joined { stage: Stage::Connected(had), .. }) if same => had.reach.clone(),
+            _ => None,
+        };
+        let look = link.reach.is_none().then(|| lease.dns.clone());
         r.lease = Some(Held { lease, at: Instant::now(), phase: 0 });
         if let Some(j) = &mut self.state.joined {
             j.stage = Stage::Connected(link);
         }
+        if let Some(dns) = look {
+            self.probe(dns);
+        }
         self.poll_link();
+    }
+
+    /// Look how far the network joined reaches, on a thread of its own, the
+    /// page's name looked up in the network's own DNS servers, `dns`.
+    fn probe(&mut self, dns: Vec<Ipv4Addr>) {
+        let (page, back) = (self.cfg.probe.clone(), self.back.clone());
+        let Some(r) = &mut self.running else { return };
+        r.probed += 1;
+        let n = r.probed;
+        thread::spawn(move || {
+            let reach = reach::probe(&page, &dns);
+            let _ = back.inbox.send(Inbox::Reach(n, reach));
+            signal(&back.poke);
+        });
+    }
+
+    fn reached(&mut self, n: u64, reach: Reach) {
+        if self.running.as_ref().is_none_or(|r| r.probed != n) {
+            return;
+        }
+        let Some(Joined { stage: Stage::Connected(link), .. }) = &mut self.state.joined else { return };
+        let _ = skyward_sys::kmsg(&format!("the network on {} {reach}", self.cfg.interface));
+        link.reach = Some(reach);
     }
 
     /// Give the address back, and stop asking for one or keeping it.

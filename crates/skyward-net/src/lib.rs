@@ -4,6 +4,7 @@ pub mod download;
 pub mod http;
 #[cfg(target_os = "android")]
 pub mod iface;
+pub mod reach;
 pub mod release;
 pub mod supplicant;
 pub mod wlan;
