@@ -1,11 +1,13 @@
 use anyhow::{bail, ensure, Context, Result};
 use procfs::process::{FDTarget, MMapPath, Process};
 use skyward_config::Service;
+use skyward_sys::ueventd;
 use skyward_vab::Mounted;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -19,16 +21,25 @@ const RESTART_DELAY: Duration = Duration::from_secs(1);
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_POLL: Duration = Duration::from_millis(100);
 
+/// Where the kernel says the highest capability it knows.
+const CAP_LAST_CAP: &str = "/proc/sys/kernel/cap_last_cap";
+
+/// The version of the kernel's capability sets that holds 64 of them.
+const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
 /// Keep each program running, one thread per program: start it, and start
 /// it again whenever it exits. They are started in the order they are
 /// written, and one that says what it will be ready with holds up those
 /// after it until it is. A program still running from an earlier instance
 /// of the recovery service is waited on instead of started twice. A
 /// program that runs once is run to its end where it stands in that order.
+/// Each runs as the user, in the groups and with the capabilities the
+/// phone's own init gives it.
 ///
 /// `libraries` is a directory of shared libraries every one of them may
 /// need, searched after whatever it names itself.
 pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
+    let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
     for s in services {
         if !Path::new(&s.path).is_file() {
             bail!("{} is missing; is its partition mounted?", s.path);
@@ -37,18 +48,111 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         if let Some(dir) = libraries {
             s.libraries.push(dir.to_string_lossy().into_owned());
         }
+        let who = Credentials::of(&s, &known)?;
         if s.oneshot {
-            let status = command(&s).status().with_context(|| format!("run {}", s.path))?;
+            let status = command(&s, &who).status().with_context(|| format!("run {}", s.path))?;
             ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
             skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
             continue;
         }
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
-        thread::Builder::new().name(name).spawn(move || supervise(&s)).context("start a supervising thread")?;
+        thread::Builder::new().name(name).spawn(move || supervise(&s, &who)).context("start a supervising thread")?;
         ready(&waiting)?;
     }
     Ok(())
+}
+
+/// Who a program runs as and what of root's it keeps, as the phone's own
+/// init has it run, worked out before it is started: between the fork and
+/// the exec nothing may be looked up.
+#[derive(Debug, Clone)]
+struct Credentials {
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    /// The other groups it is in.
+    groups: Vec<libc::gid_t>,
+    kept: Option<Kept>,
+}
+
+/// The capabilities a program keeps, as masks.
+#[derive(Debug, Clone, Copy)]
+struct Kept {
+    mask: u64,
+    /// Those and the right to drop the others for good, which goes once
+    /// they are dropped.
+    dropping: u64,
+    /// The highest capability the kernel knows.
+    last: u32,
+}
+
+impl Credentials {
+    /// Who `s` runs as, by the names the phone gives its accounts: root,
+    /// in no other group, keeping all of root's, where it names none.
+    fn of(s: &Service, known: &HashMap<String, u32>) -> Result<Self> {
+        let id = |name: &String| ueventd::account(known, name).with_context(|| format!("{}: the phone has no account named {name}", s.path));
+        let uid = s.user.as_ref().map(id).transpose()?.unwrap_or(0);
+        let mut groups = s.groups.iter().map(id).collect::<Result<Vec<_>>>()?;
+        let gid = if groups.is_empty() { 0 } else { groups.remove(0) };
+        let kept = if s.capabilities.is_empty() {
+            None
+        } else {
+            let bit = |name: &str| skyward_config::capability(name).map(|n| 1u64 << n).with_context(|| format!("{}: {name} is not a capability", s.path));
+            let mask = s.capabilities.iter().try_fold(0, |mask, c| bit(c).map(|b| mask | b))?;
+            let last = fs::read_to_string(CAP_LAST_CAP).with_context(|| format!("read {CAP_LAST_CAP}"))?;
+            let last = last.trim().parse().with_context(|| format!("read the number in {CAP_LAST_CAP}"))?;
+            Some(Kept { mask, dropping: mask | bit("SETPCAP")?, last })
+        };
+        Ok(Self { uid, gid, groups, kept })
+    }
+
+    /// Become who the program runs as, in the child about to run it, as
+    /// init does: take its groups and its user, keeping the capabilities
+    /// through the change where it keeps some, then drop every other one
+    /// for good and hand those it keeps on through the exec.
+    fn take_on(&self) -> io::Result<()> {
+        let done = |r: libc::c_int| if r == 0 { Ok(()) } else { Err(io::Error::last_os_error()) };
+        let prctl = |option: libc::c_int, a: libc::c_ulong, b: libc::c_ulong| done(unsafe { libc::prctl(option, a, b, 0 as libc::c_ulong, 0 as libc::c_ulong) });
+        if self.kept.is_some() {
+            prctl(libc::PR_SET_KEEPCAPS, 1, 0)?;
+        }
+        done(unsafe { libc::setgroups(self.groups.len(), self.groups.as_ptr()) })?;
+        done(unsafe { libc::setresgid(self.gid, self.gid, self.gid) })?;
+        done(unsafe { libc::setresuid(self.uid, self.uid, self.uid) })?;
+        let Some(kept) = self.kept else { return Ok(()) };
+        set_capabilities(kept.dropping)?;
+        for cap in (0..=kept.last).filter(|c| kept.mask & 1 << c == 0) {
+            prctl(libc::PR_CAPBSET_DROP, cap.into(), 0)?;
+        }
+        set_capabilities(kept.mask)?;
+        for cap in (0..=kept.last).filter(|c| kept.mask & 1 << c != 0) {
+            prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_RAISE as libc::c_ulong, cap.into())?;
+        }
+        Ok(())
+    }
+}
+
+/// Make `mask` the capabilities the process has, may take up and hands on.
+fn set_capabilities(mask: u64) -> io::Result<()> {
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: libc::c_int,
+    }
+    #[repr(C)]
+    struct Sets {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    let header = Header { version: CAPABILITY_VERSION_3, pid: 0 };
+    let half = |bits: u32| Sets { effective: bits, permitted: bits, inheritable: bits };
+    let sets = [half(mask as u32), half((mask >> 32) as u32)];
+    if unsafe { libc::syscall(libc::SYS_capset, &header, sets.as_ptr()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// Wait until the program has what it says it will be ready with.
@@ -85,12 +189,12 @@ fn ready(s: &Service) -> Result<()> {
     }
 }
 
-fn supervise(s: &Service) -> ! {
+fn supervise(s: &Service, who: &Credentials) -> ! {
     loop {
         let started = Instant::now();
         let ended = match running(&s.path) {
             Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
-            None => run(s),
+            None => run(s, who),
         };
         let line = match ended {
             Ok(how) => format!("{}: {how}", s.path),
@@ -104,21 +208,25 @@ fn supervise(s: &Service) -> ! {
 }
 
 /// Start the program and wait for it to end.
-fn run(s: &Service) -> Result<String> {
-    let mut child = command(s).spawn().with_context(|| format!("start {}", s.path))?;
+fn run(s: &Service, who: &Credentials) -> Result<String> {
+    let mut child = command(s, who).spawn().with_context(|| format!("start {}", s.path))?;
     let status = child.wait().context("wait for it")?;
     Ok(format!("pid {} ended: {status}", child.id()))
 }
 
 /// The program as it is started: with what it is given, from the top of the
-/// tree, reading and writing nothing of the recovery's, and finding its
-/// libraries where it names them.
-fn command(s: &Service) -> Command {
+/// tree, reading and writing nothing of the recovery's, finding its
+/// libraries where it names them, and as `who`.
+fn command(s: &Service, who: &Credentials) -> Command {
     let mut cmd = Command::new(&s.path);
     cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
     }
+    let who = who.clone();
+    // Only system calls run between the fork and the exec, on what was
+    // worked out before it.
+    unsafe { cmd.pre_exec(move || who.take_on()) };
     cmd
 }
 

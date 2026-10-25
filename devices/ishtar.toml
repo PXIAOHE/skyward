@@ -20,15 +20,25 @@ sources = ["vendor_boot", "vendor_dlkm", "vendor"]
 # from /odm/firmware.
 load = ["fts_touch_spi"]
 
+# Each of the phone's own programs below runs as the user, in the groups
+# and with the capabilities its init script on the phone gives it, so that
+# what it makes in the data partition is whose it is when the phone runs
+# it, and the phone's own copy of it can still read and remove it.
+
 # The panel hands raw frames to the host. touch_report turns them into
 # touches on the fts input device; touchsensor tells water, gloves and
 # screen protectors apart with the models in /odm/firmware.
 [[service]]
 path = "/odm/bin/touch_report"
+user = "system"
+groups = ["system", "uhid", "input"]
+capabilities = ["SYS_NICE"]
 
 [[service]]
 path = "/odm/bin/touchsensor"
 libraries = ["/odm/lib64", "/system/lib64"]
+user = "system"
+groups = ["system", "uhid", "input"]
 
 # The secure world reaches back into Android through the listeners this
 # daemon registers; without them the key service cannot use any key.
@@ -36,6 +46,8 @@ libraries = ["/odm/lib64", "/system/lib64"]
 path = "/vendor/bin/qseecomd"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
 
 # The key service, which is the only thing that can use the keys the phone
 # wrapped in hardware.
@@ -43,6 +55,8 @@ ready_property = "vendor.sys.listeners.registered"
 path = "/vendor/bin/hw/android.hardware.security.keymint-service-qti"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+user = "system"
+groups = ["system", "drmrpc"]
 
 # The directory the phone's hardware services of the older kind register
 # with. A recovery carries none of it, so it is the installed system's own
@@ -52,6 +66,8 @@ ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
 path = "/mnt/system_ext/bin/hwservicemanager"
 libraries = ["/mnt/system/system/lib64/bootstrap", "/mnt/system/system/lib64", "/mnt/system_ext/lib64"]
 ready_property = "hwservicemanager.ready"
+user = "system"
+groups = ["system", "readproc"]
 
 # The credential service: it is what the secure world has check a screen
 # lock, and the only thing that can hand out the note the key service wants
@@ -60,6 +76,8 @@ ready_property = "hwservicemanager.ready"
 path = "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
+user = "system"
+groups = ["system"]
 
 # The boot control, which says which slot the bootloader starts next and
 # switches it, writing where the bootloader reads it. It comes last: the
@@ -68,6 +86,8 @@ ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
 path = "/vendor/bin/hw/android.hardware.boot@1.2-service"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_hardware_service = "android.hardware.boot@1.2::IBootControl/default"
+user = "root"
+groups = ["root"]
 
 # WLAN: the WCN7850 on PCIe, driven by qca_cld3_kiwi_v2 over the cnss2
 # platform driver. Once fs_ready is written, cnss2 powers the chip up and
@@ -95,6 +115,14 @@ probe = "http://connect.rom.miui.com/generate_204"
 # The update server the stock updater of the Chinese system asks.
 [update]
 server = "https://update.miui.com/updates/miotaV3.php"
+
+# The stock build the recovery is made on: the Chinese system's
+# OS3.0.308.0, whose full update package on the phone maker's own download
+# server holds the recovery partition the recovery is built on top of.
+[stock]
+version = "OS3.0.308.0.WMACNXM"
+package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.308.0.WMACNXM/ishtar-ota_full-OS3.0.308.0.WMACNXM-user-16.0-e3d01be14a.zip"
+recovery = "ed63e2d3cbb1b06a15579f5384c87e7d80505e44140b3a767f5034d532a3568a"
 
 # qcom-hv-haptics. Waveform 0 is the click: 8 pattern samples at 6667 µs
 # each (its debugfs entry, haptics/effect0). Qualcomm's vibrator HAL plays

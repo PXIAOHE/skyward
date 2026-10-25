@@ -65,6 +65,22 @@ pub struct DeviceConfig {
     /// whose server the recovery knows.
     #[serde(default)]
     pub update: Option<Update>,
+    /// The stock build the recovery is made on.
+    #[serde(default)]
+    pub stock: Option<Stock>,
+}
+
+/// The stock build a recovery is made on: the phone maker's full update
+/// package of it, whose recovery partition the recovery is built on top
+/// of, and that partition as it should come out of the package.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Stock {
+    /// The build's version, such as OS4.0.4.0.XPACNXM.
+    pub version: String,
+    /// Where the package is downloaded from, over HTTPS.
+    pub package: String,
+    /// The recovery partition's SHA-256, in lowercase hex.
+    pub recovery: String,
 }
 
 /// What brings the phone's WLAN up inside a recovery, which loads none of
@@ -332,6 +348,73 @@ pub struct Service {
     /// runs only where the property has this value.
     #[serde(default)]
     pub when: Option<Property>,
+    /// The user the program runs as, as the phone's own init runs it, by
+    /// the name Android gives the account; root where none is given. What
+    /// the program makes in the data partition is then that user's, as it
+    /// is when the phone runs it, and the phone's own copy of the program
+    /// can still read and remove it.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Its group and then the others it is in, as init's group line names
+    /// them.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// What it may do of what only root may, as init's capabilities line
+    /// names it: it keeps these alone, through its change of user.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// The kernel's capabilities, by the names init's capabilities lines give
+/// them, in the order the kernel numbers them.
+const CAPABILITIES: [&str; 41] = [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "DAC_READ_SEARCH",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "SETGID",
+    "SETUID",
+    "SETPCAP",
+    "LINUX_IMMUTABLE",
+    "NET_BIND_SERVICE",
+    "NET_BROADCAST",
+    "NET_ADMIN",
+    "NET_RAW",
+    "IPC_LOCK",
+    "IPC_OWNER",
+    "SYS_MODULE",
+    "SYS_RAWIO",
+    "SYS_CHROOT",
+    "SYS_PTRACE",
+    "SYS_PACCT",
+    "SYS_ADMIN",
+    "SYS_BOOT",
+    "SYS_NICE",
+    "SYS_RESOURCE",
+    "SYS_TIME",
+    "SYS_TTY_CONFIG",
+    "MKNOD",
+    "LEASE",
+    "AUDIT_WRITE",
+    "AUDIT_CONTROL",
+    "SETFCAP",
+    "MAC_OVERRIDE",
+    "MAC_ADMIN",
+    "SYSLOG",
+    "WAKE_ALARM",
+    "BLOCK_SUSPEND",
+    "AUDIT_READ",
+    "PERFMON",
+    "BPF",
+    "CHECKPOINT_RESTORE",
+];
+
+/// The kernel's number for a capability, by the name init's capabilities
+/// line gives it.
+pub fn capability(name: &str) -> Option<u32> {
+    CAPABILITIES.iter().position(|c| *c == name).map(|n| n as u32)
 }
 
 /// A property of the installed system, and a value it may have.
@@ -403,6 +486,15 @@ impl DeviceConfig {
                 s.path
             );
         }
+        for s in &cfg.services {
+            ensure!(s.user.is_none() || !s.groups.is_empty(), "[[service]] {}: a program given a user is given its group too", s.path);
+            for name in s.user.iter().chain(&s.groups) {
+                ensure!(!name.is_empty() && !name.contains(char::is_whitespace), "[[service]] {}: {name:?} is not an account's name", s.path);
+            }
+            for name in &s.capabilities {
+                ensure!(capability(name).is_some(), "[[service]] {}: {name} is not a capability init knows", s.path);
+            }
+        }
         for folder in &cfg.backup.data_skipped {
             let path = Path::new(folder);
             let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
@@ -428,6 +520,20 @@ impl DeviceConfig {
                 let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
                 ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[logd] libraries: {library} is not an absolute path to a file");
             }
+        }
+        if let Some(stock) = &cfg.stock {
+            let name = stock.package.rsplit('/').next().unwrap_or_default();
+            ensure!(
+                stock.package.starts_with("https://") && name.ends_with(".zip") && name.contains(&stock.version) && !stock.version.is_empty(),
+                "[stock] package: {} is not an HTTPS address of the full package of {}",
+                stock.package,
+                stock.version
+            );
+            ensure!(
+                stock.recovery.len() == 64 && stock.recovery.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "[stock] recovery: {} is not a SHA-256 in lowercase hex",
+                stock.recovery
+            );
         }
         if let Some(wlan) = &cfg.wlan {
             ensure!(wlan.probe.starts_with("http://"), "[wlan] probe: {} is not a plain HTTP address", wlan.probe);
@@ -608,6 +714,71 @@ mod tests {
         assert!(DeviceConfig::parse(&format!("{base}description = \"/vendor/etc/a.xml\"\n")).is_err());
         let kept = DeviceConfig::parse("[device]\ncodename = \"x\"\n[[service]]\npath = \"/vendor/bin/a\"\n").unwrap();
         assert!(!kept.services[0].oneshot && kept.services[0].args.is_empty(), "a program is kept running unless it says otherwise");
+    }
+
+    #[test]
+    fn a_program_runs_as_its_user_in_its_groups_keeping_named_capabilities() {
+        let base = "[device]\ncodename = \"x\"\n[[service]]\npath = \"/odm/bin/a\"\n";
+        let root = DeviceConfig::parse(base).unwrap();
+        let s = &root.services[0];
+        assert_eq!((s.user.as_ref(), s.groups.len(), s.capabilities.len()), (None, 0, 0), "root, as init runs one that names no user");
+        let named = DeviceConfig::parse(&format!("{base}user = \"system\"\ngroups = [\"system\", \"drmrpc\"]\ncapabilities = [\"WAKE_ALARM\"]\n")).unwrap();
+        let s = &named.services[0];
+        assert_eq!((s.user.as_deref(), &s.groups[..], &s.capabilities[..]), (Some("system"), &["system".to_string(), "drmrpc".to_string()][..], &["WAKE_ALARM".to_string()][..]));
+        assert!(DeviceConfig::parse(&format!("{base}user = \"system\"\n")).is_err(), "a user without its group");
+        assert!(DeviceConfig::parse(&format!("{base}user = \"system\"\ngroups = [\"system\"]\ncapabilities = [\"WAKE\"]\n")).is_err(), "no such capability");
+        assert!(DeviceConfig::parse(&format!("{base}user = \"sys tem\"\ngroups = [\"system\"]\n")).is_err());
+        assert_eq!(
+            [capability("CHOWN"), capability("SETPCAP"), capability("WAKE_ALARM"), capability("BLOCK_SUSPEND"), capability("CHECKPOINT_RESTORE"), capability("CAP_CHOWN")],
+            [Some(0), Some(8), Some(35), Some(36), Some(40), None],
+            "numbered as the kernel numbers them, named as init names them"
+        );
+    }
+
+    #[test]
+    fn each_phones_programs_run_as_their_init_scripts_run_them() {
+        let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        let ishtar = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        for s in nezha.services.iter().chain(&ishtar.services) {
+            assert!(s.user.is_some(), "{} names the user its init script does", s.path);
+        }
+        let find = |cfg: &DeviceConfig, path: &str| cfg.services.iter().find(|s| s.path == path).cloned().expect("listed");
+        let element = find(&nezha, "/odm/bin/hw/android.hardware.secure_element-service-goodix");
+        assert_eq!((element.user.as_deref(), &element.groups[..]), (Some("system"), &["system".to_string()][..]), "its logs in the data partition are the system's");
+        let weaver = find(&nezha, "/odm/bin/hw/android.hardware.weaver-service");
+        assert_eq!(weaver.capabilities, ["WAKE_ALARM"]);
+        let listeners = find(&nezha, "/vendor/bin/qseecomd");
+        assert_eq!((listeners.user.as_deref(), &listeners.groups[..]), (Some("root"), &["root".to_string(), "drmrpc".to_string()][..]));
+        let opener = find(&nezha, "/vendor/bin/hlosminkdaemon");
+        assert_eq!(opener.capabilities, ["WAKE_ALARM", "BLOCK_SUSPEND"]);
+        let touch = find(&ishtar, "/odm/bin/touch_report");
+        assert_eq!((touch.user.as_deref(), &touch.capabilities[..]), (Some("system"), &["SYS_NICE".to_string()][..]));
+    }
+
+    #[test]
+    fn each_phone_names_the_stock_build_its_recovery_is_made_on() {
+        for (text, version) in [
+            (include_str!("../../../devices/nezha.toml"), "OS4.0.4.0.XPACNXM"),
+            (include_str!("../../../devices/ishtar.toml"), "OS3.0.308.0.WMACNXM"),
+        ] {
+            let stock = DeviceConfig::parse(text).unwrap().stock.expect("a stock build to build on");
+            assert_eq!(stock.version, version);
+            assert!(stock.package.ends_with(".zip") && stock.package.contains(&format!("/{version}/")), "{}", stock.package);
+        }
+    }
+
+    #[test]
+    fn a_stock_build_is_a_full_package_over_https_and_a_sha_256() {
+        let ok = "[device]\ncodename = \"x\"\n[stock]\nversion = \"OS1.0.1.0.XXXCNXM\"\npackage = \"https://d.example/OS1.0.1.0.XXXCNXM/x-ota_full-OS1.0.1.0.XXXCNXM-user-16.0-0123456789.zip\"\n";
+        let hash = "faa425b10231a0cfe2d74ff34f344f032ee2d891ea5e9420bf4e67cd86d622a7";
+        assert!(DeviceConfig::parse(&format!("{ok}recovery = \"{hash}\"\n")).is_ok());
+        assert!(DeviceConfig::parse(&format!("{ok}recovery = \"{}\"\n", hash.to_uppercase())).is_err(), "in lowercase");
+        assert!(DeviceConfig::parse(&format!("{ok}recovery = \"{}\"\n", &hash[1..])).is_err(), "too short");
+        let plain = ok.replace("https://", "http://");
+        assert!(DeviceConfig::parse(&format!("{plain}recovery = \"{hash}\"\n")).is_err(), "over plain HTTP");
+        let other = ok.replace("version = \"OS1.0.1.0", "version = \"OS1.0.2.0");
+        assert!(DeviceConfig::parse(&format!("{other}recovery = \"{hash}\"\n")).is_err(), "the package of another build");
+        assert_eq!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().stock, None);
     }
 
     #[test]

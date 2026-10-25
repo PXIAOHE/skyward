@@ -1,0 +1,158 @@
+name: Build
+
+# Every push is linted and tested, and the recovery is built for every
+# device in devices/. A tag starting with v publishes those images as a
+# release. Run by hand, it can build for one device alone.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      device:
+        description: The codename of the one device to build for; every device when empty
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Lint and test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Lint what runs on the computer
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked --workspace
+      - name: Lint what runs on the phone
+        run: cargo ndk -t arm64-v8a --platform 30 clippy --locked -p skyward -p skyward-install -- -D warnings
+
+  tools:
+    name: Build the recovery service and the packer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Build the recovery service for the phone
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+      - name: Build the packer
+        run: cargo build --locked --release -p skyward-pack
+      - name: Gather them
+        run: |
+          mkdir tools
+          cp target/aarch64-linux-android/release/skyward target/release/skyward-pack tools/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tools
+          path: tools/
+          if-no-files-found: error
+          retention-days: 1
+
+  devices:
+    name: List the devices
+    runs-on: ubuntu-24.04
+    outputs:
+      devices: ${{ steps.list.outputs.devices }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        env:
+          DEVICE: ${{ inputs.device }}
+        run: |
+          if [ -n "$DEVICE" ]; then
+            test -f "devices/$DEVICE.toml"
+            echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
+          else
+            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+          fi
+
+  recovery:
+    name: Recovery for ${{ matrix.device }}
+    needs: [tools, devices]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.devices.outputs.devices) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: tools
+          path: tools
+      - name: Make the tools runnable
+        run: chmod +x tools/skyward tools/skyward-pack
+      - name: Read the stock build the recovery is made on
+        id: stock
+        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" >> "$GITHUB_OUTPUT"
+      - name: Restore the stock recovery
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: stock/recovery.img
+          key: stock-recovery-${{ steps.stock.outputs.recovery }}
+      # Only what the recovery partition takes is read of the package,
+      # which is several gigabytes in all.
+      - name: Take the recovery partition out of the stock package
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" --out stock/recovery.img
+      - name: Check the stock recovery
+        env:
+          RECOVERY: ${{ steps.stock.outputs.recovery }}
+        run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
+      - name: Pack the recovery
+        id: pack
+        env:
+          DEVICE: ${{ matrix.device }}
+          STOCK: ${{ steps.stock.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
+          image="skyward-$version-$DEVICE-$STOCK.img"
+          mkdir out
+          tools/skyward-pack recovery --stock stock/recovery.img --binary tools/skyward --config "devices/$DEVICE.toml" \
+            --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
+            --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      # The image as it is flashed, the whole partition: the artifact takes
+      # its name.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: out/${{ steps.pack.outputs.image }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the release
+    if: github.ref_type == 'tag'
+    needs: [check, recovery]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: skyward-*
+          path: images
+          merge-multiple: true
+      - name: Sum the images
+        working-directory: images
+        run: sha256sum -- *.img > SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            images/*.img
+            images/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

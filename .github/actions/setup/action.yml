@@ -1,0 +1,28 @@
+name: Set up the Rust and Android tools
+description: >-
+  The toolchain rust-toolchain.toml names with clippy, a cache of what cargo
+  builds, the Android NDK the recovery is built with, and cargo-ndk.
+
+runs:
+  using: composite
+  steps:
+    - name: Install the toolchain rust-toolchain.toml names
+      shell: bash
+      run: |
+        rustup toolchain install
+        rustup component add clippy
+    - uses: Swatinem/rust-cache@v2
+    - name: Install the Android NDK
+      id: ndk
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r29
+        add-to-path: false
+    - name: Point cargo-ndk at that NDK
+      shell: bash
+      env:
+        NDK: ${{ steps.ndk.outputs.ndk-path }}
+      run: echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-ndk@4.1.2
