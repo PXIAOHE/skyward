@@ -3,218 +3,16 @@ use crate::color::{blend_over, mix, over, Rgba};
 use crate::fmt;
 use crate::font::{Face, Fonts};
 use crate::geom::Rect;
+use crate::icons::{self, Icon};
 use crate::lang::Lang;
 use crate::sprite::Sprite;
 use crate::theme::Theme;
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
+use std::f32::consts::FRAC_PI_4;
 
 /// Where a drawn card ends and where each of its rows lies, for hit testing.
 pub struct Block {
     pub bottom: f32,
     pub rows: Vec<Rect>,
-}
-
-#[derive(Clone, Copy)]
-pub enum Icon {
-    Install,
-    Backup,
-    Restore,
-    Mount,
-    Wipe,
-    Gear,
-    Power,
-    Globe,
-    Clock,
-    Moon,
-    Terminal,
-    Usb,
-    /// A USB drive: its plug over its body.
-    UsbDrive,
-    Layers,
-    Phone,
-    Lock,
-    Sliders,
-    Folder,
-    File,
-    /// A page of text lines.
-    Log,
-    /// A shield with a tick: security labels set right.
-    Shield,
-    /// The WLAN's fan: a dot and three arcs over it.
-    Wlan,
-    /// A battery run low: its body, its cap, and a sliver of charge.
-    Battery,
-}
-
-/// White solid glyph centred on `(cx, cy)` inside a tile of size `tile`.
-/// `bg` is the tile colour, used to cut details out of filled shapes.
-pub fn glyph(c: &mut Canvas, icon: Icon, cx: f32, cy: f32, tile: f32, fg: Rgba, bg: Rgba) {
-    let g = tile * 0.58;
-    let sw = tile * 0.085;
-    match icon {
-        Icon::Install => {
-            c.line(cx, cy - 0.34 * g, cx, cy + 0.02 * g, sw, fg);
-            c.fill_convex(&[(cx - 0.24 * g, cy - 0.04 * g), (cx + 0.24 * g, cy - 0.04 * g), (cx, cy + 0.22 * g)], fg);
-            c.line(cx - 0.4 * g, cy + 0.16 * g, cx - 0.4 * g, cy + 0.38 * g, sw, fg);
-            c.line(cx - 0.4 * g, cy + 0.38 * g, cx + 0.4 * g, cy + 0.38 * g, sw, fg);
-            c.line(cx + 0.4 * g, cy + 0.38 * g, cx + 0.4 * g, cy + 0.16 * g, sw, fg);
-        }
-        Icon::Backup => {
-            c.fill_round_rect(cx - 0.44 * g, cy - 0.38 * g, 0.88 * g, 0.22 * g, 0.06 * g, fg);
-            c.fill_round_rect(cx - 0.37 * g, cy - 0.1 * g, 0.74 * g, 0.48 * g, 0.08 * g, fg);
-            c.fill_round_rect(cx - 0.13 * g, cy + 0.01 * g, 0.26 * g, 0.09 * g, 0.045 * g, bg);
-        }
-        Icon::Restore => {
-            let r = 0.34 * g;
-            let start = 200f32.to_radians();
-            c.stroke_arc(cx, cy, r, start, 290f32.to_radians(), sw, fg);
-            let (hx, hy) = (cx + r * start.cos(), cy + r * start.sin());
-            c.fill_convex(&[(hx - 0.2 * g, hy - 0.06 * g), (hx + 0.12 * g, hy - 0.02 * g), (hx - 0.02 * g, hy + 0.24 * g)], fg);
-            c.line(cx, cy - 0.16 * g, cx, cy + 0.02 * g, sw * 0.9, fg);
-            c.line(cx, cy + 0.02 * g, cx + 0.13 * g, cy + 0.1 * g, sw * 0.9, fg);
-        }
-        Icon::Mount => {
-            c.fill_convex(&[
-                (cx - 0.32 * g, cy - 0.2 * g),
-                (cx - 0.1 * g, cy - 0.42 * g),
-                (cx + 0.32 * g, cy - 0.42 * g),
-                (cx + 0.32 * g, cy + 0.42 * g),
-                (cx - 0.32 * g, cy + 0.42 * g),
-            ], fg);
-            for dx in [-0.04f32, 0.09, 0.22] {
-                c.line(cx + dx * g, cy - 0.3 * g, cx + dx * g, cy - 0.14 * g, 0.075 * g, bg);
-            }
-        }
-        Icon::Wipe => {
-            c.fill_round_rect(cx - 0.13 * g, cy - 0.42 * g, 0.26 * g, 0.14 * g, 0.05 * g, fg);
-            c.line(cx - 0.38 * g, cy - 0.25 * g, cx + 0.38 * g, cy - 0.25 * g, sw, fg);
-            c.fill_convex(&[(cx - 0.3 * g, cy - 0.14 * g), (cx + 0.3 * g, cy - 0.14 * g), (cx + 0.23 * g, cy + 0.42 * g), (cx - 0.23 * g, cy + 0.42 * g)], fg);
-            c.line(cx - 0.09 * g, cy - 0.02 * g, cx - 0.08 * g, cy + 0.28 * g, 0.065 * g, bg);
-            c.line(cx + 0.09 * g, cy - 0.02 * g, cx + 0.08 * g, cy + 0.28 * g, 0.065 * g, bg);
-        }
-        Icon::Gear => {
-            for k in 0..8 {
-                let a = k as f32 * FRAC_PI_4;
-                let (ux, uy) = (a.cos(), a.sin());
-                let (vx, vy) = (-uy, ux);
-                let (r0, r1, hw) = (0.24 * g, 0.44 * g, 0.09 * g);
-                c.fill_convex(&[
-                    (cx + ux * r0 - vx * hw, cy + uy * r0 - vy * hw),
-                    (cx + ux * r1 - vx * hw, cy + uy * r1 - vy * hw),
-                    (cx + ux * r1 + vx * hw, cy + uy * r1 + vy * hw),
-                    (cx + ux * r0 + vx * hw, cy + uy * r0 + vy * hw),
-                ], fg);
-            }
-            c.fill_circle(cx, cy, 0.33 * g, fg);
-            c.fill_circle(cx, cy, 0.13 * g, bg);
-        }
-        Icon::Power => {
-            let gap = 38f32.to_radians();
-            c.stroke_arc(cx, cy + 0.04 * g, 0.34 * g, -FRAC_PI_2 + gap, TAU - 2.0 * gap, sw, fg);
-            c.line(cx, cy - 0.42 * g, cx, cy - 0.02 * g, sw, fg);
-        }
-        Icon::Globe => {
-            c.stroke_circle(cx, cy, 0.38 * g, sw * 0.85, fg);
-            c.stroke_ellipse(cx, cy, 0.16 * g, 0.38 * g, sw * 0.8, fg);
-            c.line(cx - 0.38 * g, cy, cx + 0.38 * g, cy, sw * 0.8, fg);
-        }
-        Icon::Clock => {
-            c.fill_circle(cx, cy, 0.4 * g, fg);
-            c.line(cx, cy + 0.02 * g, cx, cy - 0.24 * g, sw * 0.9, bg);
-            c.line(cx, cy + 0.02 * g, cx + 0.16 * g, cy + 0.08 * g, sw * 0.9, bg);
-        }
-        Icon::Moon => {
-            c.fill_circle(cx - 0.02 * g, cy + 0.02 * g, 0.36 * g, fg);
-            c.fill_circle(cx + 0.17 * g, cy - 0.13 * g, 0.29 * g, bg);
-        }
-        Icon::Terminal => {
-            c.stroke_round_rect(cx - 0.42 * g, cy - 0.34 * g, 0.84 * g, 0.68 * g, 0.12 * g, sw * 0.85, fg);
-            c.line(cx - 0.22 * g, cy - 0.1 * g, cx - 0.06 * g, cy + 0.03 * g, sw * 0.85, fg);
-            c.line(cx - 0.06 * g, cy + 0.03 * g, cx - 0.22 * g, cy + 0.16 * g, sw * 0.85, fg);
-            c.line(cx + 0.02 * g, cy + 0.16 * g, cx + 0.22 * g, cy + 0.16 * g, sw * 0.85, fg);
-        }
-        Icon::Usb => {
-            c.fill_round_rect(cx - 0.18 * g, cy - 0.44 * g, 0.36 * g, 0.28 * g, 0.05 * g, fg);
-            c.fill_round_rect(cx - 0.1 * g, cy - 0.36 * g, 0.06 * g, 0.1 * g, 0.02 * g, bg);
-            c.fill_round_rect(cx + 0.04 * g, cy - 0.36 * g, 0.06 * g, 0.1 * g, 0.02 * g, bg);
-            c.fill_round_rect(cx - 0.27 * g, cy - 0.16 * g, 0.54 * g, 0.3 * g, 0.09 * g, fg);
-            c.line(cx, cy + 0.14 * g, cx, cy + 0.44 * g, sw, fg);
-        }
-        Icon::UsbDrive => {
-            c.fill_round_rect(cx - 0.16 * g, cy - 0.44 * g, 0.32 * g, 0.26 * g, 0.04 * g, fg);
-            c.fill_round_rect(cx - 0.09 * g, cy - 0.37 * g, 0.06 * g, 0.09 * g, 0.02 * g, bg);
-            c.fill_round_rect(cx + 0.03 * g, cy - 0.37 * g, 0.06 * g, 0.09 * g, 0.02 * g, bg);
-            c.fill_round_rect(cx - 0.25 * g, cy - 0.2 * g, 0.5 * g, 0.64 * g, 0.1 * g, fg);
-            c.fill_circle(cx, cy + 0.26 * g, 0.05 * g, bg);
-        }
-        Icon::Layers => {
-            c.line(cx - 0.4 * g, cy + 0.1 * g, cx, cy + 0.3 * g, sw, fg);
-            c.line(cx, cy + 0.3 * g, cx + 0.4 * g, cy + 0.1 * g, sw, fg);
-            c.fill_convex(&[(cx, cy - 0.38 * g), (cx + 0.42 * g, cy - 0.12 * g), (cx, cy + 0.12 * g), (cx - 0.42 * g, cy - 0.12 * g)], fg);
-        }
-        Icon::Phone => {
-            c.fill_round_rect(cx - 0.24 * g, cy - 0.42 * g, 0.48 * g, 0.84 * g, 0.11 * g, fg);
-            c.fill_round_rect(cx - 0.08 * g, cy - 0.33 * g, 0.16 * g, 0.05 * g, 0.025 * g, bg);
-        }
-        Icon::Battery => {
-            // The body's outer edge, the cap past its right end, and the
-            // charge left at its left end, clear of the outline.
-            let (w, h, cap, s) = (0.78 * g, 0.56 * g, 0.08 * g, 0.8 * sw);
-            let (x, y) = (cx - (w + cap) / 2.0, cy - h / 2.0);
-            c.stroke_round_rect(x + s / 2.0, y + s / 2.0, w - s, h - s, 0.12 * g, s, fg);
-            c.fill_round_rect(x + w - 0.02 * g, cy - 0.11 * g, cap + 0.02 * g, 0.22 * g, 0.04 * g, fg);
-            let inset = s + 0.05 * g;
-            c.fill_round_rect(x + inset, y + inset, 0.18 * g, h - inset * 2.0, 0.04 * g, fg);
-        }
-        Icon::Lock => {
-            c.stroke_arc(cx, cy - 0.1 * g, 0.22 * g, std::f32::consts::PI, std::f32::consts::PI, sw, fg);
-            c.line(cx - 0.22 * g, cy - 0.1 * g, cx - 0.22 * g, cy + 0.02 * g, sw, fg);
-            c.line(cx + 0.22 * g, cy - 0.1 * g, cx + 0.22 * g, cy + 0.02 * g, sw, fg);
-            c.fill_round_rect(cx - 0.36 * g, cy - 0.02 * g, 0.72 * g, 0.46 * g, 0.1 * g, fg);
-            c.fill_circle(cx, cy + 0.2 * g, 0.06 * g, bg);
-        }
-        Icon::Sliders => {
-            for (dy, knob) in [(-0.27f32, 0.14f32), (0.0, -0.16), (0.27, 0.06)] {
-                c.line(cx - 0.4 * g, cy + dy * g, cx + 0.4 * g, cy + dy * g, sw * 0.85, fg);
-                c.fill_circle(cx + knob * g, cy + dy * g, 0.12 * g, fg);
-                c.fill_circle(cx + knob * g, cy + dy * g, 0.05 * g, bg);
-            }
-        }
-        Icon::Folder => {
-            c.fill_round_rect(cx - 0.42 * g, cy - 0.34 * g, 0.38 * g, 0.2 * g, 0.06 * g, fg);
-            c.fill_round_rect(cx - 0.42 * g, cy - 0.24 * g, 0.84 * g, 0.62 * g, 0.08 * g, fg);
-            c.line(cx - 0.42 * g, cy - 0.1 * g, cx + 0.42 * g, cy - 0.1 * g, 0.06 * g, bg);
-        }
-        Icon::File => {
-            let fold = 0.2 * g;
-            c.fill_convex(&[
-                (cx - 0.3 * g, cy - 0.42 * g),
-                (cx + 0.3 * g - fold, cy - 0.42 * g),
-                (cx + 0.3 * g, cy - 0.42 * g + fold),
-                (cx + 0.3 * g, cy + 0.42 * g),
-                (cx - 0.3 * g, cy + 0.42 * g),
-            ], fg);
-            c.fill_convex(&[(cx + 0.3 * g - fold, cy - 0.42 * g), (cx + 0.3 * g - fold, cy - 0.42 * g + fold), (cx + 0.3 * g, cy - 0.42 * g + fold)], bg);
-        }
-        Icon::Log => {
-            c.fill_round_rect(cx - 0.3 * g, cy - 0.42 * g, 0.6 * g, 0.84 * g, 0.08 * g, fg);
-            for (k, len) in [0.36f32, 0.36, 0.22].iter().enumerate() {
-                let y = cy - 0.18 * g + k as f32 * 0.18 * g;
-                c.line(cx - 0.18 * g, y, cx - 0.18 * g + len * g, y, 0.07 * g, bg);
-            }
-        }
-        Icon::Shield => {
-            let at = |x: f32, y: f32| (cx + x * g, cy + y * g);
-            c.fill_convex(
-                &[at(0.0, -0.44), at(0.36, -0.3), at(0.35, 0.02), at(0.24, 0.26), at(0.0, 0.44), at(-0.24, 0.26), at(-0.35, 0.02), at(-0.36, -0.3)],
-                fg,
-            );
-            let (a, b, d) = (at(-0.15, 0.0), at(-0.04, 0.12), at(0.17, -0.12));
-            c.line(a.0, a.1, b.0, b.1, sw, bg);
-            c.line(b.0, b.1, d.0, d.1, sw, bg);
-        }
-        Icon::Wlan => wlan_fan(c, cx, cy, 0.5 * g, 3, fg, fg),
-    }
 }
 
 /// The WLAN's fan centred on `(cx, cy)`, its widest arc reaching `r` from
@@ -244,12 +42,6 @@ pub fn padlock(c: &mut Canvas, cx: f32, cy: f32, h: f32, color: Rgba) {
     c.line(cx - shackle, top + shackle + sw / 2.0, cx - shackle, body, sw, color);
     c.line(cx + shackle, top + shackle + sw / 2.0, cx + shackle, body, sw, color);
     c.fill_round_rect(cx - bw / 2.0, body, bw, bh, 0.12 * h, color);
-}
-
-pub fn tile(c: &mut Canvas, t: &Theme, x: f32, y: f32, color: Rgba, icon: Icon) {
-    let s = t.m.icon;
-    c.fill_round_rect(x, y, s, s, t.m.icon_radius, color);
-    glyph(c, icon, x + s / 2.0, y + s / 2.0, s, Rgba::rgb(255, 255, 255), color);
 }
 
 /// The colours a card is drawn in: the page's own, or light on dark over the
@@ -1655,7 +1447,7 @@ fn draw_row(c: &mut Canvas, t: &Theme, f: &Fonts, r: &Row, lay: &Layout, top: f3
     let right = m.w as f32 - m.margin;
     let cy = top + lay.h / 2.0;
     if let Some((color, icon)) = r.icon {
-        tile(c, t, card_x + m.inner, cy - m.icon / 2.0, color, icon);
+        icons::tile(c, t, card_x + m.inner, cy - m.icon / 2.0, color, icon);
     }
     if let Some(level) = r.fan {
         wlan_fan(c, card_x + m.dp(FAN_CX), cy, m.dp(FAN_R), level, tone.text, tone.faint);
@@ -1890,7 +1682,7 @@ pub fn device_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, title: &str, 
     let av = m.avatar;
     let acx = card_x + m.avatar_inset + av / 2.0;
     c.fill_circle(acx, cy, av / 2.0, t.pal.avatar);
-    glyph(c, Icon::Phone, acx, cy, av * 0.86, t.pal.avatar_glyph, t.pal.avatar);
+    icons::glyph(c, Icon::Phone, acx, cy, av * 0.86, t.pal.avatar_glyph);
 
     let tx = card_x + m.inner + m.icon + m.icon_gap;
     let (tt, tb) = f.heading.ink(m.account_title_px);
@@ -2903,28 +2695,8 @@ mod tests {
     }
 
     #[test]
-    fn the_shield_stands_in_the_middle_of_its_tile() {
-        let (black, white) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255));
-        let mut c = Canvas::new(400, 400);
-        c.clear(black);
-        glyph(&mut c, Icon::Shield, 200.0, 200.0, 400.0, white, black);
-        let (l, top, right, bottom) = ink_box(&c, Rect::new(0.0, 0.0, 400.0, 400.0), |p| p[0] > 0);
-        let (x, y) = ((l + right) / 2.0, (top + bottom) / 2.0);
-        // Within 0.3 of the 40 units the tile is laid out in.
-        assert!((x - 200.0).abs() <= 3.0 && (y - 200.0).abs() <= 3.0, "centred: ({x}, {y})");
-        let tick = (200 * c.w + 215) * 4;
-        assert_eq!(c.data[tick as usize], 0, "the tick is cut out of it");
-    }
-
-    #[test]
-    fn the_wlan_fan_stands_in_the_middle_of_its_tile_and_lights_as_many_arcs_as_the_signal() {
+    fn the_wlan_fan_lights_as_many_arcs_as_the_signal_and_the_padlock_stands_as_asked() {
         let (black, white, grey) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255), Rgba::rgb(0, 0, 255));
-        let mut c = Canvas::new(400, 400);
-        c.clear(black);
-        glyph(&mut c, Icon::Wlan, 200.0, 200.0, 400.0, white, black);
-        let (l, top, right, bottom) = ink_box(&c, Rect::new(0.0, 0.0, 400.0, 400.0), |p| p[0] > 0);
-        let (x, y) = ((l + right) / 2.0, (top + bottom) / 2.0);
-        assert!((x - 200.0).abs() <= 3.0 && (y - 200.0).abs() <= 3.0, "centred: ({x}, {y})");
         let mut c = Canvas::new(400, 400);
         c.clear(black);
         wlan_fan(&mut c, 200.0, 200.0, 150.0, 1, white, grey);

@@ -16,7 +16,8 @@ use crate::search;
 use crate::term::{self, Term};
 use crate::theme::Theme;
 use crate::tr;
-use crate::widgets::{self, Caption, Detail, Fact, Icon, Outline, Row, Spec, Tone, Trail};
+use crate::icons::{self, Icon};
+use crate::widgets::{self, Caption, Detail, Fact, Outline, Row, Spec, Tone, Trail};
 use skyward_info::{DeviceInfo, VERSION};
 use skyward_install::{Outcome, Reflash, Refusal, Stage};
 use skyward_net::download::Progress;
@@ -25,14 +26,14 @@ use skyward_net::wlan::{Bands, Network, Power, Stage as Joining};
 use skyward_vab::{Slot, Standing};
 use std::path::Path;
 
-// Tile colours sampled from the stock Settings, plus orange and red from the
-// same family for the destructive and reboot entries.
-const BLUE: Rgba = Rgba::rgb(74, 128, 247);
-const GREEN: Rgba = Rgba::rgb(97, 202, 81);
-const PURPLE: Rgba = Rgba::rgb(116, 104, 240);
-const SLATE: Rgba = Rgba::rgb(143, 156, 174);
-const ORANGE: Rgba = Rgba::rgb(255, 146, 46);
-const RED: Rgba = Rgba::rgb(242, 83, 75);
+// The colours the stock Settings fills its icons' tiles with, the same in
+// light and dark mode.
+const BLUE: Rgba = Rgba::rgb(0x34, 0x82, 0xff);
+const GREEN: Rgba = Rgba::rgb(0x1d, 0xcd, 0x3a);
+const PURPLE: Rgba = Rgba::rgb(0x77, 0x67, 0xf9);
+const SLATE: Rgba = Rgba::rgb(0x8c, 0x9d, 0xb0);
+const ORANGE: Rgba = Rgba::rgb(0xff, 0x69, 0x00);
+const RED: Rgba = Rgba::rgb(0xfa, 0x38, 0x2e);
 
 /// What every page draws from: style, typefaces, the device readings, and
 /// what the pages hold, from the choices made on them to where the data
@@ -272,7 +273,7 @@ pub fn home(cx: &Ctx) -> Frame {
     let target = l.pick(REBOOT_TARGETS[cx.state.reboot].0);
     let system = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(["清除数据", "清除資料", "Wipe data"])).icon(RED, Icon::Wipe),
-        Row::new(l.pick(ADVANCED)).icon(SLATE, Icon::Sliders),
+        Row::new(l.pick(ADVANCED)).icon(SLATE, Icon::More),
         Row::new(l.pick(SETTINGS)).icon(SLATE, Icon::Gear),
         Row::new(l.pick(REBOOT)).icon(ORANGE, Icon::Power).trail(Trail::Value(target)),
     ]);
@@ -654,7 +655,7 @@ fn data_status(cx: &Ctx, mut c: Canvas, icon: Icon, title: &str, note: Option<&s
     let x = m.w as f32 / 2.0;
     let sign_cy = m.dp(150.0);
     c.fill_circle(x, sign_cy, m.dp(30.0), t.pal.card);
-    widgets::glyph(&mut c, icon, x, sign_cy, m.dp(40.0), t.pal.accent, t.pal.card);
+    icons::glyph(&mut c, icon, x, sign_cy, m.dp(40.0), t.pal.accent);
     c.text_center(&f.heading, title, x, sign_cy + m.dp(64.0), m.dp(24.0), t.pal.text);
     if let Some(note) = note {
         c.text_center(&f.body, note, x, sign_cy + m.dp(98.0), m.sub_px, t.pal.subtitle);

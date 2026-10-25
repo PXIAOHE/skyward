@@ -18,6 +18,11 @@ skyward-info = { path = "../skyward-info" }
 skyward-install = { path = "../skyward-install" }
 skyward-net = { path = "../skyward-net" }
 skyward-vab = { path = "../skyward-vab" }
+# The icons are outlines written as SVG path data, as the stock Settings
+# writes its own: filled by the nonzero or the even-odd rule, and stroked
+# with round ends.
+svgtypes = "0.16.1"
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
 ttf-parser = "0.25.1"
 unicode-width = "0.2.2"
 vt100 = "0.18.1"
