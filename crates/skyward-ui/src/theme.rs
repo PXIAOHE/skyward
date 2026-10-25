@@ -306,7 +306,9 @@ const DARK: Palette = Palette {
     // The stock status bar's light icons, sampled over black and over the
     // lock screen's wallpaper.
     battery: BatteryInk {
-        charging: Rgba::rgb(97, 202, 81),
+        // As the stock Settings fill it over black and over a dark grey: the
+        // green they fill with over light pages too.
+        charging: Rgba::rgb(29, 205, 58),
         low: Rgba::rgb(230, 75, 59),
         level: Rgba::rgb(255, 255, 255).with_alpha(232),
         empty: Rgba::rgb(255, 255, 255).with_alpha(94),
