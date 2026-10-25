@@ -64,6 +64,13 @@ impl Protector {
     }
 }
 
+/// The name a phone gives the files of the protector it keeps under this
+/// number: the whole of the number in hexadecimal, which it writes signed
+/// and reads as the sixteen digits of a 64-bit number.
+pub fn protector_name(id: i64) -> String {
+    format!("{:016x}", id as u64)
+}
+
 /// What a blob is bound to besides what the user knows. A phone with a
 /// weaver keeps a value in one of its slots for every user, with a screen
 /// lock or without; another phone keeps random bytes beside the blob.
@@ -329,6 +336,13 @@ mod tests {
     fn the_key_the_secure_world_holds_is_named_after_the_protector() {
         let p = Protector { id: "08a692c0f39d97c6".into(), blob: Vec::new(), bound: Bound::Weaver(0), lock: None };
         assert_eq!(p.key_alias(), "synthetic_password_8a692c0f39d97c6");
+    }
+
+    #[test]
+    fn a_protectors_files_are_named_after_the_whole_number_the_phone_records() {
+        assert_eq!(protector_name(0x08a6_92c0_f39d_97c6), "08a692c0f39d97c6");
+        assert_eq!(protector_name(5), "0000000000000005", "the digits it is short of are zeros");
+        assert_eq!(protector_name(-1), "ffffffffffffffff", "a number the phone records below zero");
     }
 
     #[test]

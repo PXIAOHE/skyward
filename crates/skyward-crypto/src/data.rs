@@ -324,10 +324,14 @@ fn open_users(service: &KeyMint) -> Result<Vec<u32>> {
 /// Where a phone keeps what it needs to recover a user's own secret.
 const PROTECTORS: &str = "/data/system_de";
 
-/// Read what a user's secret is kept behind. A user has one of these at a
-/// time; a phone part way through changing a credential may have left
-/// another, and which is current is its own business, so this refuses to
-/// guess.
+/// Read what a user's own credential keeps their secret behind. A phone
+/// may keep more than one blob for a user: Android keeps one for each
+/// token some part of the phone was given to reach the secret with, and
+/// HyperOS, once the owner changes one screen lock for another with a
+/// fingerprint enrolled, keeps a second one for a while, so that the
+/// credential before can still be used. Which of them the user's current
+/// credential opens is the phone's own business, and it writes that down,
+/// so this reads it rather than guess.
 fn protector(user: u32) -> Result<crate::user::Protector> {
     let dir = blobs(user);
     let mut ids = Vec::new();
@@ -339,8 +343,26 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
             }
         }
     }
-    let [id] = &ids[..] else {
-        anyhow::bail!("{} holds {} of the user's blobs, and one is expected", dir.display(), ids.len());
+    let id = match crate::locksettings::current_protector(Path::new(crate::locksettings::DATABASE), user)? {
+        Some(recorded) => {
+            anyhow::ensure!(
+                ids.contains(&recorded),
+                "the phone keeps user {user}'s secret behind the blob {recorded}, which is not among the {} in {}",
+                ids.len(),
+                dir.display()
+            );
+            recorded
+        }
+        // Where the phone records none, only a blob that is alone is
+        // beyond doubt the user's.
+        None => match &ids[..] {
+            [only] => only.clone(),
+            _ => anyhow::bail!(
+                "{} holds {} of the user's blobs, and the phone records none of them as the one the user's own credential opens",
+                dir.display(),
+                ids.len()
+            ),
+        },
     };
     // A user who has set a screen lock has what the phone recorded about
     // it beside the blob; a user who has set none has nothing there.
@@ -363,7 +385,7 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
     Ok(crate::user::Protector {
         blob: std::fs::read(dir.join(format!("{id}.spblob"))).with_context(|| format!("read the blob in {}", dir.display()))?,
         bound,
-        id: id.clone(),
+        id,
         lock,
     })
 }
