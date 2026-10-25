@@ -98,14 +98,23 @@ impl Backlight {
                 .parse()
                 .with_context(|| format!("parse {name}"))
         };
-        let top = normal_max(read("max_brightness")?)?;
+        let top = normal_max(read("max_brightness")?);
         let level = read("brightness")?;
         Ok(Backlight { path: dir.join("brightness"), top, level })
+    }
+
+    /// The panel as the bootloader left it, for a phone whose backlight
+    /// cannot be worked out: nothing is written to it.
+    fn untouched() -> Self {
+        Backlight { path: PathBuf::new(), top: 0, level: 0 }
     }
 
     /// Light the panel at `level` of its normal maximum, or turn it off
     /// with `None`. The file is written only when the raw level changes.
     fn show(&mut self, level: Option<f32>) -> Result<()> {
+        if self.path.as_os_str().is_empty() {
+            return Ok(());
+        }
         let raw = level.map_or(0, |v| ((v.clamp(0.0, 1.0) * self.top as f32).round() as u32).max(1));
         if raw != self.level {
             fs::write(&self.path, raw.to_string()).with_context(|| format!("write {}", self.path.display()))?;
@@ -124,38 +133,65 @@ impl Backlight {
 const NORMAL_MAX: [(&str, &str); 2] =
     [("mi,normal-max-brightness-clone", "mi,max-brightness-clone"), ("mi,max-brightness-normal", "qcom,mdss-dsi-bl-max-level")];
 
+/// The panel's node in the device tree, under `/soc` on the 13 Ultra and
+/// under the display controller on newer platforms, which is why the search
+/// goes deeper than one level.
+fn panel_node(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    let mut dirs: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    if let Some(found) = dirs.iter().find(|p| p.file_name().is_some_and(|n| n == name)) {
+        return Some(found.clone());
+    }
+    dirs.into_iter().find_map(|d| panel_node(&d, name, depth - 1))
+}
+
 /// The raw backlight level, out of `max`, at the panel's normal maximum.
 /// Above it the panel runs in high brightness mode, which the stock system
 /// keeps for strong sunlight and its slider does not reach. The panel the
-/// display driver booted with gives that maximum in the device tree.
-fn normal_max(max: u32) -> Result<u32> {
+/// display driver booted with gives that maximum in the device tree; one
+/// that does not say so reaches no further than the backlight goes, which is
+/// no reason to leave the recovery without a screen.
+fn normal_max(max: u32) -> u32 {
     let param = "/sys/module/msm_drm/parameters/dsi_display0";
-    let boot = fs::read_to_string(param).with_context(|| format!("read {param}"))?;
+    let Ok(boot) = fs::read_to_string(param) else {
+        let _ = skyward_sys::kmsg(&format!("no {param}; the backlight keeps its own maximum"));
+        return max;
+    };
     // The panel's node, then its configuration after a colon, as in
     // "qcom,mdss_dsi_m1_42_02_0a_dsc_cmd:"; the driver takes no name
     // without the colon either.
-    let (name, _) = boot.trim().split_once(':').with_context(|| format!("{param} names no panel: {boot:?}"))?;
-    let soc = Path::new("/proc/device-tree/soc");
-    let node = fs::read_dir(soc)
-        .with_context(|| format!("read {}", soc.display()))?
-        .map(|e| e.map(|e| e.path().join(name)))
-        .collect::<std::io::Result<Vec<_>>>()?
-        .into_iter()
-        .find(|p| p.is_dir())
-        .ok_or_else(|| anyhow!("panel {name} is not in the device tree"))?;
+    let name = boot.trim().split_once(':').map(|(name, _)| name).unwrap_or(boot.trim());
+    let Some(node) = panel_node(Path::new("/proc/device-tree/soc"), name, 4) else {
+        let _ = skyward_sys::kmsg(&format!("panel {name} is not in the device tree; the backlight keeps its own maximum"));
+        return max;
+    };
     let cell = |prop: &str| -> Result<u32> {
         let path = node.join(prop);
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         let cell: [u8; 4] = bytes.as_slice().try_into().map_err(|_| anyhow!("{} is not one cell", path.display()))?;
         Ok(u32::from_be_bytes(cell))
     };
-    let (normal, full) = NORMAL_MAX
-        .iter()
-        .find(|(normal, _)| node.join(normal).exists())
-        .with_context(|| format!("panel {name} gives its normal maximum as none of {NORMAL_MAX:?}"))?;
-    let (normal, full) = (cell(normal)?, cell(full)?);
-    ensure!(normal > 0 && normal <= full, "panel {name}: normal maximum {normal} out of {full}");
-    Ok((f64::from(max) * f64::from(normal) / f64::from(full)).round() as u32)
+    let Some((normal, full)) = NORMAL_MAX.iter().find(|(normal, _)| node.join(normal).exists()) else {
+        let _ = skyward_sys::kmsg(&format!("panel {name} gives its normal maximum as none of {NORMAL_MAX:?}"));
+        return max;
+    };
+    let (Ok(normal), Ok(full)) = (cell(normal), cell(full)) else {
+        let _ = skyward_sys::kmsg(&format!("panel {name} states its normal maximum unreadably"));
+        return max;
+    };
+    if normal == 0 || normal > full {
+        let _ = skyward_sys::kmsg(&format!("panel {name}: normal maximum {normal} out of {full}"));
+        return max;
+    }
+    (f64::from(max) * f64::from(normal) / f64::from(full)).round() as u32
 }
 
 /// Leave recovery for the chosen target.
@@ -1022,7 +1058,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
-    let mut backlight = Backlight::open()?;
+    let mut backlight = match Backlight::open() {
+        Ok(backlight) => backlight,
+        Err(e) => {
+            skyward_sys::kmsg(&format!("the panel is left as it was lit: {e:#}"))?;
+            Backlight::untouched()
+        }
+    };
     let first = match &request.work {
         Work::Fastboot => Screen::Fastboot,
         Work::PromptWipeData => Screen::CantStart,
