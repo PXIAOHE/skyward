@@ -110,6 +110,9 @@ pub struct Battery {
     pub full: Option<u64>,
     /// Voltage in µV.
     pub voltage: Option<u64>,
+    /// A charger charging it quickly, as Xiaomi's Qualcomm phones tell
+    /// beside their power supplies.
+    pub quick: bool,
 }
 
 impl Battery {
@@ -374,6 +377,9 @@ fn battery(root: &Path) -> Result<Option<Battery>> {
             design: parse_opt(dir.join("charge_full_design"), "charge_full_design")?,
             full: parse_opt(dir.join("charge_full"), "charge_full")?,
             voltage: parse_opt(dir.join("voltage_now"), "voltage_now")?,
+            // How quickly the charger charges: 0 normally, then fast, flash,
+            // turbo and super, which the stock SystemUI all counts quick.
+            quick: parse_opt::<u8>(root.with_file_name("qcom-battery").join("quick_charge_type"), "quick_charge_type")?.is_some_and(|k| (1..=4).contains(&k)),
         }));
     }
     Ok(None)
@@ -412,5 +418,25 @@ mod tests {
     #[test]
     fn kernel_release_is_readable() {
         assert!(!kernel_release().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_battery_charged_quickly_says_so_beside_the_power_supplies() {
+        // The 17 Ultra's in the recovery, on a charger it charges slowly on.
+        let class = tempfile::tempdir().unwrap();
+        let supplies = class.path().join("power_supply");
+        let bat = supplies.join("battery");
+        fs::create_dir_all(&bat).unwrap();
+        for (name, value) in [("type", "Battery"), ("status", "Charging"), ("capacity", "96"), ("temp", "377")] {
+            fs::write(bat.join(name), format!("{value}\n")).unwrap();
+        }
+        let b = battery(&supplies).unwrap().expect("a battery");
+        assert_eq!((b.level, b.temp, b.quick), (96, Some(377), false), "a phone that does not tell charges as it may");
+        let qcom = class.path().join("qcom-battery");
+        fs::create_dir_all(&qcom).unwrap();
+        fs::write(qcom.join("quick_charge_type"), "0\n").unwrap();
+        assert!(!battery(&supplies).unwrap().expect("a battery").quick);
+        fs::write(qcom.join("quick_charge_type"), "3\n").unwrap();
+        assert!(battery(&supplies).unwrap().expect("a battery").quick, "turbo charging is quick");
     }
 }

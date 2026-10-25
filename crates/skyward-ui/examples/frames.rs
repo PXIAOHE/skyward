@@ -332,6 +332,7 @@ fn info() -> DeviceInfo {
             design: None,
             full: None,
             voltage: None,
+            quick: false,
         }),
         slot: Some(Slot::B),
         snapshot: SnapshotState::None,

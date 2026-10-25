@@ -12,3 +12,6 @@ skyward-block = { path = "../skyward-block" }
 skyward-config = { path = "../skyward-config" }
 skyward-sys = { path = "../skyward-sys" }
 skyward-vab = { path = "../skyward-vab" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

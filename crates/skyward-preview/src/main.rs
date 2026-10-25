@@ -12,7 +12,7 @@ use skyward_ui::app::{
     DownloadJob, EraseStop, Field, FileKind, FileOp, FileRow, FileTask, FsAction, FsRow, Have, Held, Install, ItemEnd, JobEnd, Key, Keys,
     MountFailure, MountRow, Part, PartKind, PartStop, Pick, Place, Screen, Source, TermEnd, Touch, UsbDrive, UsbLink, SCREEN_OFF,
 };
-use skyward_ui::widgets::{self, Bar, Cap, Layer};
+use skyward_ui::widgets::{self, Bar, Bolt, Cap, Layer};
 use skyward_ui::{editor, fmt, pages, Canvas, Ctx, Fonts, Lang, Theme};
 use skyward_vab::{BootSlots, FailureCode, Hold, Slot, SnapshotState, Standing};
 use std::fs::File;
@@ -1045,9 +1045,11 @@ fn main() -> Result<()> {
 }
 
 /// Status bars over the page colour, one for each state the battery shows:
-/// charging, plain levels with the cable out, low ones, full.
+/// charging, quickly too, plain levels with the cable out, low ones, full.
 fn battery_states(f: &Fonts, t: &Theme) -> Canvas {
-    let states: [(u8, bool); 8] = [(50, true), (15, true), (100, true), (100, false), (50, false), (30, false), (15, false), (5, false)];
+    let (charging, quick) = (Some(Bolt::Charging), Some(Bolt::Quick));
+    let states: [(u8, Option<Bolt>); 9] =
+        [(50, charging), (50, quick), (15, charging), (100, charging), (100, None), (50, None), (30, None), (15, None), (5, None)];
     let row = t.m.dp(52.0).round() as u32;
     let mut sheet = Canvas::new(t.m.w, row * states.len() as u32);
     for (k, &battery) in states.iter().enumerate() {
@@ -1428,6 +1430,8 @@ fn nezha(cfg: &DeviceConfig) -> DeviceInfo {
             design: Some(6_800_000),
             full: Some(6_543_000),
             voltage: Some(4_442_000),
+            // The recovery has no fast charging handshake with the charger.
+            quick: false,
         }),
         slot: Some(Slot::B),
         snapshot: SnapshotState::None,

@@ -1,5 +1,6 @@
 use crate::canvas::Canvas;
 use crate::color::{blend_over, mix, over, Rgba};
+use crate::fmt;
 use crate::font::{Face, Fonts};
 use crate::geom::Rect;
 use crate::lang::Lang;
@@ -392,10 +393,11 @@ pub(crate) fn wrap(c: &Canvas, face: &Face, text: &str, px: f32, max_w: f32) -> 
 }
 
 /// Status-bar contents: the clock and, when a fuel gauge is present, the
-/// battery level and whether the cable is in, charging or full.
+/// battery level and, while the cable is in, charging or full, the bolt
+/// past it.
 pub struct Bar<'a> {
     pub clock: &'a str,
-    pub battery: Option<(u8, bool)>,
+    pub battery: Option<(u8, Option<Bolt>)>,
     /// The network joined, while it has an address.
     pub wlan: Option<WlanMark>,
     /// The data partition, open or not; nothing once it is wiped, when
@@ -403,8 +405,17 @@ pub struct Bar<'a> {
     pub data: Option<bool>,
     /// The slot the system runs from, on an A/B phone.
     pub slot: Option<&'a str>,
-    /// The battery's temperature, in whole degrees Celsius.
+    /// The battery's temperature, in tenths of a degree Celsius, which the
+    /// bar gives to the tenth.
     pub temp: Option<i32>,
+}
+
+/// The bolt past the battery while the cable is in, as the stock bar draws
+/// it: one step, or two while a charger charges quickly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bolt {
+    Charging,
+    Quick,
 }
 
 /// What the status bar shows of the network joined: how many of the fan's
@@ -433,14 +444,14 @@ pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) {
     // Digits carry no descender, so centre on half their height (≈0.72 em).
     c.text(&f.status, bar.clock, m.status_x, cy + m.status_px * 0.36, m.status_px, ink, None);
     let mut right = m.w as f32 - m.status_right;
-    if let Some((level, plugged)) = bar.battery {
-        if plugged {
+    if let Some((level, charging)) = bar.battery {
+        if let Some(kind) = charging {
             let x = m.w as f32 - m.status_bolt_right - m.dp(BOLT_W_DP);
-            let (art, ox, oy) = bolt(t, x, cy);
+            let (art, ox, oy) = bolt(t, kind, x, cy);
             c.lay(&art, ox, oy, 1.0);
-            right = x - m.dp(2.75);
+            right = x - m.dp(2.42);
         }
-        let (art, ox, oy) = battery(t, f, level, plugged, right, cy);
+        let (art, ox, oy) = battery(t, f, level, charging.is_some(), right, cy);
         c.lay(&art, ox, oy, 1.0);
         right -= m.dp(BATTERY_W_DP + BATTERY_CAP_DP);
     }
@@ -462,8 +473,8 @@ pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) {
         c.lay(&art, ox, oy, 1.0);
         left -= gap + w;
     }
-    if let Some(degrees) = bar.temp {
-        left = speed(c, t, f, &degrees.to_string(), "°C", left - gap, cy, ink);
+    if let Some(tenths) = bar.temp {
+        left = speed(c, t, f, &fmt::degrees(tenths), "°C", left - gap, cy, ink);
     }
     if let Some(w) = &bar.wlan {
         speed(c, t, f, &w.speed, w.unit, left - gap, cy, ink);
@@ -701,27 +712,117 @@ fn speed(c: &mut Canvas, t: &Theme, f: &Fonts, figures: &str, unit: &str, right:
     right - wide
 }
 
-const BOLT_W_DP: f32 = 5.67;
+/// The stock bar's box for the bolt, as wide as the bolt's drawing and as
+/// tall as the bar's icons' boxes.
+const BOLT_W_DP: f32 = 8.0;
+const BOLT_H_DP: f32 = 20.0;
 const BATTERY_W_DP: f32 = 21.75;
 const BATTERY_CAP_DP: f32 = 1.3;
 
-/// The bolt from `x`, centred on `cy`, as its own canvas and where it goes.
-fn bolt(t: &Theme, x: f32, cy: f32) -> (Canvas, i32, i32) {
+/// A piece of an outline from where the last one ended: a line to a point,
+/// or a cubic through two control points to one.
+#[derive(Clone, Copy)]
+enum Piece {
+    Line(f32, f32),
+    Cubic(f32, f32, f32, f32, f32, f32),
+}
+
+/// A closed contour: where it starts, and its pieces round back to there.
+type Contour = ((f32, f32), &'static [Piece]);
+
+/// The stock bar's bolts as its SystemUI draws them past the battery, in
+/// their box a unit a dp: one step while charging, and two while a charger
+/// charges quickly.
+const BOLT: Contour = (
+    (4.923, 4.722),
+    &[
+        Piece::Cubic(5.033, 4.722, 5.113, 4.827, 5.083, 4.933),
+        Piece::Line(3.902, 9.162),
+        Piece::Line(5.655, 9.162),
+        Piece::Cubic(5.902, 9.162, 6.026, 9.162, 6.091, 9.213),
+        Piece::Cubic(6.148, 9.258, 6.181, 9.325, 6.183, 9.397),
+        Piece::Cubic(6.185, 9.48, 6.11, 9.579, 5.962, 9.777),
+        Piece::Line(1.882, 15.217),
+        Piece::Cubic(1.853, 15.256, 1.808, 15.278, 1.761, 15.278),
+        Piece::Cubic(1.661, 15.278, 1.588, 15.182, 1.615, 15.086),
+        Piece::Line(2.81, 10.838),
+        Piece::Line(0.794, 10.838),
+        Piece::Cubic(0.54, 10.838, 0.413, 10.838, 0.347, 10.785),
+        Piece::Cubic(0.29, 10.74, 0.256, 10.671, 0.256, 10.598),
+        Piece::Cubic(0.256, 10.514, 0.335, 10.415, 0.493, 10.215),
+        Piece::Line(4.792, 4.785),
+        Piece::Cubic(4.823, 4.745, 4.872, 4.722, 4.923, 4.722),
+    ],
+);
+const QUICK_BOLT: Contour = (
+    (4.557, 5.191),
+    &[
+        Piece::Cubic(4.75, 4.68, 4.847, 4.425, 4.792, 4.348),
+        Piece::Cubic(4.763, 4.307, 4.718, 4.281, 4.668, 4.275),
+        Piece::Cubic(4.575, 4.265, 4.399, 4.474, 4.048, 4.893),
+        Piece::Line(0.652, 8.942),
+        Piece::Cubic(0.423, 9.215, 0.308, 9.352, 0.32, 9.468),
+        Piece::Cubic(0.326, 9.531, 0.354, 9.591, 0.398, 9.636),
+        Piece::Cubic(0.48, 9.719, 0.658, 9.719, 1.015, 9.719),
+        Piece::Line(2.404, 9.719),
+        Piece::Line(0.8, 12.061),
+        Piece::Cubic(0.619, 12.326, 0.529, 12.458, 0.546, 12.568),
+        Piece::Cubic(0.556, 12.628, 0.585, 12.683, 0.629, 12.725),
+        Piece::Cubic(0.71, 12.802, 0.87, 12.802, 1.191, 12.802),
+        Piece::Line(2.361, 12.802),
+        Piece::Line(1.604, 14.811),
+        Piece::Cubic(1.412, 15.321, 1.315, 15.576, 1.37, 15.653),
+        Piece::Cubic(1.399, 15.693, 1.444, 15.72, 1.494, 15.725),
+        Piece::Cubic(1.588, 15.735, 1.763, 15.526, 2.113, 15.108),
+        Piece::Line(5.509, 11.057),
+        Piece::Cubic(5.737, 10.784, 5.852, 10.648, 5.841, 10.532),
+        Piece::Cubic(5.834, 10.468, 5.807, 10.409, 5.762, 10.363),
+        Piece::Cubic(5.68, 10.28, 5.502, 10.28, 5.146, 10.28),
+        Piece::Line(3.761, 10.28),
+        Piece::Line(5.361, 7.938),
+        Piece::Cubic(5.542, 7.673, 5.632, 7.541, 5.614, 7.432),
+        Piece::Cubic(5.605, 7.371, 5.576, 7.316, 5.531, 7.274),
+        Piece::Cubic(5.451, 7.198, 5.291, 7.198, 4.971, 7.198),
+        Piece::Line(3.799, 7.198),
+        Piece::Line(4.557, 5.191),
+    ],
+);
+
+/// The stock bar's bolt of `kind` in its box from `x`, on the bar's middle
+/// `cy`: as its own canvas in the bolt's ink, and where it goes.
+fn bolt(t: &Theme, kind: Bolt, x: f32, cy: f32) -> (Canvas, i32, i32) {
     let m = &t.m;
-    let (bw, bh) = (m.dp(BOLT_W_DP), m.dp(11.3));
-    let (ox, oy) = ((x - 1.0).floor(), (cy - bh / 2.0 - 1.0).floor());
-    let (x, cy) = (x - ox, cy - oy);
-    let mut art = Canvas::new((x + bw + 1.0).ceil() as u32, (cy + bh / 2.0 + 1.0).ceil() as u32);
-    // Two strokes meeting in the middle, drawn as coverage first so their
-    // overlap is not inked twice.
-    let white = Rgba::rgb(255, 255, 255);
-    art.fill_convex(&[(x + bw * 0.7, cy - bh / 2.0), (x, cy + bh * 0.1), (x + bw * 0.52, cy + bh * 0.1)], white);
-    art.fill_convex(&[(x + bw * 0.3, cy + bh / 2.0), (x + bw, cy - bh * 0.1), (x + bw * 0.48, cy - bh * 0.1)], white);
-    let ink = t.pal.battery.bolt;
-    for px in art.data.as_chunks_mut::<4>().0 {
-        let a = (px[3] as u32 * ink.a as u32 + 127) / 255;
-        *px = [ink.r, ink.g, ink.b, a as u8];
+    let (start, pieces) = match kind {
+        Bolt::Charging => BOLT,
+        Bolt::Quick => QUICK_BOLT,
+    };
+    // The box's corner on whole pixels, as the stock bar lays its views
+    // out, and the canvas over the box.
+    let (ox, oy) = (x.round(), (cy - m.dp(BOLT_H_DP) / 2.0).round());
+    let (w, h) = (m.dp(BOLT_W_DP).ceil() as u32, m.dp(BOLT_H_DP).ceil() as u32);
+    let at = |(u, v): (f32, f32)| ab_glyph_rasterizer::point(m.dp(u), m.dp(v));
+    let mut fill = ab_glyph_rasterizer::Rasterizer::new(w as usize, h as usize);
+    let mut from = at(start);
+    for piece in pieces {
+        from = match *piece {
+            Piece::Line(u, v) => {
+                fill.draw_line(from, at((u, v)));
+                at((u, v))
+            }
+            Piece::Cubic(a, b, c, d, u, v) => {
+                fill.draw_cubic(from, at((a, b)), at((c, d)), at((u, v)));
+                at((u, v))
+            }
+        };
     }
+    fill.draw_line(from, at(start));
+    let ink = t.pal.battery.bolt;
+    let mut art = Canvas::new(w, h);
+    fill.for_each_pixel_2d(|px, py, cover| {
+        let i = ((py * w + px) * 4) as usize;
+        let a = (cover.clamp(0.0, 1.0) * ink.a as f32).round() as u8;
+        art.data[i..i + 4].copy_from_slice(&[ink.r, ink.g, ink.b, a]);
+    });
     (art, ox as i32, oy as i32)
 }
 
@@ -2863,7 +2964,7 @@ mod tests {
         let f = crate::font::bundled();
         let draw = |mark: WlanMark| {
             let mut c = Canvas::filled(1200, 160, t.pal.bg);
-            let bar = Bar { clock: "01:27", battery: Some((40, true)), wlan: Some(mark), data: None, slot: None, temp: None };
+            let bar = Bar { clock: "01:27", battery: Some((40, Some(Bolt::Charging))), wlan: Some(mark), data: None, slot: None, temp: None };
             status_bar(&mut c, &t, &f, &bar, t.pal.status);
             c
         };
@@ -2901,7 +3002,7 @@ mod tests {
         let f = crate::font::bundled();
         let mut c = Canvas::filled(1200, 160, t.pal.bg);
         let wlan = Some(WlanMark { level: 3, receiving: true, sending: true, speed: "0.00".into(), unit: "KB/s" });
-        let bar = Bar { clock: "01:27", battery: Some((40, false)), wlan, data: Some(false), slot: Some("B"), temp: Some(36) };
+        let bar = Bar { clock: "01:27", battery: Some((40, None)), wlan, data: Some(false), slot: Some("B"), temp: Some(362) };
         status_bar(&mut c, &t, &f, &bar, t.pal.status);
         // Runs of inked columns on the bar's right half, those a few pixels
         // apart taken as one mark.
@@ -2962,6 +3063,38 @@ mod tests {
         // The keyhole lets what is behind show through the body.
         let keyhole = body + m.dp(LOCK_BODY_H_DP) * 0.42;
         assert!(alpha(&shut, mid, keyhole) < 30 && alpha(&shut, mid - m.dp(3.0), keyhole) > 200);
+    }
+
+    #[test]
+    fn the_bolts_stand_past_the_battery_as_the_stock_bar_draws_them() {
+        // The 17 Ultra's bar, three pixels a dp, charging quickly: the stock
+        // bolt covers a quarter of a pixel or more across 1069..1086 and
+        // down 60..94, and its left edge steps right at rows 76 and 85.
+        let t = Theme::dark(1200, 2608, 3.0);
+        let f = crate::font::bundled();
+        let draw = |kind| {
+            let mut c = Canvas::filled(1200, 160, Rgba::rgb(0, 0, 0));
+            let bar = Bar { clock: "01:27", battery: Some((64, Some(kind))), wlan: None, data: None, slot: None, temp: None };
+            status_bar(&mut c, &t, &f, &bar, t.pal.status);
+            c
+        };
+        // How much of a pixel the bolt covers, and the rows where its left
+        // edge steps right, each the top of a step.
+        let cover = |p: &[u8]| p[0] as f32 / t.pal.battery.bolt.a as f32;
+        let steps = |c: &Canvas| -> Vec<u32> {
+            let lefts: Vec<(u32, u32)> = (40..120)
+                .filter_map(|y| (1064..1100).find(|&x| cover(&c.data[((y * 1200 + x) * 4) as usize..]) > 0.6).map(|x| (y, x)))
+                .collect();
+            lefts.windows(2).filter(|w| w[1].1 >= w[0].1 + 3).map(|w| w[1].0).collect()
+        };
+        let quick = draw(Bolt::Quick);
+        let ink = ink_box(&quick, Rect::new(1064.0, 40.0, 36.0, 80.0), |p| cover(p) > 0.25);
+        assert_eq!(ink, (1069.0, 60.0, 1086.0, 94.0), "where the stock bolt is");
+        assert_eq!(steps(&quick), [76, 85], "two steps where the stock bolt's are");
+        let plain = draw(Bolt::Charging);
+        let ink = ink_box(&plain, Rect::new(1064.0, 40.0, 36.0, 80.0), |p| cover(p) > 0.25);
+        assert!(ink.0 >= 1068.0 && ink.2 <= 1092.0 && ((ink.1 + ink.3) / 2.0 - t.m.status_cy).abs() <= 1.0, "in the same box: {ink:?}");
+        assert_eq!(steps(&plain).len(), 1, "one step while the charger charges as it may");
     }
 
     #[test]

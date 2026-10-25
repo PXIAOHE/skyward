@@ -127,7 +127,12 @@ pub fn level(l: Lang, b: &Battery) -> String {
 }
 
 pub fn celsius(tenths: i32) -> String {
-    format!("{:.1}°C", tenths as f64 / 10.0)
+    format!("{}°C", degrees(tenths))
+}
+
+/// A temperature given in tenths of a degree, to the tenth: `35.2`.
+pub fn degrees(tenths: i32) -> String {
+    format!("{:.1}", tenths as f64 / 10.0)
 }
 
 pub fn volts(uv: u64) -> String {
@@ -1432,10 +1437,12 @@ mod tests {
             design: Some(5_500_000),
             full: Some(5_095_000),
             voltage: Some(4_482_000),
+            quick: false,
         };
         assert_eq!(level(HANS, &b), "100% · 已充满");
         assert_eq!(level(Lang::Hant, &b), "100% · 已充滿");
         assert_eq!(celsius(b.temp.unwrap()), "33.8°C");
+        assert_eq!([degrees(352), degrees(400), degrees(-5)], ["35.2", "40.0", "-0.5"], "to the tenth, a whole degree too");
         assert_eq!(wear(HANS, &b).unwrap(), "良好 · 剩余容量 93%");
         assert_eq!(wear(Lang::En, &b).unwrap(), "Good · Maximum capacity 93%");
         assert_eq!(mah(b.design.unwrap()), "5500mAh");

@@ -2057,6 +2057,7 @@ dependencies = [
  "skyward-config",
  "skyward-sys",
  "skyward-vab",
+ "tempfile",
 ]
 
 [[package]]
@@ -2178,6 +2179,7 @@ name = "skyward-ui"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "ab_glyph_rasterizer",
  "anyhow",
  "drm",
  "drm-ffi",

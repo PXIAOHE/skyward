@@ -134,7 +134,8 @@ pub struct Metrics {
     pub slider_knob: f32,
     pub status_x: f32,
     /// Where the battery ends, from the right edge; with the cable in, the
-    /// bolt ends at `status_bolt_right` instead and the battery moves left.
+    /// bolt's box ends at `status_bolt_right` instead and the battery moves
+    /// left.
     pub status_right: f32,
     pub status_bolt_right: f32,
     pub status_cy: f32,
@@ -228,7 +229,7 @@ fn metrics(w: u32, h: u32, px_per_dp: f32) -> Metrics {
         slider_knob: dp(18.7),
         status_x: dp(37.0),
         status_right: dp(40.0),
-        status_bolt_right: dp(38.0),
+        status_bolt_right: dp(36.0),
         status_cy: dp(25.7),
         status_px: dp(14.1),
     }
@@ -309,7 +310,8 @@ const DARK: Palette = Palette {
         low: Rgba::rgb(230, 75, 59),
         level: Rgba::rgb(255, 255, 255).with_alpha(232),
         empty: Rgba::rgb(255, 255, 255).with_alpha(94),
-        bolt: Rgba::rgb(255, 255, 255).with_alpha(230),
+        // As the stock Settings draw it over black and over a dark grey.
+        bolt: Rgba::rgb(255, 255, 255).with_alpha(207),
     },
     mono_icon: Rgba::rgb(110, 110, 110),
     danger: Rgba::rgb(255, 92, 84),

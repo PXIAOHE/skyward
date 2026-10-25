@@ -16,7 +16,7 @@ use crate::search;
 use crate::term::{self, Term, TermKey};
 use crate::theme::Theme;
 use crate::tr;
-use crate::widgets::{self, Bar, Cap, Layer, WlanMark};
+use crate::widgets::{self, Bar, Bolt, Cap, Layer, WlanMark};
 use skyward_info::DeviceInfo;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Refusal, Stage};
 use skyward_net::download::{Failure, Progress};
@@ -3254,7 +3254,7 @@ impl App {
         let battery = info.battery.as_ref();
         Bar {
             clock,
-            battery: battery.map(|b| (b.level, b.plugged())),
+            battery: battery.map(|b| (b.level, b.plugged().then_some(if b.quick { Bolt::Quick } else { Bolt::Charging }))),
             wlan: self.wlan_mark(),
             data: match self.state.data {
                 Data::Erased => None,
@@ -3262,7 +3262,7 @@ impl App {
                 Data::Closed | Data::Opening | Data::Failed(_) | Data::Locked { .. } => Some(false),
             },
             slot: info.slot.map(Slot::letter),
-            temp: battery.and_then(|b| b.temp).map(|tenths| (tenths as f32 / 10.0).round() as i32),
+            temp: battery.and_then(|b| b.temp),
         }
     }
 
@@ -6630,7 +6630,7 @@ mod tests {
 
     /// A battery at `level`, as `charge` has it, 35.2 °C.
     fn battery_at(level: u8, charge: Charge) -> skyward_info::Battery {
-        skyward_info::Battery { level, charge, temp: Some(352), health: None, cycles: None, design: None, full: None, voltage: None }
+        skyward_info::Battery { level, charge, temp: Some(352), health: None, cycles: None, design: None, full: None, voltage: None, quick: false }
     }
 
     #[test]
@@ -6670,7 +6670,11 @@ mod tests {
         let i = DeviceInfo { slot: Some(Slot::B), battery: Some(battery_at(64, Charge::Charging)), ..info() };
         let mut app = App::new(Screen::Home, W, H, PPD);
         let bar = app.bar("12:00", &i);
-        assert_eq!((bar.slot, bar.temp, bar.battery), (Some("B"), Some(35), Some((64, true))));
+        assert_eq!((bar.slot, bar.temp, bar.battery), (Some("B"), Some(352), Some((64, Some(Bolt::Charging)))), "the temperature to the tenth");
+        let quick = DeviceInfo { battery: Some(skyward_info::Battery { quick: true, ..battery_at(64, Charge::Charging) }), ..info() };
+        assert_eq!(app.bar("12:00", &quick).battery, Some((64, Some(Bolt::Quick))), "a quick charger draws the stock bar's quick bolt");
+        let out = DeviceInfo { battery: Some(battery_at(64, Charge::Discharging)), ..info() };
+        assert_eq!(app.bar("12:00", &out).battery, Some((64, None)), "no bolt with the cable out");
         let lock = |app: &mut App, data: Data| {
             app.state.data = data;
             app.bar("12:00", &i).data
@@ -7470,6 +7474,7 @@ mod tests {
             design: Some(5_500_000),
             full: Some(5_095_000),
             voltage: Some(4_200_000),
+            quick: false,
         };
         let i = DeviceInfo {
             os_version: Some("OS3.0.305.0.WMACNXM".into()),
