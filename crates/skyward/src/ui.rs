@@ -1053,6 +1053,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
+    // What the phone's input devices are called is what says whether the
+    // touchscreen came up at all.
+    if let Ok(entries) = fs::read_dir("/sys/class/input") {
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("event"))
+            .filter_map(|e| fs::read_to_string(e.path().join("device/name")).ok())
+            .map(|n| n.trim().to_string())
+            .collect();
+        names.sort();
+        skyward_sys::kmsg(&format!("input devices: {}", names.join(", ")))?;
+    }
     let started = Instant::now();
     let mut touch_known = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.

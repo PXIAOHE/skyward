@@ -353,6 +353,10 @@ pub mod kms {
         /// Whether the display posts a flip event for every commit. One that
         /// shows frames but posts none is committed to and waited on instead.
         flips: bool,
+        /// Frames presented, and when the count last started, for the rate
+        /// written to the kernel log every so often.
+        frames: u32,
+        counted_from: Option<Instant>,
         /// The planes showing the buffer, one per layer mixer, with their
         /// FB_ID properties.
         planes: Vec<(plane::Handle, property::Handle)>,
@@ -580,7 +584,7 @@ pub mod kms {
                 u32::from(crtc),
                 fourcc
             );
-            Ok(KmsSurface { card, bufs, back: 1, flipping: false, flips: true, planes, w, h, order, summary })
+            Ok(KmsSurface { card, bufs, back: 1, flipping: false, flips: true, frames: 0, counted_from: None, planes, w, h, order, summary })
         }
 
         pub fn describe(&self) -> &str {
@@ -716,7 +720,7 @@ pub mod kms {
                 u32::from(plane),
                 fourcc
             );
-            Ok(KmsSurface { card, bufs, back: 1, flipping: false, flips: true, planes: vec![(plane, fb_prop)], w, h, order, summary })
+            Ok(KmsSurface { card, bufs, back: 1, flipping: false, flips: true, frames: 0, counted_from: None, planes: vec![(plane, fb_prop)], w, h, order, summary })
         }
     }
 
@@ -772,6 +776,14 @@ pub mod kms {
                 self.flipping = true;
             } else {
                 self.card.atomic_commit(AtomicCommitFlags::empty(), req).context("flip")?;
+            }
+            self.frames += 1;
+            let from = *self.counted_from.get_or_insert_with(Instant::now);
+            if self.frames == 1 {
+                note("the first frame is out");
+            }
+            if self.frames.is_multiple_of(10) {
+                note(&format!("{} frames in {} ms, {:.1} per second", self.frames, from.elapsed().as_millis(), f64::from(self.frames) / from.elapsed().as_secs_f64()));
             }
             self.back = (self.back + 1) % self.bufs.len();
             Ok(())

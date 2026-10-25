@@ -181,6 +181,53 @@ const KEPT_RAW: &str = "/dev/block/by-name/oops";
 #[cfg(target_os = "android")]
 static RAW: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
+/// Where a copy of the log is kept that the system booted next reads itself:
+/// the partition it mounts for its own bookkeeping, then the one holding the
+/// phone's firmware, then the ramdisk for whatever is left.
+#[cfg(target_os = "android")]
+const KEPT_FILES: [&str; 3] = ["/metadata/skyward.log", "/persist/skyward.log", "/tmp/skyward.log"];
+
+/// The same lines in the first of [`KEPT_FILES`] that could be written.
+#[cfg(target_os = "android")]
+static KEPT_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+
+/// Make a mounted partition writable, for a copy of the log that outlives
+/// the recovery. A partition that is not mounted cannot be made so here.
+#[cfg(target_os = "android")]
+fn remount_rw(point: &str) {
+    let Ok(target) = std::ffi::CString::new(point) else { return };
+    unsafe { libc::mount(std::ptr::null(), target.as_ptr(), std::ptr::null(), libc::MS_REMOUNT, std::ptr::null()) };
+}
+
+/// The first of [`KEPT_FILES`] that can be written, after making the folder
+/// it is in writable.
+#[cfg(target_os = "android")]
+fn open_kept_file() -> Option<File> {
+    remount_rw("/metadata");
+    remount_rw("/persist");
+    for path in KEPT_FILES {
+        if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
+            return Some(file);
+        }
+    }
+    None
+}
+
+/// Append a line to that file, in the same shape as the file [`keep_log`]
+/// opened. Nothing here is fatal.
+#[cfg(target_os = "android")]
+fn kept_file(line: &str) {
+    let opened = KEPT_FILE.get_or_init(|| Mutex::new(open_kept_file()));
+    let Ok(mut kept) = opened.lock() else { return };
+    if kept.is_none() {
+        *kept = open_kept_file();
+    }
+    if let Some(file) = kept.as_mut() {
+        let stamp = since_boot().map(|d| d.as_secs_f64()).unwrap_or_default();
+        let _ = writeln!(file, "[{stamp:>12.6}] {line}");
+    }
+}
+
 /// Append a line to [`KEPT_RAW`], in the same shape as the file [`keep_log`]
 /// opened, from the start of the partition on. Nothing here is fatal.
 #[cfg(target_os = "android")]
@@ -207,7 +254,10 @@ pub fn kmsg(line: &str) -> Result<()> {
         writeln!(kept, "[{:>12.6}] {line}", since_boot()?.as_secs_f64()).with_context(|| format!("write {LOG}"))?;
     }
     #[cfg(target_os = "android")]
-    kept_raw(line);
+    {
+        kept_raw(line);
+        kept_file(line);
+    }
     Ok(())
 }
 
