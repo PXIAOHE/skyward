@@ -815,9 +815,15 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     if let Some(dir) = libraries {
         path.push(dir.to_string_lossy().into_owned());
     }
+    // A log of its own: what it does about the networks in the settings is
+    // otherwise lost with its error stream.
+    let log = Path::new("/tmp/skyward-supplicant.log");
+    let _ = fs::remove_file(log);
     let mut child = Process::new(&cfg.supplicant)
         .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
         .arg(settings)
+        .arg("-f")
+        .arg(log)
         .env("LD_LIBRARY_PATH", path.join(":"))
         .current_dir("/")
         .stdin(Stdio::null())
