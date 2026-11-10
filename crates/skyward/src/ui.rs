@@ -2371,11 +2371,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // under way, and takes nothing more until it is done.
                     Effect::OpenData => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
-                        // Waited on: opening data is not only reading what the
-                        // phone kept about the screen locks, it is mounting the
-                        // data partition itself, and none of that is there
-                        // before the devices are up.
-                        crate::wait_prepared();
+                        // Only the mounting is waited on: opening data reads
+                        // what the phone kept about the screen locks and mounts
+                        // the partition, and the secure services are not wanted
+                        // until a credential is tried.
+                        crate::wait_mounted();
                         decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
                     }
                     Effect::Unlock { user, code } => {
