@@ -207,70 +207,72 @@ fn supervise(s: &Service, who: &Credentials) -> ! {
     }
 }
 
-/// Start the program and wait for it to end.
+/// Start the program and wait for it to end, keeping what it writes to its
+/// error stream in the kernel log as it writes it, so a program that starts
+/// and then waits forever can say why it did.
 fn run(s: &Service, who: &Credentials) -> Result<String> {
     let mut child = command(s, who).spawn().with_context(|| format!("start {}", s.path))?;
+    let pid = child.id();
+    let reading = child.stderr.take().map(|pipe| {
+        let path = s.path.clone();
+        thread::Builder::new().name(format!("err-{pid}")).spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                let _ = skyward_sys::kmsg(&format!("{path}: {line}"));
+            }
+        })
+    });
     let status = child.wait().context("wait for it")?;
-    Ok(format!("pid {} ended: {status}", child.id()))
+    if let Some(reader) = reading.transpose().context("read its error stream")? {
+        let _ = reader.join();
+    }
+    Ok(format!("pid {pid} ended: {status}"))
+}
+
+/// Create an Android-init-style socket bound and listening under
+/// /dev/socket, for the program to accept connections on over the file
+/// descriptor it is handed through the environment. init makes the socket
+/// and accepts nothing itself; the program does, so no thread here may take
+/// the connections it is waiting for.
+fn create_init_socket(name: &str) -> Result<i32> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    let path = format!("/dev/socket/{name}");
+    let _ = fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).with_context(|| format!("bind {path}"))?;
+    // init gives the socket to the accounts its init script names; a
+    // recovery hands none over, so it stays open to every program that may
+    // connect to it.
+    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o666));
+    let listener = Box::leak(Box::new(listener));
+    let fd = listener.as_raw_fd();
+    unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+    const O_NONBLOCK: i32 = 0o4000;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !O_NONBLOCK) };
+    Ok(fd)
 }
 
 /// The program as it is started: with what it is given, from the top of the
 /// tree, reading and writing nothing of the recovery's, finding its
 /// libraries where it names them, and as `who`.
-/// The sockets a program is handed, as init makes them: a stream socket in
-/// /dev/socket/<name>, readable and writable by its group, with the
-/// descriptor passed on as ANDROID_SOCKET_<name>. The programs that ask for
-/// these (qseecomd above all) find them by that variable alone.
-fn make_sockets(s: &Service) -> Result<Vec<String>> {
-    let mut made = Vec::new();
-    if s.sockets.is_empty() {
-        return Ok(made);
-    }
-    let dir = Path::new("/dev/socket");
-    std::fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
-    for name in &s.sockets {
-        let path = dir.join(name);
-        let _ = std::fs::remove_file(&path);
-        let cstr = std::ffi::CString::new(path.to_string_lossy().as_bytes())
-            .with_context(|| format!("name {name} for a socket"))?;
-        unsafe {
-            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-            ensure!(fd >= 0, "make a socket for {name}: {}", std::io::Error::last_os_error());
-            let mut addr: libc::sockaddr_un = std::mem::zeroed();
-            addr.sun_family = libc::AF_UNIX as u16;
-            let bytes = cstr.as_bytes();
-            ensure!(bytes.len() < addr.sun_path.len(), "socket path for {name} is too long");
-            for (i, b) in bytes.iter().enumerate() {
-                addr.sun_path[i] = *b as libc::c_char;
-            }
-            let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
-            ensure!(
-                libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) == 0,
-                "bind the socket for {name}: {}", std::io::Error::last_os_error()
-            );
-            ensure!(
-                libc::listen(fd, 4) == 0,
-                "listen on the socket for {name}: {}", std::io::Error::last_os_error()
-            );
-            libc::chmod(cstr.as_ptr(), 0o660);
-            // The descriptor is passed on to the program, so it must survive exec.
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-            made.push(format!("ANDROID_SOCKET_{name}={fd}"));
-        }
-    }
-    Ok(made)
-}
-
 fn command(s: &Service, who: &Credentials) -> Command {
     let mut cmd = Command::new(&s.path);
-    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
     }
-    for pair in make_sockets(s).unwrap_or_default() {
-        if let Some((k, v)) = pair.split_once('=') {
-            cmd.env(k, v);
+    // The sockets init would have made for it, by the name init gives each
+    // one in the environment: the name as it is written, dashes and all.
+    for name in &s.sockets {
+        match create_init_socket(name) {
+            Ok(fd) => {
+                cmd.env(format!("ANDROID_SOCKET_{name}"), fd.to_string());
+                let _ = skyward_sys::kmsg(&format!("socket {name} listening on fd {fd}"));
+            }
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!("socket {name}: {e:#}"));
+            }
         }
     }
     let who = who.clone();

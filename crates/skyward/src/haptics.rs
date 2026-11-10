@@ -20,7 +20,6 @@ const RATE: u32 = 8000;
 
 /// A made click: swings of the motor at its resonant frequency that drive
 /// it, then swings turned over that stop it, so that it does not ring on.
-const DRIVE_SWINGS: f32 = 2.0;
 const BRAKE_SWINGS: f32 = 1.5;
 /// The ticks of the screen going off by the power key, as the phone's own
 /// system plays them on the 17 Ultra, whose motor swings at [`TICKS_HZ`]:
@@ -63,6 +62,9 @@ pub struct Haptics {
     click: Click,
     ticks: Click,
     strength: Strength,
+    /// The greatest share of a click's full strength that ever plays,
+    /// where the motor bangs on its stops above it.
+    max_amplitude: f32,
     /// The click playing, by its slot and its count, until it is taken
     /// away; a click taken away early by the next is not taken away again.
     playing: Arc<Mutex<Option<(i16, u64)>>>,
@@ -93,11 +95,12 @@ impl Haptics {
             }
             None => {
                 eprintln!("haptics {}: clicks and ticks made for a motor swinging at {hz} Hz", path.display());
-                Click::Samples { data: made(hz), rate: RATE }
+                Click::Samples { data: made(hz, cfg.drive_swings), rate: RATE }
             }
         };
+        let max_amplitude = cfg.max_amplitude.unwrap_or(cfg.strength.strongest);
         let ticks = Click::Samples { data: ticks(hz), rate: TICKS_RATE };
-        Ok(Haptics { dev, click, ticks, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
+        Ok(Haptics { dev, click, ticks, strength: cfg.strength, max_amplitude, playing: Arc::new(Mutex::new(None)), clicks: 0 })
     }
 
     /// One short click at the strength the slider's `position` gives, after
@@ -120,6 +123,9 @@ impl Haptics {
             erase(&self.dev, slot).context("take away the click still playing")?;
         }
         let effect = if ticks { &self.ticks } else { &self.click };
+        // A click plays no stronger than the motor takes without banging on
+        // its stops; the ticks play as the phone's own system plays them.
+        let share = if ticks { share } else { share.min(self.max_amplitude) };
         let loaded = upload(&self.dev, effect, share).context("load the click")?;
         play(&mut self.dev, loaded.slot).context("play the click")?;
         self.clicks += 1;
@@ -153,7 +159,8 @@ pub fn probe(cfg: &skyward_config::Haptics, position: f32, ticks: bool) -> Resul
     let (what, strength, length) = if ticks {
         ("ticks", TICKS_STRENGTH, haptics.ticks()?)
     } else {
-        ("click", share(&cfg.strength, position), haptics.click(position)?)
+        let share = share(&cfg.strength, position).min(cfg.max_amplitude.unwrap_or(cfg.strength.strongest));
+        ("click", share, haptics.click(position)?)
     };
     // Once it has played out, what played goes with the device as the
     // command ends.
@@ -192,15 +199,17 @@ fn resonance(file: &str) -> Result<f32> {
     Ok(tenths as f32 / 10.0)
 }
 
-/// A click's samples at [`RATE`] for a motor that swings at `hz`: whole
-/// swings that drive it, then swings turned over that stop it.
-fn made(hz: f32) -> Vec<i8> {
+/// A click's samples at [`RATE`] for a motor that swings at `hz`: the
+/// `drive` whole swings that drive it, then swings turned over that stop
+/// it. A motor that bottoms out and bangs on its stops at full swing is
+/// driven fewer swings, so it does not reach its stops.
+fn made(hz: f32, drive: f32) -> Vec<i8> {
     let at = |swings: f32| (swings * RATE as f32 / hz).round() as usize;
-    let (drive, all) = (at(DRIVE_SWINGS), at(DRIVE_SWINGS + BRAKE_SWINGS));
+    let (drive_at, all) = (at(drive), at(drive + BRAKE_SWINGS));
     (0..all)
         .map(|i| {
             let wave = (TAU * hz * i as f32 / RATE as f32).sin() * f32::from(i8::MAX);
-            (if i < drive { wave } else { -wave }).round() as i8
+            (if i < drive_at { wave } else { -wave }).round() as i8
         })
         .collect()
 }
@@ -328,9 +337,13 @@ fn erase(dev: &File, id: i16) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The drive the configuration defaults to, matched to the default the
+    /// phone without a motor that bangs keeps.
+    const DRIVE_SWINGS: f32 = 2.0;
+
     #[test]
     fn a_made_click_drives_whole_swings_then_turns_over() {
-        let samples = made(172.4);
+        let samples = made(172.4, DRIVE_SWINGS);
         let drive = (DRIVE_SWINGS * RATE as f32 / 172.4).round() as usize;
         assert_eq!(samples.len(), (3.5 * RATE as f32 / 172.4).round() as usize);
         assert_eq!(samples[0], 0);
@@ -338,6 +351,17 @@ mod tests {
         let quarter = (RATE as f32 / 172.4 / 4.0).round() as usize;
         assert!(samples[quarter] > 120, "it rises first");
         assert!(samples[drive + quarter] < -120, "it falls first once turned over");
+    }
+
+    #[test]
+    fn a_shorter_drive_swings_the_motor_less_far() {
+        let full = made(172.4, DRIVE_SWINGS);
+        let short = made(172.4, 1.0);
+        let short_drive = (1.0 * RATE as f32 / 172.4).round() as usize;
+        assert!(short.len() < full.len(), "fewer swings in all");
+        assert_eq!(*short.iter().max().unwrap(), i8::MAX);
+        let quarter = (RATE as f32 / 172.4 / 4.0).round() as usize;
+        assert!(short[short_drive + quarter] < -120, "it turns over after its own drive");
     }
 
     #[test]

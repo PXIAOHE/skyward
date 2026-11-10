@@ -529,21 +529,14 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     // and nothing would register that again.
     let mut registering: Vec<String> = services.iter().flat_map(|s| s.ready_service.iter().chain(&s.registers).cloned()).collect();
     registering.extend(cfg.wlan.iter().map(|w| w.service.clone()));
-    // A description written out in the configuration rather than kept in a
-    // file: give it a file of its own under /tmp, so that it goes through the
-    // same publishing as the phone's own descriptions do.
-    let mut written: Vec<(String, String)> = Vec::new();
-    for s in services.iter() {
-        if let Some(text) = &s.manifest {
-            let name = Path::new(&s.path).file_name().map_or_else(|| "service".to_string(), |n| n.to_string_lossy().into_owned());
-            let at = format!("/tmp/skyward-manifest-{name}.xml");
-            std::fs::write(&at, text).with_context(|| format!("write {at}"))?;
-            skyward_sys::kmsg(&format!("wrote the description {at}"))?;
-            written.push((s.path.clone(), at));
-        }
-    }
     let mut files: Vec<String> = services.iter().filter_map(|s| s.description.clone()).collect();
-    files.extend(written.iter().map(|(_, at)| at.clone()));
+    // A description the configuration writes out itself, for a service the
+    // phone keeps its description of nowhere the recovery can read.
+    for (n, manifest) in services.iter().filter_map(|s| s.manifest.as_ref()).enumerate() {
+        let path = format!("/tmp/skyward-manifest-{n}.xml");
+        std::fs::write(&path, manifest).with_context(|| format!("write {path}"))?;
+        files.push(path);
+    }
     if !registering.is_empty() || !files.is_empty() {
         let described = secure::publish_descriptions(&registering, &files)?;
         skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;
@@ -663,12 +656,7 @@ fn mount_firmware(partition: &str) -> Result<()> {
 /// made under a build it does not know, and refuses them. The recovery's
 /// property files leave these out so that they can be set here instead.
 #[cfg(target_os = "android")]
-const BUILD_VERSION: [&str; 4] = [
-    "ro.build.version.release",
-    "ro.build.version.security_patch",
-    "ro.vendor.build.security_patch",
-    "ro.vendor.build.version.incremental",
-];
+const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
 
 /// Set each of [`BUILD_VERSION`] to the installed system's value. An earlier
 /// run of the recovery service may have set it already, and init sets such

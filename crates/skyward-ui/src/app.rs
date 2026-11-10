@@ -7909,7 +7909,7 @@ mod tests {
     }
 
     #[test]
-    fn a_partition_in_use_cannot_be_unmounted() {
+    fn a_partition_in_use_still_offers_its_switch() {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Mount, &f, &i);
         let held = vec!["touch_report".to_string(), "touchsensor".to_string()];
@@ -7918,12 +7918,9 @@ mod tests {
             MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: true, holders: Vec::new() },
         ]));
         let frame = app.frame(&f, &i);
-        assert!(matches!(frame.hits[0].action, Action::Unavailable(_)), "the programs using odm keep it");
+        assert_eq!(frame.hits[0].action, Action::MountToggle(0), "a partition in use can still be asked to go");
         assert_eq!(frame.hits[1].action, Action::MountToggle(1));
-        let busy = frame.hits[0].action;
-        assert!(tap(&mut app, &f, &i, busy).is_empty());
-        app.tick(1000);
-        assert_eq!(app.deadline(1000), Some(TOAST_MS), "it says why");
+        assert_eq!(app.act(Action::MountToggle(0), 0), vec![Effect::Unmount("odm".into())]);
     }
 
     #[test]
@@ -8426,10 +8423,9 @@ mod tests {
 
     #[test]
     fn a_control_that_cannot_work_explains_itself() {
-        let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Mount, W, H, PPD);
         app.set_mounts(Ok(vec![MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: vec!["qseecomd".into()] }]));
-        tap(&mut app, &f, &i, Action::Unavailable("无法卸载正在使用的分区"));
+        app.act(Action::Unavailable("无法卸载正在使用的分区"), 0);
         assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("无法卸载正在使用的分区"));
         // Once the row tapped has faded back, only the message waits.
         app.tick(1000);
@@ -8460,7 +8456,7 @@ mod tests {
         tap_back(&mut app, &f, &i, 2000);
         app.tick(3000);
         tap(&mut app, &f, &i, Action::Open(Screen::Mount));
-        tap(&mut app, &f, &i, Action::Unavailable("A partition in use can't be unmounted"));
+        app.act(Action::Unavailable("A partition in use can't be unmounted"), 3000);
         assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("A partition in use can't be unmounted"), "as do its messages");
     }
 
