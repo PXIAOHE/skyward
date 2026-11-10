@@ -42,7 +42,18 @@ impl Build {
     /// short-lived address, where GitHub's API gave one, then the release's
     /// link on github.com, which some networks do not reach.
     pub fn sources(&self, located: Option<String>) -> Vec<String> {
-        located.into_iter().chain([self.link.clone()]).collect()
+        // The API's own address first: it is the one GitHub hands out for the
+        // file, on the CDN that usually answers fastest. Then the release's
+        // link on github.com itself, which some networks do not reach. Then
+        // the same link behind gh-proxy.com, which measured the same as
+        // github.com here and keeps a download going where the main site
+        // stalls; it is last so a working main site is never sent through it.
+        let mirror = |u: &str| format!("https://gh-proxy.com/{u}");
+        located
+            .into_iter()
+            .chain([self.link.clone()])
+            .chain([mirror(&self.link)])
+            .collect()
     }
 }
 
@@ -173,8 +184,12 @@ mod tests {
     fn a_zip_is_downloaded_from_where_github_sends_it_then_from_its_link() {
         let build = newest(ANSWERED_013, "ishtar", "0.1.2").unwrap().build.unwrap();
         let link = "https://github.com/kirklin/skyward/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.zip";
-        assert_eq!(build.sources(Some("https://release-assets.githubusercontent.com/a?sig=1".into())), ["https://release-assets.githubusercontent.com/a?sig=1", link]);
-        assert_eq!(build.sources(None), [link], "where GitHub's API gave no address");
+        let mirror = "https://gh-proxy.com/https://github.com/kirklin/skyward/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.zip";
+        assert_eq!(
+            build.sources(Some("https://release-assets.githubusercontent.com/a?sig=1".into())),
+            ["https://release-assets.githubusercontent.com/a?sig=1", link, mirror]
+        );
+        assert_eq!(build.sources(None), [link, mirror], "where GitHub's API gave no address");
     }
 
     /// A server on this computer that answers one request with `answer`,
