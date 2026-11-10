@@ -1418,7 +1418,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut touched_at = Instant::now();
     loop {
         let now = monotonic_ms();
-        if touched_at.elapsed().as_secs() >= 3 {
+        if touched_at.elapsed().as_secs() >= 1 {
             touched_at = Instant::now();
             for w in &cfg.touch.writes {
                 if std::fs::write(&w.path, &w.value).is_ok() {
