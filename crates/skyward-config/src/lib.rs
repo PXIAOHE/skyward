@@ -358,7 +358,7 @@ pub struct Touch {
     /// system's double tap does. The panel has to keep reporting taps while
     /// its backlight is off; a controller that stops reporting them at sleep
     /// answers nothing, and the flag costs only the check.
-    #[serde(default = "yes")]
+    #[serde(default)]
     pub double_tap: bool,
     /// Ask the phone's own touch driver to have the controller recognise a
     /// double tap itself, through the Xiaomi touch v2 command miro's driver

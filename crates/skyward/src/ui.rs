@@ -1110,20 +1110,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
     app.state.double_tap = cfg.touch.double_tap;
     app.state.double_tap_supported = cfg.touch.double_tap;
-    // Ask the touch driver to have the controller recognise a double tap by
-    // itself, where the configuration says its command is known to work. A
-    // panel that does not take it answers with the wrong values on the
-    // readback, and this says so in the kernel log rather than failing quietly.
-    if cfg.touch.xiaomi_v2_gesture {
-        match skyward_sys::touch::xiaomi_v2_double_tap(true) {
-            Ok(()) => {
-                let _ = skyward_sys::kmsg("the panel takes the double-tap command; it lights on its own");
-            }
-            Err(e) => {
-                let _ = skyward_sys::kmsg(&format!("the panel did not take the double-tap command: {e:#}"));
-            }
-        }
-    }
+    // Double tap is not offered: this panel's controller answers no command
+    // that turns it on, so the switch would be one that does nothing.
     app.set_screen_corners(cfg.display.corner_radius as f32);
     // The settings kept from the starts before are back before the first
     // frame, and before file transfer starts with its switch and the time
@@ -2371,11 +2359,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // under way, and takes nothing more until it is done.
                     Effect::OpenData => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
-                        // Only the mounting is waited on: opening data reads
-                        // what the phone kept about the screen locks and mounts
-                        // the partition, and the secure services are not wanted
-                        // until a credential is tried.
-                        crate::wait_mounted();
+                        // Waited on whole: opening data needs the partitions
+                        // mounted and the phones's own programs up, and the
+                        // mounting alone was not enough.
+                        crate::wait_prepared();
                         decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
                     }
                     Effect::Unlock { user, code } => {
