@@ -78,11 +78,14 @@ jobs:
         env:
           DEVICE: ${{ inputs.device }}
         run: |
-          if [ -n "$DEVICE" ]; then
+          # Only the phone being worked on, unless another is named: a push no
+          # longer builds all twenty-odd devices.
+          if [ -z "$DEVICE" ]; then DEVICE=manet; fi
+          if [ "$DEVICE" = all ]; then
+            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+          else
             test -f "devices/$DEVICE.toml"
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
-          else
-            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
           fi
 
   recovery:
@@ -149,7 +152,7 @@ jobs:
 
   release:
     name: Publish the release
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || (github.ref == 'refs/heads/main' && needs.recovery.result == 'success')
     needs: [check, recovery]
     runs-on: ubuntu-24.04
     permissions:
@@ -175,12 +178,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('main-{0}', github.sha) }}
         run: |
           zips=()
-          for config in devices/*.toml; do
-            device=$(basename "$config" .toml)
-            model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["device"]["model"])' "$config")
-            zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip)
+          for zip in images/*.zip; do
+            device=$(printf '%s\n' "$zip" | sed -E 's#.*/skyward-[^-]+-##; s#-OS.*##')
+            model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open("devices/"+sys.argv[1]+".toml", "rb"))["device"]["model"])' "$device")
             zips+=("$zip#$model ($device)")
           done
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${zips[@]}" images/SHA256SUMS
+          if [ "${#zips[@]}" -eq 0 ]; then echo "no zips to publish"; exit 1; fi
+          gh release create "$TAG" --title "$TAG" --generate-notes "${zips[@]}" images/SHA256SUMS
