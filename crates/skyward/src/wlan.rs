@@ -34,6 +34,10 @@ const PARTITIONS: &str = "/skyward/wlan";
 /// recovery service's own folder.
 const HOME: &str = "/skyward/run/supplicant";
 
+/// Where the supplicant keeps the networks it has joined, on a partition that
+/// outlives the recovery run.
+const SAVED: &str = "/mnt/vendor/persist/skyward/wpa_supplicant.conf";
+
 /// The user the supplicant takes on as it starts, who has to be able to
 /// make its socket.
 const WIFI: u32 = 1010;
@@ -750,10 +754,34 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     fs::set_permissions(home, fs::Permissions::from_mode(0o755)).with_context(|| format!("open {} to the supplicant", home.display()))?;
     std::os::unix::fs::chown(&sockets, Some(WIFI), Some(WIFI)).with_context(|| format!("give {} to the supplicant", sockets.display()))?;
     fs::set_permissions(&sockets, fs::Permissions::from_mode(0o770)).with_context(|| format!("keep {} to the supplicant", sockets.display()))?;
-    let settings = home.join("wpa_supplicant.conf");
-    fs::write(&settings, format!("ctrl_interface={}\nupdate_config=0\np2p_disabled=1\npmf=1\nsae_pwe=2\n", sockets.display()))
-        .with_context(|| format!("write {}", settings.display()))?;
-    fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).with_context(|| format!("open {} to the supplicant", settings.display()))?;
+    // The settings live on the persist partition, which outlives a recovery
+    // run, so a network joined once is joined again next time without the
+    // password being asked for again. The sockets stay where they are: they
+    // are live endpoints, and nothing may keep one across a reboot.
+    let saved = Path::new(SAVED);
+    if let Some(dir) = saved.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+        // The supplicant runs as the wifi user and writes the file itself when
+        // update_config is on, so the folder has to be its own.
+        let _ = std::os::unix::fs::chown(dir, Some(WIFI), Some(WIFI));
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o750));
+    }
+    let mut text = String::from("ctrl_interface=");
+    text.push_str(&sockets.display().to_string());
+    text.push_str("\nupdate_config=1\np2p_disabled=1\npmf=1\nsae_pwe=2\n");
+    // What an earlier run joined stays in the file.
+    if let Ok(kept) = fs::read_to_string(saved) {
+        for line in kept.lines() {
+            if line.starts_with("network=") || line.starts_with("\t") || line.starts_with(" ") {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
+    let settings = saved;
+    fs::write(settings, text).with_context(|| format!("write {}", settings.display()))?;
+    let _ = std::os::unix::fs::chown(settings, Some(WIFI), Some(WIFI));
+    let _ = fs::set_permissions(settings, fs::Permissions::from_mode(0o600));
     let socket = sockets.join(&cfg.interface);
     // One an earlier run left would answer nothing.
     if socket.exists() {

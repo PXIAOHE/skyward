@@ -132,7 +132,16 @@ jobs:
           DEVICE: ${{ matrix.device }}
           STOCK: ${{ steps.stock.outputs.version }}
         run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
+          # The release a pushed branch makes is tagged v<semver>-<short sha>:
+          # Skyward reads a release's tag as "v" and then a version, and looks
+          # its own zip up by skyward-<tag>-<codename>-, so the same v must be
+          # on both. A real tag keeps its own name.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            semver=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+            version="v$semver-${GITHUB_SHA::7}"
+          fi
           name="skyward-$version-$DEVICE-$STOCK"
           mkdir out
           tools/skyward-pack recovery --stock stock/recovery.img --binary tools/skyward --system-init tools/system-init \
@@ -192,7 +201,12 @@ jobs:
           # pushed. A running build looks its own zip up by
           # skyward-<tag>-<codename>-, so the release tag has to carry that
           # same version.
-          if [ "$GITHUB_REF_TYPE" = tag ]; then TAG="$GITHUB_REF_NAME"; else TAG="${GITHUB_SHA::7}"; fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            semver=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+            TAG="v$semver-${GITHUB_SHA::7}"
+          fi
           zips=()
           for zip in images/*.zip; do
             device=$(printf '%s\n' "$zip" | sed -E 's#.*/skyward-[^-]+-##; s#-OS.*##')
