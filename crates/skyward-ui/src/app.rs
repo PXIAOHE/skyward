@@ -544,6 +544,8 @@ pub enum Slider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Vibrate,
+    /// Two taps on the dark panel light it.
+    DoubleTap,
     /// Offer internal storage to a computer over USB.
     FileTransfer,
     /// Compress a backup.
@@ -1589,6 +1591,10 @@ pub struct State {
     /// place in [`TIME_ZONES`].
     pub time_zone: usize,
     pub vibrate: bool,
+    /// Whether two taps on the dark panel light it.
+    pub double_tap: bool,
+    /// Whether this panel can tell taps while its backlight is off.
+    pub double_tap_supported: bool,
     /// How strongly the motor taps, from 0 at the slider's left end to 1
     /// at its right.
     pub vibration: f32,
@@ -1763,6 +1769,8 @@ impl Default for State {
             screen_off: 3,
             time_zone: 0,
             vibrate: true,
+            double_tap: true,
+            double_tap_supported: true,
             vibration: SLIDER_START,
             file_transfer: true,
             reboot: 0,
@@ -2611,8 +2619,6 @@ impl Tap {
 
 pub struct App {
     pub state: State,
-    /// Whether two taps on a dark panel light it.
-    pub double_tap: bool,
     /// The first tap of a possible double tap, and when it came.
     pub tapped: Option<(Tap, u64)>,
     /// The pages open, the one shown last: each with how far it is
@@ -2760,7 +2766,6 @@ impl App {
     pub fn new(start: Screen, w: u32, h: u32, px_per_dp: f32) -> Self {
         App {
             state: State::default(),
-            double_tap: true,
             tapped: None,
             stack: vec![(start, 0.0, Focus::Unset)],
             frame: None,
@@ -5194,6 +5199,7 @@ impl App {
             Action::Toggle(switch) => {
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
+                    Switch::DoubleTap => &mut self.state.double_tap,
                     Switch::FileTransfer => &mut self.state.file_transfer,
                     Switch::Compress => &mut self.state.compress,
                     Switch::Verify => &mut self.state.verify,
@@ -5992,7 +5998,7 @@ impl App {
         // together in time and place are that system's double tap, which does.
         if !self.display_on {
             if let Touch::Down(x, y) = ev {
-                if self.double_tap {
+                if self.state.double_tap && self.state.double_tap_supported {
                     let tap = Tap { x, y };
                     let doubled = self
                         .tapped

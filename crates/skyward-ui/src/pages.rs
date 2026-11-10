@@ -363,7 +363,17 @@ pub fn settings(cx: &Ctx) -> Frame {
     if let Some(r) = slider.below {
         out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
-    y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["振动", "震動", "Vibration"]));
+    // Two taps on the dark panel light it, where the panel can tell taps
+    // while its backlight is off.
+    let mut after_brightness = slider.bottom;
+    if s.double_tap_supported {
+        let wake = widgets::list(&mut c, t, f, after_brightness, &[
+            Row::new(l.pick(["双击亮屏", "點兩下喚醒螢幕", "Double-tap to wake"])).trail(Trail::Switch(s.double_tap)),
+        ]);
+        out.extend(hits(&wake.rows, &[Action::Toggle(Switch::DoubleTap)]));
+        after_brightness = wake.bottom;
+    }
+    y = widgets::section(&mut c, t, f, after_brightness, l.pick(["振动", "震動", "Vibration"]));
     let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
     let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, Some(below));
     out.push(Hit { rect: vibration.track, action: Action::Slider(Slider::Vibration) });

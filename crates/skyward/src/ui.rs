@@ -1108,7 +1108,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         | Work::SystemStopped => start,
     };
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
-    app.double_tap = cfg.touch.double_tap;
+    app.state.double_tap = cfg.touch.double_tap;
+    app.state.double_tap_supported = cfg.touch.double_tap;
     app.set_screen_corners(cfg.display.corner_radius as f32);
     // The settings kept from the starts before are back before the first
     // frame, and before file transfer starts with its switch and the time
