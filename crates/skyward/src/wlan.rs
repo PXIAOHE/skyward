@@ -779,30 +779,33 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
         let _ = std::os::unix::fs::chown(dir, Some(WIFI), Some(WIFI));
         let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o750));
     }
-    let mut text = String::from("ctrl_interface=");
-    text.push_str(&sockets.display().to_string());
-    text.push_str("\nupdate_config=1\np2p_disabled=1\npmf=1\nsae_pwe=2\n");
-    // What an earlier run joined stays in the file.
-    if let Ok(kept) = fs::read_to_string(saved) {
-        for line in kept.lines() {
-            // The braces matter as much as the lines inside them: a network
-            // block written without its closing brace is one the supplicant
-            // reads as syntax it cannot parse, and the network never joins.
-            let keeps = line.starts_with("network=")
-                || line.starts_with('\t')
-                || line.starts_with(' ')
-                || line.trim() == "}"
-                || line.trim().starts_with("}");
-            if keeps {
-                text.push_str(line);
-                text.push('\n');
+    // Written once, and then left to the supplicant: what it saves when a
+    // network is joined is the thing that joins it again, and rewriting the
+    // file each start would take that away.
+    let settings = saved;
+    if !settings.exists() {
+        let mut text = String::from("ctrl_interface=");
+        text.push_str(&sockets.display().to_string());
+        text.push_str("\nupdate_config=1\np2p_disabled=1\npmf=1\nsae_pwe=2\n");
+        fs::write(settings, text).with_context(|| format!("write {}", settings.display()))?;
+        let _ = std::os::unix::fs::chown(settings, Some(WIFI), Some(WIFI));
+        let _ = fs::set_permissions(settings, fs::Permissions::from_mode(0o600));
+    } else {
+        // One written by an earlier build may be missing its closing brace;
+        // the supplicant then reads none of the networks in it.
+        if let Ok(kept) = fs::read_to_string(settings) {
+            let opens = kept.matches('{').count();
+            let closes = kept.matches('}').count();
+            if opens > closes {
+                let mut fixed = kept.clone();
+                for _ in 0..(opens - closes) {
+                    fixed.push_str("}\n");
+                }
+                fs::write(settings, fixed).with_context(|| format!("write {}", settings.display()))?;
+                let _ = skyward_sys::kmsg(&format!("added {} closing braces to {}", opens - closes, settings.display()));
             }
         }
     }
-    let settings = saved;
-    fs::write(settings, text).with_context(|| format!("write {}", settings.display()))?;
-    let _ = std::os::unix::fs::chown(settings, Some(WIFI), Some(WIFI));
-    let _ = fs::set_permissions(settings, fs::Permissions::from_mode(0o600));
     let socket = sockets.join(&cfg.interface);
     // One an earlier run left would answer nothing.
     if socket.exists() {
