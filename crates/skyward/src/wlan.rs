@@ -676,17 +676,19 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
         for path in skyward_modules::load(modules, &cfg.modules)? {
             skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
         }
+    }
+    // These writes, cnss's fs_ready above all, are what let the driver bring
+    // the interface up: they have to come after the modules are in and before
+    // the interface is waited for, and they are harmless when it already is.
+    for w in &cfg.writes {
+        fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
+    }
+    if !net.exists() {
         let until = Instant::now() + INTERFACE_WAIT;
         while !net.exists() {
             ensure!(Instant::now() < until, "the driver made no {} in {} seconds", cfg.interface, INTERFACE_WAIT.as_secs());
             thread::sleep(Duration::from_millis(100));
         }
-    }
-    // The interface can be there while the driver is not ready yet; the writes
-    // (cnss fs_ready in particular) are what let it answer, so make them every
-    // time rather than only when the interface is still missing.
-    for w in &cfg.writes {
-        fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
     }
     // bring the interface up, retrying while the driver reports EBUSY
     let until = Instant::now() + INTERFACE_WAIT;
