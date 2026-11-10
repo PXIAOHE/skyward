@@ -101,7 +101,15 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
             Some(Build { sha256: sha256.to_lowercase(), name: a.name, url: a.url, link: a.browser_download_url, size: a.size })
         }
     };
-    Ok(Newest { version: version.to_string(), newer: newest > this, build })
+    // A release tagged with a pre-release suffix (0.2.1-abc1234) is older than
+    // the plain version by semver's own rule, so a build of 0.2.1 would never
+    // see one as newer. What a fork builds on every push is exactly that, so
+    // where the release is of the same version and only its build suffix
+    // differs, a different tag is one to move to. A release of another
+    // version is left to semver's own comparison.
+    let same_version = (newest.major, newest.minor, newest.patch) == (this.major, this.minor, this.patch);
+    let newer = newest > this || (same_version && version != running);
+    Ok(Newest { version: version.to_string(), newer, build })
 }
 
 /// Ask GitHub for Skyward's newest release, and its zip for the phone
