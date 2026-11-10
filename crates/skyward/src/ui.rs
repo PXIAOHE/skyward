@@ -1410,8 +1410,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut plugged: Option<Plugged> = None;
     let mut seen: Option<String> = None;
     let mut drive_at = Instant::now();
+    // The touch settings are written from the loop rather than by a service:
+    // a driver may undo them at sleep, and a write that only happens at start
+    // leaves the panel dead after the first screen off.
+    let mut touched_at = Instant::now();
     loop {
         let now = monotonic_ms();
+        if touched_at.elapsed().as_secs() >= 3 {
+            touched_at = Instant::now();
+            for w in &cfg.touch.writes {
+                if std::fs::write(&w.path, &w.value).is_ok() {
+                    let _ = skyward_sys::kmsg(&format!("wrote {} to {} again", w.value, w.path));
+                }
+            }
+        }
         if leave_at.is_some_and(|at| now >= at) {
             leave_at = None;
             power(leave)?;

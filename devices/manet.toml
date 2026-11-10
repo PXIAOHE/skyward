@@ -20,7 +20,13 @@ sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
 load = ["goodix_core", "xiaomi_touch", "stm_nfc_i2c", "nxp-nci"]
 
 [touch]
-writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
+writes = [
+    { path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" },
+    # The driver brings double tap up disabled in a recovery, and puts both
+    # back to their power-up state at sleep.
+    { path = "/sys/devices/platform/goodix_ts.0/double_tap_enable", value = "state:enabled\n" },
+    { path = "/sys/devices/platform/goodix_ts.0/aod_enable", value = "state:enabled\n" },
+]
 
 
 # Stage the shared libraries the key services ask for that the recovery's
@@ -33,15 +39,6 @@ writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
 path = "/system/bin/sh"
 args = ["-c", "mkdir -p /kmlibs && cp /mnt/system/system/lib64/libhardware.so /mnt/system/system/lib64/libvndksupport.so /mnt/system/system/lib64/libnetutils.so /mnt/system/system/lib64/bootstrap/libdl_android.so /kmlibs/ && printf '[recovery]\\nnamespace.default.isolated = false\\n' > /kmlibs/ld.config.txt && printf '#!/system/bin/sh\\nexport LD_CONFIG_FILE=/kmlibs/ld.config.txt\\nexec \"$@\"\\n' > /kmlibs/km.sh && chmod 755 /kmlibs/km.sh && V=$(ls -d /system_dlkm/lib/modules/*/kernel/net/rfkill 2>/dev/null | head -1) && mount --bind $V/rfkill.ko /system_dlkm/flatten/lib/modules/rfkill.ko || true"]
 oneshot = true
-user = "root"
-groups = ["root"]
-
-# The touch driver comes up with double tap disabled in a recovery, whatever
-# the system had. Write it on, and keep it written, the way the raw-report
-# setting is kept: the driver resets both at sleep.
-[[service]]
-path = "/system/bin/sh"
-args = ["-c", "while true; do for n in double_tap_enable aod_enable; do f=/sys/devices/platform/goodix_ts.0/$n; echo 'state:enabled' > $f 2>/dev/null; done; sleep 3; done"]
 user = "root"
 groups = ["root"]
 
