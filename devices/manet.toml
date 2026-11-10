@@ -147,6 +147,15 @@ oneshot = true
 user = "root"
 groups = ["root"]
 
+# The touch driver comes up with double tap disabled in a recovery, whatever
+# the system had. Write it on, and keep it written, the way the raw-report
+# setting is kept: the driver resets both at sleep.
+[[service]]
+path = "/system/bin/sh"
+args = ["-c", "while true; do for n in double_tap_enable aod_enable; do f=/sys/devices/platform/goodix_ts.0/$n; [ -w $f ] && printf 'state:enabled' > $f 2>/dev/null; done; sleep 3; done"]
+user = "root"
+groups = ["root"]
+
 [wlan]
 modules = ["rfkill", "qca_cld3_kiwi_v2"]
 writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]

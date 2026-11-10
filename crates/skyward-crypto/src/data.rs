@@ -213,7 +213,18 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
     let mut closed = Vec::new();
     let mut owner = Note::default();
     for user in open_users(service)? {
-        let protector = protectors(user)?.remove(0);
+        // One user's blobs may be behind a service that refuses slowly, as the
+        // weaver does on a phone whose secure element will not answer. The
+        // owner's files open first; a system user nobody signs in to must not
+        // hold everyone else up.
+        let protector = match protectors(user).map(|mut p| p.remove(0)) {
+            Ok(protector) => protector,
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!("user {user}'s blobs stayed unread: {e:#}"));
+                closed.push(Closed { user, lock: -1, made_up: false, why: Some(format!("{e:#}")) });
+                continue;
+            }
+        };
         match protector.lock {
             None => {
                 let note = open_user_files(service, user, None, None)?;
