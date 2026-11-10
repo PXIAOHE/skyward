@@ -11,7 +11,6 @@ pub mod control;
 pub mod cpu;
 #[cfg(target_os = "android")]
 pub mod sleep;
-pub mod touch;
 #[cfg(target_os = "android")]
 pub mod uevent;
 pub mod ueventd;

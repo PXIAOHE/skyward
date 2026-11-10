@@ -346,20 +346,6 @@ impl Station {
 
     fn start(&self) -> Result<Running> {
         bring_up(&self.cfg, &self.modules)?;
-        // Some older wlan drivers finish bringing the interface up a moment
-        // after the call returns; a supplicant started into that window finds
-        // no nl80211 interface and silently never scans.
-        let link = Path::new("/sys/class/net").join(&self.cfg.interface).join("operstate");
-        let until = Instant::now() + Duration::from_secs(3);
-        while let Ok(state) = fs::read_to_string(&link) {
-            if state.trim() == "up" || state.trim() == "unknown" {
-                break;
-            }
-            if Instant::now() >= until {
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
         let mut child = start_supplicant(&self.cfg, self.libraries.as_deref())?;
         let socket = Path::new(HOME).join("sockets").join(&self.cfg.interface);
         let connected = (|| -> Result<(Control, Control)> {
@@ -800,40 +786,14 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     if !settings.exists() {
         let mut text = String::from("ctrl_interface=");
         text.push_str(&sockets.display().to_string());
-        // The country code is what sets the regulatory domain: a Qualcomm wlan
-        // driver that is never told one holds 5 GHz back and can refuse to
-        // associate on 2.4 GHz too, however right the networks in this file
-        // are.
-        text.push_str("\nupdate_config=1\ncountry=CN\np2p_disabled=1\npmf=1\nsae_pwe=2\n");
+        text.push_str("\nupdate_config=1\np2p_disabled=1\npmf=1\nsae_pwe=2\n");
         fs::write(settings, text).with_context(|| format!("write {}", settings.display()))?;
         let _ = std::os::unix::fs::chown(settings, Some(WIFI), Some(WIFI));
         let _ = fs::set_permissions(settings, fs::Permissions::from_mode(0o600));
     } else {
-        // One written by an earlier build may be missing its closing brace,
-        // or the country code: the supplicant writes the file back itself and
-        // does not keep what it was not told to.
+        // One written by an earlier build may be missing its closing brace;
+        // the supplicant then reads none of the networks in it.
         if let Ok(kept) = fs::read_to_string(settings) {
-            let mut patched = kept.clone();
-            let mut changed = false;
-            if !kept.contains("country=") {
-                let mut with_country = String::new();
-                for line in kept.lines() {
-                    with_country.push_str(line);
-                    with_country.push('\n');
-                    if line.starts_with("update_config=") {
-                        with_country.push_str("country=CN\n");
-                        changed = true;
-                    }
-                }
-                if changed {
-                    patched = with_country;
-                }
-            }
-            if changed {
-                fs::write(settings, &patched).with_context(|| format!("write {}", settings.display()))?;
-                let _ = skyward_sys::kmsg("added country=CN to the supplicant settings");
-            }
-            let kept = patched;
             let opens = kept.matches('{').count();
             let closes = kept.matches('}').count();
             if opens > closes {
@@ -855,15 +815,9 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     if let Some(dir) = libraries {
         path.push(dir.to_string_lossy().into_owned());
     }
-    // A log of its own: what it does about the networks in the settings is
-    // otherwise lost with its error stream.
-    let log = Path::new("/tmp/skyward-supplicant.log");
-    let _ = fs::remove_file(log);
     let mut child = Process::new(&cfg.supplicant)
         .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
         .arg(settings)
-        .arg("-f")
-        .arg(log)
         .env("LD_LIBRARY_PATH", path.join(":"))
         .current_dir("/")
         .stdin(Stdio::null())

@@ -3156,8 +3156,7 @@ impl App {
 
     /// Light the panel, as if just touched: the content comes up from as
     /// dark as it is.
-    /// Light the panel, as the phone's own system does when something wakes it.
-    pub fn wake(&mut self, now: u64) {
+    fn wake(&mut self, now: u64) {
         if !self.display_on {
             self.display_on = true;
             self.dirty = true;

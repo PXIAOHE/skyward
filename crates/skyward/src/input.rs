@@ -25,8 +25,10 @@ use std::time::Duration;
 /// Once a second, as the phone's own recovery does: a panel that comes back
 /// is usable at once rather than after a wait, and the write is a few bytes
 /// to a node the driver already holds in memory.
-/// How often what the touchscreen was told is told to it again, as upstream
-/// has it. A panel back from sleep answers touches again within this long.
+/// How often what the touchscreen was told is told to it again. Some drivers
+/// (Goodix's) send the controller a command on every write, so this is not
+/// every second as upstream has it: often enough to undo a reset the driver
+/// makes at sleep, seldom enough not to interrupt the reports under a finger.
 const TOUCH_REFRESH: Duration = Duration::from_secs(1);
 
 pub enum Event {

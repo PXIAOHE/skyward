@@ -1110,8 +1110,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
     app.state.double_tap = cfg.touch.double_tap;
     app.state.double_tap_supported = cfg.touch.double_tap;
-    // Double tap is not offered: this panel's controller answers no command
-    // that turns it on, so the switch would be one that does nothing.
     app.set_screen_corners(cfg.display.corner_radius as f32);
     // The settings kept from the starts before are back before the first
     // frame, and before file transfer starts with its switch and the time
@@ -1637,14 +1635,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         let now = monotonic_ms();
         for slept in sleeper.slept() {
             match slept {
-                Slept::Woke => {
-                    // Something woke the phone, and its screen has to follow:
-                    // a recovery runs none of the framework that lights the
-                    // panel on the phone's own system, so a wake that only
-                    // reached the kernel would leave it dark.
-                    skyward_sys::kmsg("the phone slept and woke")?;
-                    app.wake(now);
-                }
+                Slept::Woke => skyward_sys::kmsg("the phone slept and woke")?,
                 Slept::Refused(why) => skyward_sys::kmsg(&format!("the phone did not sleep: {why}"))?,
             }
         }
@@ -2359,9 +2350,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // under way, and takes nothing more until it is done.
                     Effect::OpenData => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
-                        // Waited on whole: opening data needs the partitions
-                        // mounted and the phones's own programs up, and the
-                        // mounting alone was not enough.
+                        // The devices and the secure services come up on a
+                        // thread of their own, so the page is drawn before
+                        // they are; opening data is the first thing that
+                        // cannot do without them.
                         crate::wait_prepared();
                         decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
                     }

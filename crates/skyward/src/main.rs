@@ -215,7 +215,6 @@ fn main() -> Result<()> {
     // init starts the recovery service by path with no arguments.
     let started_as = std::env::args_os().next().unwrap_or_default();
     let name = Path::new(&started_as).file_name().unwrap_or_default();
-    #[cfg(target_os = "android")]
     if name == "recovery" {
         return recovery();
     }
@@ -236,10 +235,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        #[cfg(target_os = "android")]
         Cmd::Recovery => recovery(),
-        #[cfg(not(target_os = "android"))]
-        Cmd::Recovery => anyhow::bail!("the recovery service runs only on Android"),
         Cmd::Reboot { target } => {
             let p = Power::parse(&target).ok_or_else(|| anyhow!("unknown target {target:?}"))?;
             skyward_sys::power(p)
@@ -685,7 +681,6 @@ fn adopt_installed_version(props: &std::collections::HashMap<String, String>) ->
 /// goes on stays in misc until the work is done; any other is cleared at
 /// once, so that any reboot from here boots the system. Failures go to the
 /// kernel log and still end the process, which init then starts again.
-#[cfg(target_os = "android")]
 fn recovery() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let run = || -> Result<()> {
@@ -806,7 +801,6 @@ fn prepared_gate() -> &'static (std::sync::Mutex<bool>, std::sync::Condvar) {
     PREPARED.get_or_init(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()))
 }
 
-
 /// Mark the devices, modules and services as ready, and let whoever waits go.
 fn mark_prepared() {
     let (lock, cv) = prepared_gate();
@@ -836,7 +830,6 @@ pub(crate) fn wait_prepared() {
     }
 }
 
-#[cfg(target_os = "android")]
 fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     match skyward_vab::mount_partitions(slot) {
         Ok(mounts) => {
