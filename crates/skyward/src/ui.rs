@@ -1381,7 +1381,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
                 None
             });
-            Some(wlan::Worker::start(w.clone(), modules, libraries, servers.clone())?)
+            let worker = wlan::Worker::start(w.clone(), modules, libraries, servers.clone())?;
+            // The WLAN comes up by itself: a recovery joined to nothing is one
+            // whose update pages cannot ask anything, and one a network joined
+            // before is asked to rejoin without a tap. Turning it off still
+            // works, and stays off until the next start.
+            worker.send(wlan::Command::On);
+            Some(worker)
         }
         None => None,
     };
