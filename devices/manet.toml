@@ -22,15 +22,6 @@ load = ["goodix_core", "xiaomi_touch", "stm_nfc_i2c", "nxp-nci"]
 [touch]
 writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
 
-# The Goodix driver resets its own idea of the tap protocol whenever the panel
-# sleeps and wakes, so the value above holds only until the first screen off.
-# Keep it written: one line, every two seconds, harmless when it is already
-# what the file says.
-[[service]]
-path = "/system/bin/sh"
-args = ["-c", "while true; do printf 0 > /sys/class/touch/touch_dev/enable_touch_raw 2>/dev/null; sleep 2; done"]
-user = "root"
-groups = ["root"]
 
 # Stage the shared libraries the key services ask for that the recovery's
 # own library folder does not carry, out of the installed system's, and lay
