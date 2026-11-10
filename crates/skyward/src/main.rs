@@ -806,40 +806,6 @@ fn prepared_gate() -> &'static (std::sync::Mutex<bool>, std::sync::Condvar) {
     PREPARED.get_or_init(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()))
 }
 
-/// Whether super is mounted and the data partition is among it. The pages can
-/// be drawn long before this, and opening data cannot.
-static MOUNTED: std::sync::OnceLock<(std::sync::Mutex<bool>, std::sync::Condvar)> = std::sync::OnceLock::new();
-
-fn mounted_gate() -> &'static (std::sync::Mutex<bool>, std::sync::Condvar) {
-    MOUNTED.get_or_init(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()))
-}
-
-fn mark_mounted() {
-    let (lock, cv) = mounted_gate();
-    if let Ok(mut done) = lock.lock() {
-        *done = true;
-        cv.notify_all();
-    }
-}
-
-/// Wait until super is mounted, half a minute at the most.
-pub(crate) fn wait_mounted() {
-    let (lock, cv) = mounted_gate();
-    if let Ok(mut done) = lock.lock() {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !*done {
-            let left = until.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                let _ = skyward_sys::kmsg("super took longer than 30 seconds to mount");
-                return;
-            }
-            match cv.wait_timeout(done, left) {
-                Ok((guard, _)) => done = guard,
-                Err(_) => return,
-            }
-        }
-    }
-}
 
 /// Mark the devices, modules and services as ready, and let whoever waits go.
 fn mark_prepared() {
@@ -872,10 +838,6 @@ pub(crate) fn wait_prepared() {
 
 #[cfg(target_os = "android")]
 fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
-    // Two halves, and a page waits for the one it needs: opening data needs
-    // super mounted, and trying a credential needs the secure services after
-    // that. Mounting takes a moment; bringing the services up takes the
-    // secure element's own time, which is where the long wait came from.
     match skyward_vab::mount_partitions(slot) {
         Ok(mounts) => {
             for d in &mounts.damaged {
@@ -884,19 +846,13 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
             for m in &mounts.partitions {
                 skyward_sys::kmsg(&format!("mounted {} on {} ({})", m.partition, m.mount_point.display(), m.filesystem))?;
             }
-            mark_mounted();
             // Without them the screen still shows and the keys still work,
             // so this reason goes to the kernel log as well.
             if let Err(e) = bring_up(cfg, slot) {
                 skyward_sys::kmsg(&format!("devices not brought up: {e:#}"))?;
             }
         }
-        Err(e) => {
-            skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?;
-            // Said as mounted anyway: a page that waits would otherwise hang
-            // for half a minute over a fault it cannot do anything about.
-            mark_mounted();
-        }
+        Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
     }
     Ok(())
 }
