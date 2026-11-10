@@ -23,6 +23,11 @@ use std::time::{Duration, Instant};
 /// The most often how far a download has come is told.
 const PROGRESS_EVERY: Duration = Duration::from_millis(200);
 
+/// Below this many bytes a second, and past the first megabyte, a source is
+/// taken to be the throttled one rather than the file's own size, and the
+/// next is asked for it: the part already written is where it carries on.
+const TOO_SLOW: u64 = 400 * 1024;
+
 /// How long the speed shown is taken over.
 const RATE_OVER: Duration = Duration::from_secs(3);
 
@@ -286,6 +291,7 @@ fn fetch(
         let mut came = None::<u64>;
         let mut gained = false;
         let mut last = None;
+        let slow = AtomicBool::new(false);
         let mut progress = |p: Progress| {
             if let Progress::Downloading { done, .. } = p {
                 let now = Instant::now();
@@ -304,9 +310,18 @@ fn fetch(
                 told = Instant::now();
                 tell(Event::Progress(p, rate));
             }
+            // Past a megabyte, a source that is still this slow is worth
+            // leaving for the next one.
+            if rate > 0 && rate < TOO_SLOW {
+                if let Progress::Downloading { done, .. } = p {
+                    if done > 1 << 20 {
+                        slow.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
             last = Some((p, rate));
         };
-        let result = download::fetch(&a, &urls[url], path, sum, stop, &mut progress);
+        let result = download::fetch(&a, &urls[url], path, sum, stop, &slow, &mut progress);
         // How far it came shows in the end, whatever stopped it.
         if let Some((p, rate)) = last {
             tell(Event::Progress(p, rate));
@@ -323,6 +338,12 @@ fn fetch(
         }
         if e.is::<Damaged>() {
             return End::Failed(Failure::Damaged);
+        }
+        if e.is::<skyward_net::download::Slow>() {
+            let _ = skyward_sys::kmsg(&format!("downloading {name} from {}: too slow, asking the next", host(&urls[url])));
+            url = (url + 1) % urls.len();
+            failed = 0;
+            continue;
         }
         let _ = skyward_sys::kmsg(&format!("downloading {name} from {}: {e:#}", host(&urls[url])));
         if e.is::<Refused>() {

@@ -128,15 +128,15 @@ fn hex(digest: &[u8]) -> String {
 /// left, and give it its name once it has the digest `sum`. A part as long
 /// as the package is only checked; a server that will not send from the
 /// middle sends it all again.
-pub fn fetch(agent: &ureq::Agent, url: &str, path: &Path, sum: &Sum, stop: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
+pub fn fetch(agent: &ureq::Agent, url: &str, path: &Path, sum: &Sum, stop: &AtomicBool, slow: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
     match sum {
-        Sum::Md5(hex) => fetch_as::<Md5>(agent, url, path, hex, stop, progress),
-        Sum::Sha256(hex) => fetch_as::<Sha256>(agent, url, path, hex, stop, progress),
+        Sum::Md5(hex) => fetch_as::<Md5>(agent, url, path, hex, stop, slow, progress),
+        Sum::Sha256(hex) => fetch_as::<Sha256>(agent, url, path, hex, stop, slow, progress),
     }
 }
 
 /// [`fetch`], with the digest by `D` in hex.
-fn fetch_as<D: Digest>(agent: &ureq::Agent, url: &str, path: &Path, sum: &str, stop: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
+fn fetch_as<D: Digest>(agent: &ureq::Agent, url: &str, path: &Path, sum: &str, stop: &AtomicBool, slow: &AtomicBool, progress: &mut dyn FnMut(Progress)) -> Result<()> {
     let part = partial(path);
     let dir = path.parent().context("a package's path is in a folder")?;
     fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
@@ -182,6 +182,9 @@ fn fetch_as<D: Digest>(agent: &ureq::Agent, url: &str, path: &Path, sum: &str, s
             if stop.load(Ordering::Relaxed) {
                 bail!(crate::Stopped);
             }
+            if slow.load(Ordering::Relaxed) {
+                bail!(Slow);
+            }
             let n = body.read(&mut buf).context("download the package")?;
             if n == 0 {
                 bail!("the server stopped sending at {done} of {total} bytes");
@@ -201,6 +204,19 @@ fn fetch_as<D: Digest>(agent: &ureq::Agent, url: &str, path: &Path, sum: &str, s
     }
     fs::rename(&part, path).with_context(|| format!("name {} {}", part.display(), path.display()))
 }
+
+/// A download given up on because it was going too slowly: the next source
+/// is asked for it instead, carrying on from what this one left.
+#[derive(Debug)]
+pub struct Slow;
+
+impl std::fmt::Display for Slow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the source was sending too slowly")
+    }
+}
+
+impl std::error::Error for Slow {}
 
 /// The length a response says its body has.
 pub(crate) fn content_length(headers: &ureq::http::HeaderMap) -> Option<u64> {
