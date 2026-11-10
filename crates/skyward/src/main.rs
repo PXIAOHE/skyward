@@ -792,7 +792,6 @@ fn recovery() -> Result<()> {
 /// Map and mount the slot's partitions from super, then bring up what runs
 /// from them. Recovery has to stay usable when super cannot be mounted, as
 /// after it is wiped, so the reason goes to the kernel log instead.
-#[cfg(target_os = "android")]
 /// Whether the devices, modules and services the recovery needs are up. The
 /// first frame does not wait for them: they come up on a thread of their own,
 /// and a page that needs them (opening data, above all) waits here instead.

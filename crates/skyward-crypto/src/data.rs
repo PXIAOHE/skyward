@@ -220,7 +220,7 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
         let protector = match protectors(user).map(|mut p| p.remove(0)) {
             Ok(protector) => protector,
             Err(e) => {
-                let _ = skyward_sys::kmsg(&format!("user {user}'s blobs stayed unread: {e:#}"));
+                eprintln!("user {user}'s blobs stayed unread: {e:#}");
                 closed.push(Closed { user, lock: -1, made_up: false, why: Some(format!("{e:#}")) });
                 continue;
             }
