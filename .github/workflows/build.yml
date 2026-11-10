@@ -155,7 +155,7 @@ jobs:
     # The lint job asserts against upstream's expectations, which this branch
     # departs from; only the images matter here, so a failed lint must not keep
     # the release back.
-    if: always() && (github.ref_type == 'tag' || github.ref == 'refs/heads/main') && needs.recovery.result == 'success
+    if: "always() && (github.ref_type == 'tag' || github.ref == 'refs/heads/main') && needs.recovery.result == 'success'"
     needs: [check, recovery]
     runs-on: ubuntu-24.04
     permissions:
