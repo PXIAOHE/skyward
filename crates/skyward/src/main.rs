@@ -754,8 +754,23 @@ fn recovery() -> Result<()> {
             // partitions the system asks for, as in Android's own recovery:
             // erasing them, which may take super with them, and undoing
             // shared blocks, which writes to the slot's own.
+            // The pages come up before the phone's devices do: mounting super,
+            // loading the modules and starting the secure services takes
+            // seconds, and none of it is needed to draw the first frame. Work
+            // that needs none of it says so and carries on at once.
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
-                prepare(&cfg, booted_slot()?)?;
+                let cfg = cfg.clone();
+                std::thread::Builder::new().name("prepare".into()).spawn(move || {
+                    let done = booted_slot()
+                        .map_err(|e| anyhow::anyhow!("{e:#}"))
+                        .and_then(|slot| prepare(&cfg, slot));
+                    if let Err(e) = done {
+                        let _ = skyward_sys::kmsg(&format!("devices not brought up: {e:#}"));
+                    }
+                    mark_prepared();
+                })?;
+            } else {
+                mark_prepared();
             }
             let root = Path::new("/");
             ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
@@ -774,6 +789,44 @@ fn recovery() -> Result<()> {
 /// from them. Recovery has to stay usable when super cannot be mounted, as
 /// after it is wiped, so the reason goes to the kernel log instead.
 #[cfg(target_os = "android")]
+/// Whether the devices, modules and services the recovery needs are up. The
+/// first frame does not wait for them: they come up on a thread of their own,
+/// and a page that needs them (opening data, above all) waits here instead.
+static PREPARED: std::sync::OnceLock<(std::sync::Mutex<bool>, std::sync::Condvar)> = std::sync::OnceLock::new();
+
+fn prepared_gate() -> &'static (std::sync::Mutex<bool>, std::sync::Condvar) {
+    PREPARED.get_or_init(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()))
+}
+
+/// Mark the devices, modules and services as ready, and let whoever waits go.
+fn mark_prepared() {
+    let (lock, cv) = prepared_gate();
+    if let Ok(mut done) = lock.lock() {
+        *done = true;
+        cv.notify_all();
+    }
+}
+
+/// Wait until they are ready, half a minute at the most. A page that waits
+/// longer than that says so rather than hanging forever.
+pub(crate) fn wait_prepared() {
+    let (lock, cv) = prepared_gate();
+    if let Ok(mut done) = lock.lock() {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !*done {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                let _ = skyward_sys::kmsg("the phone's devices took longer than 30 seconds to come up");
+                return;
+            }
+            match cv.wait_timeout(done, left) {
+                Ok((guard, _)) => done = guard,
+                Err(_) => return,
+            }
+        }
+    }
+}
+
 fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     match skyward_vab::mount_partitions(slot) {
         Ok(mounts) => {
