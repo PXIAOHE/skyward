@@ -1649,7 +1649,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         let now = monotonic_ms();
         for slept in sleeper.slept() {
             match slept {
-                Slept::Woke => skyward_sys::kmsg("the phone slept and woke")?,
+                Slept::Woke => {
+                    // Something woke the phone, and its screen has to follow:
+                    // a recovery runs none of the framework that lights the
+                    // panel on the phone's own system, so a wake that only
+                    // reached the kernel would leave it dark.
+                    skyward_sys::kmsg("the phone slept and woke")?;
+                    app.wake(now);
+                }
                 Slept::Refused(why) => skyward_sys::kmsg(&format!("the phone did not sleep: {why}"))?,
             }
         }
