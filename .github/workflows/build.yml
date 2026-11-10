@@ -209,7 +209,10 @@ jobs:
           fi
           zips=()
           for zip in images/*.zip; do
-            device=$(printf '%s\n' "$zip" | sed -E 's#.*/skyward-[^-]+-##; s#-OS.*##')
+            # skyward-<version>-<codename>-<stock>.zip, where the version may
+            # itself hold dashes (v0.2.0-24c8945): the codename is the segment
+            # just before the stock build, which always starts with OS.
+            device=$(printf '%s\n' "$zip" | sed -E 's#^.*/skyward-.*-([A-Za-z0-9_]+)-OS[0-9].*\.zip$#\1#')
             model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open("devices/"+sys.argv[1]+".toml", "rb"))["device"]["model"])' "$device")
             zips+=("$zip#$model ($device)")
           done

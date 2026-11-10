@@ -793,7 +793,7 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     }
     let mut child = Process::new(&cfg.supplicant)
         .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
-        .arg(&settings)
+        .arg(settings)
         .env("LD_LIBRARY_PATH", path.join(":"))
         .current_dir("/")
         .stdin(Stdio::null())
