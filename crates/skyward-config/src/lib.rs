@@ -358,7 +358,7 @@ pub struct Touch {
     /// system's double tap does. The panel has to keep reporting taps while
     /// its backlight is off; a controller that stops reporting them at sleep
     /// answers nothing, and the flag costs only the check.
-    #[serde(default = "yes")]
+    #[serde(default)]
     pub double_tap: bool,
 }
 
