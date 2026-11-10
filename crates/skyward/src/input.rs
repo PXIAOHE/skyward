@@ -258,6 +258,16 @@ impl Inputs {
             loop {
                 thread::sleep(TOUCH_REFRESH);
                 for w in &writes {
+                    // Only write when the driver has put the value back to
+                    // something else. Some drivers (Goodix's) send the
+                    // controller a command on every write, and a write every
+                    // second would have it switching modes under the finger,
+                    // which the reports then fail to match.
+                    if let Ok(now) = fs::read_to_string(&w.path) {
+                        if now.trim() == w.value.trim() {
+                            continue;
+                        }
+                    }
                     if fs::write(&w.path, &w.value).is_err() {
                         continue;
                     }

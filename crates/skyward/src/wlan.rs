@@ -451,7 +451,20 @@ impl Station {
         let Some(j) = &mut self.state.joined else { return };
         match j.on(told) {
             Next::Show => {}
-            Next::Address => self.ask_address(),
+            Next::Address => {
+                // The network is joined: write it into the settings file, so
+                // that the next run joins it again without the password being
+                // asked for. update_config in that file only permits this; the
+                // supplicant does it when told to.
+                if let Some(r) = &self.running {
+                    if let Err(e) = r.control.order("SAVE_CONFIG") {
+                        let _ = skyward_sys::kmsg(&format!("keeping the network failed: {e:#}"));
+                    } else {
+                        let _ = skyward_sys::kmsg(&format!("kept the network {}", j.name));
+                    }
+                }
+                self.ask_address()
+            }
             Next::Unaddress => self.unaddress(),
             Next::Forget => {
                 if let Some(r) = &self.running {
