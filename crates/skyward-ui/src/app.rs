@@ -4744,6 +4744,13 @@ impl App {
         self.dirty = true;
     }
 
+    /// Open `screen` over the page shown, which the recovery does when the
+    /// page it opened on has done its work, as the unlock page does once data
+    /// is open.
+    pub fn go(&mut self, screen: Screen) {
+        self.open(screen);
+    }
+
     /// Open `screen` over the page shown, sliding in over it.
     fn open(&mut self, screen: Screen) {
         self.leave(false);

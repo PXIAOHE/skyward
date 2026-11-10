@@ -2073,6 +2073,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     closed = opening.closed;
                     show_closed(&mut app, &closed)?;
+                    // The page the recovery opens on is the unlock page; with
+                    // data open, there is nothing left to do there.
+                    if matches!(app.screen(), Screen::Decrypt) {
+                        app.go(Screen::Home);
+                    }
                 }
                 decrypt::Ended::Opened(Err(why)) => {
                     skyward_sys::kmsg(&format!("the data partition stays closed: {why}"))?;

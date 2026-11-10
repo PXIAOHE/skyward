@@ -773,7 +773,11 @@ fn recovery() -> Result<()> {
                 mark_prepared();
             }
             let root = Path::new("/");
-            ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
+            // The unlock page comes first: a recovery that opens on the home
+            // page leaves the user to find the decrypt page themselves, and
+            // most of what they come for needs data open. Opening it lands on
+            // the home page.
+            ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Decrypt, None)
         }
         #[cfg(not(target_os = "android"))]
         {
