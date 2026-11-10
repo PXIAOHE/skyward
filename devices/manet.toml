@@ -20,6 +20,9 @@ sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
 load = ["goodix_core", "xiaomi_touch", "stm_nfc_i2c", "nxp-nci"]
 
 [touch]
+# Experimental: the Xiaomi touch v2 command miro's driver answers. A Goodix
+# panel may not take it; the kernel log says which way it went.
+xiaomi_v2_gesture = true
 writes = [
     { path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" },
     # The driver brings double tap up disabled in a recovery, and puts both

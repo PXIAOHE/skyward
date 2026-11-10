@@ -1110,6 +1110,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
     app.state.double_tap = cfg.touch.double_tap;
     app.state.double_tap_supported = cfg.touch.double_tap;
+    // Ask the touch driver to have the controller recognise a double tap by
+    // itself, where the configuration says its command is known to work. A
+    // panel that does not take it answers with the wrong values on the
+    // readback, and this says so in the kernel log rather than failing quietly.
+    if cfg.touch.xiaomi_v2_gesture {
+        match skyward_sys::touch::xiaomi_v2_double_tap(true) {
+            Ok(()) => {
+                let _ = skyward_sys::kmsg("the panel takes the double-tap command; it lights on its own");
+            }
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!("the panel did not take the double-tap command: {e:#}"));
+            }
+        }
+    }
     app.set_screen_corners(cfg.display.corner_radius as f32);
     // The settings kept from the starts before are back before the first
     // frame, and before file transfer starts with its switch and the time

@@ -360,6 +360,11 @@ pub struct Touch {
     /// answers nothing, and the flag costs only the check.
     #[serde(default = "yes")]
     pub double_tap: bool,
+    /// Ask the phone's own touch driver to have the controller recognise a
+    /// double tap itself, through the Xiaomi touch v2 command miro's driver
+    /// answers. A Goodix panel may not take the command; the readback decides.
+    #[serde(default)]
+    pub xiaomi_v2_gesture: bool,
 }
 
 fn yes() -> bool {
