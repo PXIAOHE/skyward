@@ -785,7 +785,15 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     // What an earlier run joined stays in the file.
     if let Ok(kept) = fs::read_to_string(saved) {
         for line in kept.lines() {
-            if line.starts_with("network=") || line.starts_with("\t") || line.starts_with(" ") {
+            // The braces matter as much as the lines inside them: a network
+            // block written without its closing brace is one the supplicant
+            // reads as syntax it cannot parse, and the network never joins.
+            let keeps = line.starts_with("network=")
+                || line.starts_with('\t')
+                || line.starts_with(' ')
+                || line.trim() == "}"
+                || line.trim().starts_with("}");
+            if keeps {
                 text.push_str(line);
                 text.push('\n');
             }
