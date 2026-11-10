@@ -238,6 +238,8 @@ fn main() -> Result<()> {
         }
         #[cfg(target_os = "android")]
         Cmd::Recovery => recovery(),
+        #[cfg(not(target_os = "android"))]
+        Cmd::Recovery => anyhow::bail!("the recovery service runs only on Android"),
         Cmd::Reboot { target } => {
             let p = Power::parse(&target).ok_or_else(|| anyhow!("unknown target {target:?}"))?;
             skyward_sys::power(p)
