@@ -354,6 +354,16 @@ pub struct Touch {
     /// step of starting the controller.
     #[serde(default)]
     pub writes: Vec<Write>,
+    /// Whether two taps on the dark panel light it, as the phone's own
+    /// system's double tap does. The panel has to keep reporting taps while
+    /// its backlight is off; a controller that stops reporting them at sleep
+    /// answers nothing, and the flag costs only the check.
+    #[serde(default = "yes")]
+    pub double_tap: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Partitions as the phone itself mounts them.

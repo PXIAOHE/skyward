@@ -2587,8 +2587,34 @@ fn keyboard_strip(t: &Theme, frame: &Frame) -> (Canvas, i32) {
     (strip, top)
 }
 
+/// One tap on the dark panel, and where it landed.
+#[derive(Clone, Copy, Debug)]
+pub struct Tap {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Tap {
+    /// How long after a tap another may come and still be the second of a
+    /// double tap: Android's own window.
+    pub const WINDOW_MS: u64 = 300;
+    /// How far apart two taps of one double tap may land. The phone's own
+    /// system uses a share of the screen's width; a fixed distance serves
+    /// the same at this panel's size and keeps the check off the page width.
+    pub const SLOP: f32 = 120.0;
+    /// Whether `other` lands near enough to be the second tap of one double
+    /// tap started by this.
+    pub fn doubles(&self, other: &Tap) -> bool {
+        (other.x - self.x).abs() <= Self::SLOP && (other.y - self.y).abs() <= Self::SLOP
+    }
+}
+
 pub struct App {
     pub state: State,
+    /// Whether two taps on a dark panel light it.
+    pub double_tap: bool,
+    /// The first tap of a possible double tap, and when it came.
+    pub tapped: Option<(Tap, u64)>,
     /// The pages open, the one shown last: each with how far it is
     /// scrolled and where the keys are on it.
     stack: Vec<(Screen, f32, Focus)>,
@@ -2734,6 +2760,8 @@ impl App {
     pub fn new(start: Screen, w: u32, h: u32, px_per_dp: f32) -> Self {
         App {
             state: State::default(),
+            double_tap: true,
+            tapped: None,
             stack: vec![(start, 0.0, Focus::Unset)],
             frame: None,
             spots: None,
@@ -5960,8 +5988,23 @@ impl App {
 
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
         // A finger on the dark panel lights nothing, as on the phone's own
-        // system, where the power key lights it.
+        // system, where the power key lights it -- except that two taps close
+        // together in time and place are that system's double tap, which does.
         if !self.display_on {
+            if let Touch::Down(x, y) = ev {
+                if self.double_tap {
+                    let tap = Tap { x, y };
+                    let doubled = self
+                        .tapped
+                        .filter(|(first, at)| now.saturating_sub(*at) <= Tap::WINDOW_MS && first.doubles(&tap));
+                    if doubled.is_some() {
+                        self.tapped = None;
+                        self.wake(now);
+                        return Vec::new();
+                    }
+                    self.tapped = Some((tap, now));
+                }
+            }
             return Vec::new();
         }
         // A finger on the charging screen sends it away for the page, and
