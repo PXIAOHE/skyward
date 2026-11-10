@@ -43,16 +43,17 @@ impl Build {
     /// link on github.com, which some networks do not reach.
     pub fn sources(&self, located: Option<String>) -> Vec<String> {
         // The API's own address first: it is the one GitHub hands out for the
-        // file, on the CDN that usually answers fastest. Then the release's
-        // link on github.com itself, which some networks do not reach. Then
-        // the same link behind gh-proxy.com, which measured the same as
-        // github.com here and keeps a download going where the main site
-        // stalls; it is last so a working main site is never sent through it.
-        let mirror = |u: &str| format!("https://gh-proxy.com/{u}");
+        // file, on the CDN that usually answers fastest. Then the mirrors,
+        // measured on this network in the order they answer fastest, and the
+        // main site last: it is the one GitHub throttles and this network
+        // sometimes cannot reach at all. A source that fails gives way to the
+        // next, and one that is merely slow is only as slow as it measures.
+        let g = |host: &str| format!("https://{host}/{}", self.link);
         located
             .into_iter()
+            .chain([g("ghfast.top")])
+            .chain([g("gh-proxy.com")])
             .chain([self.link.clone()])
-            .chain([mirror(&self.link)])
             .collect()
     }
 }
@@ -184,12 +185,14 @@ mod tests {
     fn a_zip_is_downloaded_from_where_github_sends_it_then_from_its_link() {
         let build = newest(ANSWERED_013, "ishtar", "0.1.2").unwrap().build.unwrap();
         let link = "https://github.com/kirklin/skyward/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.zip";
-        let mirror = "https://gh-proxy.com/https://github.com/kirklin/skyward/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.zip";
+        let base = "https://github.com/kirklin/skyward/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.zip";
+        let ghfast = format!("https://ghfast.top/{base}");
+        let ghproxy = format!("https://gh-proxy.com/{base}");
         assert_eq!(
             build.sources(Some("https://release-assets.githubusercontent.com/a?sig=1".into())),
-            ["https://release-assets.githubusercontent.com/a?sig=1", link, mirror]
+            ["https://release-assets.githubusercontent.com/a?sig=1", &ghfast, &ghproxy, link]
         );
-        assert_eq!(build.sources(None), [link, mirror], "where GitHub's API gave no address");
+        assert_eq!(build.sources(None), [&ghfast, &ghproxy, link], "where GitHub's API gave no address");
     }
 
     /// A server on this computer that answers one request with `answer`,
