@@ -689,18 +689,24 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
             thread::sleep(Duration::from_millis(100));
         }
     }
-    // bring the interface up, retrying while the driver reports EBUSY
+    // The interface's entry under /sys/class/net appears before the driver
+    // has finished making the device behind it, so bringing it up can answer
+    // ENODEV for a moment, and EBUSY while another bring-up settles. Both are
+    // worth waiting out rather than handing the user a dead switch.
     let until = Instant::now() + INTERFACE_WAIT;
     loop {
         match iface::set_up(&cfg.interface, true) {
             Ok(()) => break,
             Err(e) => {
                 let text = format!("{e:#}");
-                let busy = text.contains("Device or resource busy") || text.contains("os error 16");
-                if !busy || Instant::now() >= until {
+                let waitable = text.contains("Device or resource busy")
+                    || text.contains("os error 16")
+                    || text.contains("No such device")
+                    || text.contains("os error 19");
+                if !waitable || Instant::now() >= until {
                     return Err(e);
                 }
-                thread::sleep(Duration::from_millis(200));
+                thread::sleep(Duration::from_millis(150));
             }
         }
     }
