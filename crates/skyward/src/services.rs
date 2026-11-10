@@ -217,11 +217,61 @@ fn run(s: &Service, who: &Credentials) -> Result<String> {
 /// The program as it is started: with what it is given, from the top of the
 /// tree, reading and writing nothing of the recovery's, finding its
 /// libraries where it names them, and as `who`.
+/// The sockets a program is handed, as init makes them: a stream socket in
+/// /dev/socket/<name>, readable and writable by its group, with the
+/// descriptor passed on as ANDROID_SOCKET_<name>. The programs that ask for
+/// these (qseecomd above all) find them by that variable alone.
+fn make_sockets(s: &Service) -> Result<Vec<String>> {
+    let mut made = Vec::new();
+    if s.sockets.is_empty() {
+        return Ok(made);
+    }
+    let dir = Path::new("/dev/socket");
+    std::fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+    for name in &s.sockets {
+        let path = dir.join(name);
+        let _ = std::fs::remove_file(&path);
+        let cstr = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+            .with_context(|| format!("name {name} for a socket"))?;
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            ensure!(fd >= 0, "make a socket for {name}: {}", std::io::Error::last_os_error());
+            let mut addr: libc::sockaddr_un = std::mem::zeroed();
+            addr.sun_family = libc::AF_UNIX as u16;
+            let bytes = cstr.as_bytes();
+            ensure!(bytes.len() < addr.sun_path.len(), "socket path for {name} is too long");
+            for (i, b) in bytes.iter().enumerate() {
+                addr.sun_path[i] = *b as libc::c_char;
+            }
+            let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+            ensure!(
+                libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) == 0,
+                "bind the socket for {name}: {}", std::io::Error::last_os_error()
+            );
+            ensure!(
+                libc::listen(fd, 4) == 0,
+                "listen on the socket for {name}: {}", std::io::Error::last_os_error()
+            );
+            libc::chmod(cstr.as_ptr(), 0o660);
+            // The descriptor is passed on to the program, so it must survive exec.
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+            made.push(format!("ANDROID_SOCKET_{name}={fd}"));
+        }
+    }
+    Ok(made)
+}
+
 fn command(s: &Service, who: &Credentials) -> Command {
     let mut cmd = Command::new(&s.path);
     cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
+    }
+    for pair in make_sockets(s).unwrap_or_default() {
+        if let Some((k, v)) = pair.split_once('=') {
+            cmd.env(k, v);
+        }
     }
     let who = who.clone();
     // Only system calls run between the fork and the exec, on what was

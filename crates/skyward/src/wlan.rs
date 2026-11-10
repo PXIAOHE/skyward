@@ -676,16 +676,34 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
         for path in skyward_modules::load(modules, &cfg.modules)? {
             skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
         }
-        for w in &cfg.writes {
-            fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
-        }
         let until = Instant::now() + INTERFACE_WAIT;
         while !net.exists() {
             ensure!(Instant::now() < until, "the driver made no {} in {} seconds", cfg.interface, INTERFACE_WAIT.as_secs());
             thread::sleep(Duration::from_millis(100));
         }
     }
-    iface::set_up(&cfg.interface, true)
+    // The interface can be there while the driver is not ready yet; the writes
+    // (cnss fs_ready in particular) are what let it answer, so make them every
+    // time rather than only when the interface is still missing.
+    for w in &cfg.writes {
+        fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
+    }
+    // bring the interface up, retrying while the driver reports EBUSY
+    let until = Instant::now() + INTERFACE_WAIT;
+    loop {
+        match iface::set_up(&cfg.interface, true) {
+            Ok(()) => break,
+            Err(e) => {
+                let text = format!("{e:#}");
+                let busy = text.contains("Device or resource busy") || text.contains("os error 16");
+                if !busy || Instant::now() >= until {
+                    return Err(e);
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Put a file the driver asks for where the firmware loader looks.

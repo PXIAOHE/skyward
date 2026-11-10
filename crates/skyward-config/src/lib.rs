@@ -390,6 +390,18 @@ pub struct Service {
     /// names it: it keeps these alone, through its change of user.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Sockets the program is given, as init's `socket` lines make them: the
+    /// recovery makes each under /dev/socket and hands the program its
+    /// descriptor as ANDROID_SOCKET_<name>. qseecomd needs one of these to
+    /// reach the secure world's callbacks.
+    #[serde(default)]
+    pub sockets: Vec<String>,
+    /// The description of what the program registers, written out here
+    /// rather than kept in a file on the phone. Some programs are described
+    /// by nothing a recovery reads — only their init script names them — and
+    /// the service directory refuses their registration without one.
+    #[serde(default)]
+    pub manifest: Option<String>,
 }
 
 /// The kernel's capabilities, by the names init's capabilities lines give
