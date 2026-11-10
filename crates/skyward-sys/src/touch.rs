@@ -4,7 +4,6 @@
 use anyhow::{ensure, Context, Result};
 use std::fs::{self, OpenOptions};
 use std::os::fd::AsRawFd;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 const SELECT_TOUCH: libc::c_ulong = 0x5403;
