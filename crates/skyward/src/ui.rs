@@ -2073,11 +2073,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     closed = opening.closed;
                     show_closed(&mut app, &closed)?;
-                    // The page the recovery opens on is the unlock page; with
-                    // data open, there is nothing left to do there.
-                    if matches!(app.screen(), Screen::Decrypt) {
-                        app.go(Screen::Home);
-                    }
                 }
                 decrypt::Ended::Opened(Err(why)) => {
                     skyward_sys::kmsg(&format!("the data partition stays closed: {why}"))?;
@@ -2096,6 +2091,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 decrypt::Ended::Unlocked(Ok(still)) => {
                     closed = still;
                     show_closed(&mut app, &closed)?;
+                    // The credential was taken: the page the recovery opens on
+                    // has done its work, and the pages behind it are the point.
+                    if matches!(app.screen(), Screen::Decrypt) {
+                        app.go(Screen::Home);
+                    }
                 }
                 decrypt::Ended::Unlocked(Err(why)) => {
                     skyward_sys::kmsg(&format!("what was entered did not open the user's files: {why}"))?;

@@ -367,6 +367,9 @@ pub fn settings(cx: &Ctx) -> Frame {
     // while its backlight is off.
     let mut after_brightness = slider.bottom;
     if s.double_tap_supported {
+        // A section of its own: the row belongs to no other group, and left in
+        // the brightness card it reads as one more line of it.
+        after_brightness = widgets::section(&mut c, t, f, after_brightness, l.pick(["唤醒", "喚醒", "Wake"]));
         let wake = widgets::list(&mut c, t, f, after_brightness, &[
             Row::new(l.pick(["双击亮屏", "點兩下喚醒螢幕", "Double-tap to wake"])).trail(Trail::Switch(s.double_tap)),
         ]);

@@ -25,7 +25,11 @@ use std::time::Duration;
 /// Once a second, as the phone's own recovery does: a panel that comes back
 /// is usable at once rather than after a wait, and the write is a few bytes
 /// to a node the driver already holds in memory.
-const TOUCH_REFRESH: Duration = Duration::from_secs(1);
+/// How often what the touchscreen was told is told to it again. Some drivers
+/// (Goodix's) send the controller a command on every write, so this is not
+/// every second as upstream has it: often enough to undo a reset the driver
+/// makes at sleep, seldom enough not to interrupt the reports under a finger.
+const TOUCH_REFRESH: Duration = Duration::from_secs(3);
 
 pub enum Event {
     /// A touch and when the panel reported it, on [`monotonic_ms`]'s clock.
@@ -258,16 +262,10 @@ impl Inputs {
             loop {
                 thread::sleep(TOUCH_REFRESH);
                 for w in &writes {
-                    // Only write when the driver has put the value back to
-                    // something else. Some drivers (Goodix's) send the
-                    // controller a command on every write, and a write every
-                    // second would have it switching modes under the finger,
-                    // which the reports then fail to match.
-                    if let Ok(now) = fs::read_to_string(&w.path) {
-                        if now.trim() == w.value.trim() {
-                            continue;
-                        }
-                    }
+                    // Written each round even when the file already reads
+                    // what is wanted: the driver's reset at sleep does not
+                    // always show in this node, and a skipped write then
+                    // leaves the panel unable to report a tap at all.
                     if fs::write(&w.path, &w.value).is_err() {
                         continue;
                     }
