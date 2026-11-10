@@ -137,6 +137,16 @@ groups = ["root", "drmrpc"]
 # appears. The driver reads its settings and the MAC address through the
 # firmware loader, so they are given to it again: the settings from the
 # vendor partition, the address from persist, which is mounted below.
+# A look at what the recovery got working, written where the phone keeps it,
+# so it can be read from the system afterwards instead of typed out on the
+# recovery's own terminal.
+[[service]]
+path = "/system/bin/sh"
+args = ["-c", "sleep 25; D=/mnt/vendor/persist/skyward; mkdir -p $D; { echo '== ps =='; ps -A 2>/dev/null | grep -E 'wpa_supplicant|hostapd|qseecom|ssgtzd|keymint|weaver'; echo; echo '== sockets =='; ls -l /skyward/run/supplicant/sockets/ 2>&1; echo; echo '== supplicant conf =='; cat $D/wpa_supplicant.conf 2>&1; echo; echo '== touch nodes =='; cat /sys/devices/platform/goodix_ts.0/*_enable 2>&1; cat /sys/class/touch/touch_dev/enable_touch_raw 2>&1; echo; echo '== dmesg touch =='; dmesg 2>/dev/null | grep -E 'goodix_ts_report_finger|brl_event|enable_touch_raw' | tail -25; echo; echo '== dmesg wlan =='; dmesg 2>/dev/null | grep -iE 'wlan|cnss|supplicant' | tail -20; } > $D/diag.txt 2>&1; chmod 644 $D/diag.txt"]
+oneshot = true
+user = "root"
+groups = ["root"]
+
 [wlan]
 modules = ["rfkill", "qca_cld3_kiwi_v2"]
 writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
