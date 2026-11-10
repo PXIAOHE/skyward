@@ -181,8 +181,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('main-{0}', github.sha) }}
+
         run: |
+          # The zips are named skyward-<version>-<codename>-..., where the
+          # version is the tag's name, or the short sha when a branch was
+          # pushed. A running build looks its own zip up by
+          # skyward-<tag>-<codename>-, so the release tag has to carry that
+          # same version.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then TAG="$GITHUB_REF_NAME"; else TAG="${GITHUB_SHA::7}"; fi
           zips=()
           for zip in images/*.zip; do
             device=$(printf '%s\n' "$zip" | sed -E 's#.*/skyward-[^-]+-##; s#-OS.*##')
