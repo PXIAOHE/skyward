@@ -13,7 +13,8 @@ density = 560
 
 [modules]
 sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
-load = ["goodix_core", "xiaomi_touch", "nxp_nci", "stm_nfc_i2c", "nfc"]
+# 文件名必须与实际 .ko 一致：nxp 是连字符 nxp-nci.ko；nfc 无独立 .ko（由依赖带出）
+load = ["goodix_core", "xiaomi_touch", "stm_nfc_i2c", "nxp-nci"]
 
 [touch]
 writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
