@@ -1973,7 +1973,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 }
             }
         }
-        if let Some((told, traffic)) = wlan.as_ref().map(wlan::Worker::told) {
+        if let Some((told, traffic)) = wlan_of(&wlan).ok().and_then(|held| held.as_ref().map(wlan::Worker::told)) {
             if let Some(w) = told {
                 app.set_wlan(w);
             }
