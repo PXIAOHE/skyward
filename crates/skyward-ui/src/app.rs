@@ -4594,7 +4594,7 @@ impl App {
             return;
         }
         let m = t.m;
-        let (w, h) = (m.w as f32, m.h as f32);
+        let w = m.w as f32;
         let l = self.state.lang;
         let white = Rgba::rgb(255, 255, 255);
         let tall = m.dp(SHADE_HEIGHT_DP);
