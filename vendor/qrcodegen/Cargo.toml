@@ -12,6 +12,7 @@
 [package]
 name = "qrcodegen"
 version = "1.8.0"
+edition = "2021"
 authors = ["Project Nayuki"]
 exclude = ["examples/*"]
 description = "High-quality QR Code generator library"

@@ -1,3 +1,5 @@
+// A vendored third-party crate: its own style is left as it is.
+#![allow(clippy::all, deprecated, unused)]
 /* 
  * QR Code generator library (Rust)
  * 
