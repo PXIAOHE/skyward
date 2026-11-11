@@ -6479,6 +6479,12 @@ impl App {
             self.button = Some((key, Press::Spent));
             return fx;
         }
+        // The lock takes every button but the power key, which darkens the
+        // panel again: nothing behind the lock answers to a key.
+        if self.locked && key != Key::Power {
+            self.button = Some((key, Press::Spent));
+            return fx;
+        }
         // A key other than power sends the charging screen away for the
         // page, and does nothing else.
         if key != Key::Power && self.charge_shown() {
