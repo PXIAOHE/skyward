@@ -25,6 +25,7 @@ mod partwork;
 mod pty;
 #[cfg(target_os = "android")]
 mod readings;
+mod remember;
 #[cfg(target_os = "android")]
 mod relabel;
 #[cfg(target_os = "android")]

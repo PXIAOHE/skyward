@@ -1175,6 +1175,8 @@ pub enum Action {
     Skip,
     /// Try opening the data partition again, after it did not open.
     OpenData,
+    /// Keep the screen lock, or stop keeping it.
+    Remember,
     Back,
     Theme { dark: bool },
     Toggle(Switch),
@@ -1681,6 +1683,9 @@ pub struct State {
     /// lock its users' own files wait on.
     pub data: Data,
     pub code: String,
+    /// Whether the screen lock is kept, so that the data partition opens as
+    /// the recovery starts next time.
+    pub remember: bool,
     /// What is typed in the search field.
     pub search: String,
     /// The on-screen keyboard's layer.
@@ -1815,6 +1820,7 @@ impl Default for State {
             system_notice: None,
             data: Data::Closed,
             code: String::new(),
+            remember: false,
             search: String::new(),
             layer: Layer::Letters,
             held: None,
@@ -2033,6 +2039,8 @@ pub enum Effect {
     /// knows, telling what waits with [`App::data_waiting`] or why it did
     /// not open with [`App::data_failed`].
     OpenData,
+    /// Keep the screen lock, or stop keeping it.
+    Remember(bool),
     /// Open the own files of `user` with what they entered at their screen
     /// lock, telling what still waits with [`App::data_waiting`] or why it
     /// did not open with [`App::unlock_failed`].
@@ -5191,6 +5199,11 @@ impl App {
                 return self.arrive_at(s);
             }
             Action::OpenData => return self.open_data(),
+            Action::Remember => {
+                self.state.remember = !self.state.remember;
+                self.refresh();
+                return vec![Effect::Remember(self.state.remember)];
+            }
             Action::Skip => {
                 self.leave(true);
                 if self.stack.len() > 1 {

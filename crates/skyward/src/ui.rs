@@ -3,6 +3,7 @@ use crate::decrypt::{self, Decryptor};
 use crate::filework;
 use crate::haptics::Haptics;
 use crate::relabel;
+use crate::remember;
 use crate::input::{monotonic_ms, Event, Inputs};
 use crate::merge;
 use crate::partwork;
@@ -1147,6 +1148,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // and the users whose own files are still closed once it is open.
     let mut decryptor: Option<Decryptor> = None;
     let mut closed: Vec<Closed> = Vec::new();
+    // The screen lock kept from before, where one was kept, so that the data
+    // partition opens as the recovery starts.
+    let mut remembered: Option<Vec<u8>> = remember::read();
+    let mut tried_remembered = false;
+    let mut attempt_was_remembered = false;
+    let mut last_credential: Option<Vec<u8>> = None;
+    app.state.remember = remembered.is_some();
     let mut arriving = Some(Incoming::Arrived);
     // The mount page shows the partitions as they are when it opens and
     // after each change; why they cannot be read is the page's to say.
@@ -2149,6 +2157,29 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     closed = opening.closed;
                     show_closed(&mut app, &closed)?;
+                    // The screen lock kept from before opens the user's own
+                    // files without anyone typing it. A wrong one is not tried
+                    // again: the secure world counts it against the user.
+                    if !tried_remembered && !closed.is_empty() {
+                        tried_remembered = true;
+                        // Read again here: /metadata is not mounted when the
+                        // screen is first drawn, so the start's reading may
+                        // have found nothing where there is something.
+                        if remembered.is_none() {
+                            remembered = remember::read();
+                            if remembered.is_some() {
+                                app.state.remember = true;
+                            }
+                        }
+                        if let (Some(credential), Some(first)) = (remembered.clone(), closed.first()) {
+                            let user = first.user;
+                            skyward_sys::kmsg(&format!("opening user {user}'s files with the screen lock kept from before"))?;
+                            last_credential = Some(credential.clone());
+                            attempt_was_remembered = true;
+                            let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential };
+                            decryptor = Some(Decryptor::start(job)?);
+                        }
+                    }
                 }
                 decrypt::Ended::Opened(Err(why)) => {
                     skyward_sys::kmsg(&format!("the data partition stays closed: {why}"))?;
@@ -2165,8 +2196,27 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     app.data_failed(why);
                 }
                 decrypt::Ended::Unlocked(Ok(still)) => {
+                    let opened = still.len() < closed.len();
                     closed = still;
                     show_closed(&mut app, &closed)?;
+                    if opened {
+                        match (app.state.remember, last_credential.as_deref()) {
+                            (true, Some(credential)) => match remember::write(credential) {
+                                Ok(()) => {
+                                    remembered = Some(credential.to_vec());
+                                    skyward_sys::kmsg("the screen lock is kept for the starts that follow")?;
+                                }
+                                Err(e) => skyward_sys::kmsg(&format!("the screen lock was not kept: {e:#}"))?,
+                            },
+                            (false, _) => {
+                                remembered = None;
+                                if let Err(e) = remember::forget() {
+                                    skyward_sys::kmsg(&format!("the kept screen lock was not forgotten: {e:#}"))?;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     // The credential was taken: the page the recovery opens on
                     // has done its work, and the pages behind it are the point.
                     if matches!(app.screen(), Screen::Decrypt) {
@@ -2175,6 +2225,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 }
                 decrypt::Ended::Unlocked(Err(why)) => {
                     skyward_sys::kmsg(&format!("what was entered did not open the user's files: {why}"))?;
+                    if attempt_was_remembered {
+                        remembered = None;
+                        app.state.remember = false;
+                        let _ = remember::forget();
+                        skyward_sys::kmsg("the screen lock kept from before did not open the user's files, so it is forgotten")?;
+                    }
                     app.unlock_failed(why, now);
                 }
             }
@@ -2424,8 +2480,21 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::Unlock { user, code } => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
                         crate::wait_prepared();
-                        let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential: code.into_bytes() };
+                        let credential = code.into_bytes();
+                        last_credential = Some(credential.clone());
+                        attempt_was_remembered = false;
+                        let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential };
                         decryptor = Some(Decryptor::start(job)?);
+                    }
+                    Effect::Remember(on) => {
+                        // Turned off: what was kept goes at once, so the next
+                        // start asks again.
+                        if !on {
+                            remembered = None;
+                            if let Err(e) = remember::forget() {
+                                skyward_sys::kmsg(&format!("the kept screen lock was not forgotten: {e:#}"))?;
+                            }
+                        }
                     }
                     Effect::ReadDir(folder) => {
                         if let Err(e) = host_port(false) {

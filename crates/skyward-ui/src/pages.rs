@@ -822,6 +822,12 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
     if keys != Keys::Pattern {
         widgets::code_dots(&mut c, t, x, bottom - m.dp(92.0), s.code.chars().count());
     }
+    // Whether the screen lock is kept, so that the partition opens as the
+    // recovery starts next time without anyone typing it.
+    let mark = if s.remember { "●" } else { "○" };
+    let kept = tr!(l, "{mark} 记住密码，下次自动解密", "{mark} 記住密碼，下次自動解密", "{mark} Remember the screen lock and decrypt next time");
+    c.text_center(&f.body, &kept, x, bottom - m.dp(136.0), m.sub_px, if s.remember { t.pal.accent } else { t.pal.subtitle });
+    out.push(Hit { rect: Rect::new(x - m.dp(160.0), bottom - m.dp(160.0), m.dp(320.0), m.dp(48.0)), action: Action::Remember });
     let skip_cy = bottom - m.dp(34.0);
     c.text_center(&f.heading, l.pick(NOT_NOW), x, skip_cy, m.row_title_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
