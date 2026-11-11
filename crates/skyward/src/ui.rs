@@ -1757,7 +1757,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // is open, and what is typed there fills its field.
         if app.screen() == skyward_ui::app::Screen::Fetch {
             if portal.is_none() && portal_retry_at.is_none_or(|at| now >= at) {
-                if let Some(ip) = skyward_net::iface::address(&cfg.wlan.interface).ok().flatten() {
+                let wire = cfg.wlan.as_ref().map(|w| w.interface.clone()).unwrap_or_else(|| "wlan0".to_string());
+                if let Some(ip) = skyward_net::iface::address(&wire).ok().flatten() {
                     match crate::portal::Portal::start(&ip.to_string()) {
                         Ok(p) => {
                             let _ = skyward_sys::kmsg(&format!("the download page is served at {}", p.url()));
