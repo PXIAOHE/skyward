@@ -6,6 +6,9 @@
 //! the password off takes the network away with it, and so does a factory
 //! reset.
 
+// A recovery-only module: the host build quotes none of it.
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
