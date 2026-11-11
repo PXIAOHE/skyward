@@ -4506,12 +4506,13 @@ impl App {
         let x = w / 2.0;
         // The date over the time, and what is left in the battery under it,
         // as the phone's own lock has them.
+        // The date sits right over the time, as the phone's own lock has it.
         if !self.date.is_empty() {
-            out.text_center(&f.body, &self.date, x, m.dp(176.0), m.dp(22.0), ink.with_alpha(224));
+            out.text_center(&f.body, &self.date, x, m.dp(190.0), m.dp(22.0), ink.with_alpha(224));
         }
-        out.text_center(&f.heading, clock, x, m.dp(240.0), m.dp(88.0), ink);
+        out.text_center(&f.heading, clock, x, m.dp(256.0), m.dp(88.0), ink);
         if let Some((level, _)) = self.bar(clock, info).battery {
-            out.text_center(&f.body, &format!("{level}%"), x, m.dp(308.0), m.sub_px, ink.with_alpha(214));
+            out.text_center(&f.body, &format!("{level}%"), x, m.dp(322.0), m.sub_px, ink.with_alpha(214));
         }
         // The knob at the foot, in the style every other swipe-to-confirm in
         // the recovery uses, easing back when a hand lets it go short.
