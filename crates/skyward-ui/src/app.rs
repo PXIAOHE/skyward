@@ -2176,6 +2176,8 @@ enum Drag {
     /// Dragging the knob of the lock that covers the page: the page shows
     /// again only once the knob reaches the far end.
     Lock { track: Rect, grab: f32 },
+    /// Pulling the control centre down from the top edge, or pushing it back.
+    Shade { start: f32, from: f32 },
     /// Scrolling a terminal's screen back through what the shell wrote, or
     /// the editor's text, `carry` being the part of a row not yet scrolled.
     History { last: f32, carry: f32, pitch: f32 },
@@ -2336,6 +2338,25 @@ const UNLOCKED: f32 = 0.96;
 /// How long the lock's knob takes to ease back to the start once a hand
 /// lets it go short of the end.
 const UNLOCK_BACK_MS: u64 = 220;
+
+/// How far a finger comes down from the top edge, in dp, before the control
+/// centre is fully open.
+const SHADE_PULL_DP: f32 = 110.0;
+
+/// How long the control centre takes to settle open or shut once a hand lets
+/// it go, and how far down it has to be for it to stay open.
+const SHADE_EASE_MS: u64 = 220;
+const SHADE_KEEPS: f32 = 0.36;
+
+/// What a finger can press in the control centre.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShadeHit {
+    Wlan,
+    Screenshot,
+    Reboot,
+    Sleep,
+    Brightness,
+}
 /// How long the power key held takes the knob the whole way along.
 const SLIDE_MS: u64 = 700;
 /// The response, in seconds, of the spring the page scrolls on to show
@@ -2718,6 +2739,13 @@ pub struct App {
     /// When a hand let the lock's knob go short of the end, and where it
     /// was then: the knob eases back from there over [`UNLOCK_BACK_MS`].
     unlock_back: Option<(u64, f32)>,
+    /// How far the control centre is pulled over the page, 0 shut to 1 open,
+    /// and where it is easing to after a hand let it go.
+    shade: f32,
+    shade_ease: Option<(u64, f32, f32)>,
+    /// What a finger pressed there, and where its controls were drawn.
+    shade_press: Option<ShadeHit>,
+    shade_hits: Vec<(Rect, ShadeHit)>,
     tracker: Tracker,
     /// The page gliding on after a flick.
     fling: Option<Fling>,
@@ -2837,6 +2865,10 @@ impl App {
             lock_track: None,
             date: String::new(),
             unlock_back: None,
+            shade: 0.0,
+            shade_ease: None,
+            shade_press: None,
+            shade_hits: Vec::new(),
             tracker: Tracker::default(),
             fling: None,
             glide: None,
@@ -2922,6 +2954,7 @@ impl App {
                 || sliding
                 || self.cue.is_some()
                 || self.unlock_back.is_some()
+                || self.shade_ease.is_some()
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
@@ -3129,6 +3162,15 @@ impl App {
             if now >= at + UNLOCK_BACK_MS {
                 self.unlock_back = None;
                 self.unlock = 0.0;
+            }
+        }
+        if let Some((at, from, to)) = self.shade_ease {
+            self.dirty = true;
+            let f = (now.saturating_sub(at) as f32 / SHADE_EASE_MS as f32).clamp(0.0, 1.0);
+            self.shade = from + (to - from) * (1.0 - (1.0 - f) * (1.0 - f));
+            if f >= 1.0 {
+                self.shade_ease = None;
+                self.shade = to;
             }
         }
         if self.screen() == Screen::About {
@@ -4491,6 +4533,7 @@ impl App {
             }
         }
         self.paint_preparing(out, &t);
+        self.paint_shade(out, &t, f, info, clock);
         if self.locked {
             self.paint_lock(out, &t, f, info, clock, now);
         }
@@ -4527,6 +4570,132 @@ impl App {
         if done > 0.0 {
             out.fill_round_rect(x - w / 2.0, bar, w * done, h, h / 2.0, t.pal.accent);
             out.fill_circle(x - w / 2.0 + w * done, bar + h / 2.0, m.dp(3.5), t.pal.accent);
+        }
+    }
+
+    /// The control centre, pulled down from the top edge: the time and the
+    /// battery, the toggles a recovery has a use for, and the backlight.
+    fn paint_shade(&mut self, out: &mut Canvas, t: &Theme, f: &Fonts, info: &DeviceInfo, clock: &str) {
+        self.shade_hits.clear();
+        if self.shade <= 0.0 {
+            return;
+        }
+        let m = t.m;
+        let (w, h) = (m.w as f32, m.h as f32);
+        let l = self.state.lang;
+        let panel = m.dp(430.0);
+        let top = -panel * (1.0 - self.shade);
+        out.fill_rect(0.0, 0.0, w, h, Rgba::rgb(0, 0, 0).with_alpha((120.0 * self.shade) as u8));
+        let r = m.dp(30.0);
+        out.fill_round_rect(-r, top - r, w + r * 2.0, panel + r, r, t.pal.card);
+        // The time at the left and what is left in the battery at the right.
+        out.text(&f.heading, clock, m.margin, top + m.dp(62.0), m.dp(38.0), t.pal.text, None);
+        if let Some((level, _)) = self.bar(clock, info).battery {
+            let said = format!("{level}%");
+            let wide = out.text_width(&f.body, &said, m.row_title_px);
+            out.text(&f.body, &said, w - m.margin - wide, top + m.dp(54.0), m.row_title_px, t.pal.subtitle, None);
+        }
+        let on = self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On);
+        let tiles = [
+            (ShadeHit::Wlan, if on { "WLAN · 已开" } else { "WLAN · 已关" }, on),
+            (ShadeHit::Screenshot, "截图", false),
+            (ShadeHit::Reboot, "重启", false),
+            (ShadeHit::Sleep, "熄屏", false),
+        ];
+        let (gap, th) = (m.dp(12.0), m.dp(88.0));
+        let tw = (w - m.margin * 2.0 - gap) / 2.0;
+        let tiles_top = top + m.dp(112.0);
+        let mut hits = Vec::new();
+        for (i, (hit, label, on)) in tiles.iter().enumerate() {
+            let (col, row) = (i % 2, i / 2);
+            let x = m.margin + col as f32 * (tw + gap);
+            let y = tiles_top + row as f32 * (th + gap);
+            let rect = Rect::new(x, y, tw, th);
+            let ink = if *on { t.pal.accent } else { t.pal.text };
+            out.fill_round_rect(x, y, tw, th, m.dp(20.0), if *on { t.pal.accent.with_alpha(46) } else { t.pal.badge });
+            out.text(&f.heading, label, x + m.dp(16.0), y + th / 2.0 + m.dp(6.0), m.row_title_px, ink, None);
+            hits.push((rect, *hit));
+        }
+        // The backlight, dragged as it is on the settings page.
+        let label = l.pick(["亮度", "亮度", "Brightness"]);
+        let ly = tiles_top + 2.0 * (th + gap) + m.dp(14.0);
+        out.text(&f.body, label, m.margin, ly, m.sub_px, t.pal.subtitle, None);
+        let track = Rect::new(m.margin, ly + m.dp(14.0), w - m.margin * 2.0, m.slider_h);
+        widgets::slider(out, t, track.x, track.y, track.w, self.state.brightness);
+        hits.push((track, ShadeHit::Brightness));
+        self.shade_hits = hits;
+    }
+
+    /// Shut the control centre at once, for a toggle that opens a page.
+    fn close_shade(&mut self) {
+        self.shade = 0.0;
+        self.shade_ease = None;
+        self.dirty = true;
+    }
+
+    /// A finger on the control centre, or one pulling it down from the top.
+    fn shade_touch(&mut self, ev: Touch, now: u64) -> Vec<Effect> {
+        let t = self.theme();
+        match ev {
+            Touch::Down(x, y) => {
+                if self.shade > 0.0 {
+                    if let Some((rect, hit)) = self.shade_hits.iter().find(|(r, _)| r.contains(x, y)).copied() {
+                        if hit == ShadeHit::Brightness {
+                            self.set_slider(&t, Slider::Brightness, rect, x);
+                            self.drag = Drag::Slider(Slider::Brightness, rect);
+                        } else {
+                            self.shade_press = Some(hit);
+                        }
+                        return Vec::new();
+                    }
+                }
+                self.drag = Drag::Shade { start: y, from: self.shade };
+                Vec::new()
+            }
+            Touch::Move(_, y) => {
+                if let Drag::Shade { start, from } = self.drag {
+                    let pulled = (y - start) / t.m.dp(SHADE_PULL_DP);
+                    let mut to = (from + pulled).clamp(0.0, 1.0);
+                    if from <= 0.0 {
+                        to = to.min(1.0);
+                    }
+                    self.shade = to;
+                    self.dirty = true;
+                }
+                Vec::new()
+            }
+            Touch::Up => {
+                let mut fx = Vec::new();
+                if let Some(hit) = self.shade_press.take() {
+                    match hit {
+                        ShadeHit::Wlan => {
+                            let on = self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On);
+                            fx.push(Effect::Wlan(!on));
+                        }
+                        ShadeHit::Screenshot => {
+                            self.close_shade();
+                            fx.push(Effect::Screenshot { storage: true });
+                        }
+                        ShadeHit::Reboot => {
+                            self.close_shade();
+                            fx.extend(self.act(Action::Open(Screen::Reboot), now));
+                        }
+                        ShadeHit::Sleep => {
+                            self.close_shade();
+                            self.sleep(now);
+                        }
+                        ShadeHit::Brightness => {}
+                    }
+                    return fx;
+                }
+                if matches!(self.drag, Drag::Shade { .. }) {
+                    self.drag = Drag::Idle;
+                    let to = if self.shade >= SHADE_KEEPS { 1.0 } else { 0.0 };
+                    self.shade_ease = Some((now, self.shade, to));
+                    self.dirty = true;
+                }
+                fx
+            }
         }
     }
 
@@ -6228,6 +6397,11 @@ impl App {
         if self.locked {
             return self.lock_touch(ev, now);
         }
+        // The control centre takes every finger while it is over the page,
+        // and one that comes down from the top edge pulls it out.
+        if self.shade > 0.0 || matches!(ev, Touch::Down(_, y) if y <= self.theme().m.dp(28.0)) {
+            return self.shade_touch(ev, now);
+        }
         // A finger on the charging screen sends it away for the page, and
         // does nothing else until it lifts.
         if self.charge_shown() {
@@ -6421,6 +6595,7 @@ impl App {
                 // The lock takes every finger of its own, so a knob dragged
                 // there never reaches the page's own handling.
                 Drag::Lock { .. } => {}
+                Drag::Shade { start, from } => self.drag = Drag::Shade { start, from },
                 Drag::Idle => {}
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {
