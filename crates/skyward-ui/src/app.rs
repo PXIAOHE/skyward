@@ -2343,9 +2343,12 @@ const UNLOCK_BACK_MS: u64 = 220;
 /// centre is fully open.
 const SHADE_PULL_DP: f32 = 110.0;
 
-/// How long the control centre takes to settle open or shut once a hand lets
-/// it go, and how far down it has to be for it to stay open.
-const SHADE_EASE_MS: u64 = 220;
+/// How far down the sheet has to be for it to stay open when a hand lets it
+/// go without speed.
+
+/// How springy the sheet is: a longer period is a softer, slower ride. The
+/// phone's own takes about half a second either way.
+const SHADE_PERIOD: f32 = 0.62;
 const SHADE_KEEPS: f32 = 0.36;
 
 /// How tall the control centre's sheet is, in dp, at full pull.
@@ -2752,8 +2755,9 @@ pub struct App {
     /// carry on from.
     shade_last: Option<(u64, f32)>,
     shade_speed: f32,
-    /// What a finger pressed there, and where its controls were drawn.
-    shade_press: Option<ShadeHit>,
+    /// What a finger pressed there, and where it came down: a finger that
+    /// moves was pulling the sheet, not pressing a tile.
+    shade_press: Option<(ShadeHit, f32)>,
     shade_hits: Vec<(Rect, ShadeHit)>,
     tracker: Tracker,
     /// The page gliding on after a flick.
@@ -3181,7 +3185,7 @@ impl App {
             let t = now.saturating_sub(at) as f32 / 1000.0;
             let carried = (from + (speed + w * from) * t) * (-w * t).exp();
             self.shade = ((target + carried) / SHADE_PULL_DP).clamp(0.0, 1.0);
-            if t * 1000.0 >= SHADE_EASE_MS as f32 && carried.abs() < 0.6 {
+            if t >= SHADE_PERIOD * 0.92 && carried.abs() < 0.8 {
                 self.shade_settle = None;
                 self.shade = (target / SHADE_PULL_DP).clamp(0.0, 1.0);
             }
@@ -4697,7 +4701,7 @@ impl App {
                             self.set_slider(&t, Slider::Brightness, rect, x);
                             self.drag = Drag::Slider(Slider::Brightness, rect);
                         } else {
-                            self.shade_press = Some(hit);
+                            self.shade_press = Some((hit, y));
                         }
                         return Vec::new();
                     }
@@ -4706,6 +4710,14 @@ impl App {
                 Vec::new()
             }
             Touch::Move(_, y) => {
+                // A finger that came down on a tile and then moved was pulling
+                // the sheet: the tile is not pressed after all.
+                if let Some((_, down)) = self.shade_press {
+                    if (y - down).abs() > t.m.dp(14.0) {
+                        self.shade_press = None;
+                        self.drag = Drag::Shade { start: down, from: self.shade };
+                    }
+                }
                 if let Drag::Shade { start, from } = self.drag {
                     let pulled = from * SHADE_PULL_DP + (y - start);
                     // A sheet pulled past its end gives less and less, as the
@@ -4726,7 +4738,7 @@ impl App {
             }
             Touch::Up => {
                 let mut fx = Vec::new();
-                if let Some(hit) = self.shade_press.take() {
+                if let Some((hit, _)) = self.shade_press.take() {
                     match hit {
                         ShadeHit::Wlan => {
                             let on = self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On);
@@ -4756,7 +4768,8 @@ impl App {
                     let heading = self.shade + self.shade_speed / 1400.0;
                     let target = if heading >= SHADE_KEEPS { SHADE_PULL_DP } else { 0.0 };
                     let from = self.shade * SHADE_PULL_DP - target;
-                    self.shade_settle = Some((now, from, self.shade_speed, 0.34, target));
+                    let speed = self.shade_speed.clamp(-2600.0, 2600.0);
+                    self.shade_settle = Some((now, from, speed, SHADE_PERIOD, target));
                     self.shade_last = None;
                     self.shade_speed = 0.0;
                     self.dirty = true;
