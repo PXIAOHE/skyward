@@ -2173,6 +2173,9 @@ enum Drag {
     Edge { start: f32, from_left: bool, armed: bool, x: f32, cy: f32 },
     Slider(Slider, Rect),
     Confirm { which: Confirm, track: Rect, grab: f32 },
+    /// Dragging the knob of the lock that covers the page: the page shows
+    /// again only once the knob reaches the far end.
+    Lock { track: Rect, grab: f32 },
     /// Scrolling a terminal's screen back through what the shell wrote, or
     /// the editor's text, `carry` being the part of a row not yet scrolled.
     History { last: f32, carry: f32, pitch: f32 },
@@ -2326,6 +2329,9 @@ const CHORD_MS: u64 = 150;
 /// How far along its track the knob of a swipe-to-confirm control has to
 /// be let go to confirm.
 const SLID: f32 = 0.9;
+
+/// How far the lock's knob is dragged before letting go takes the lock away.
+const UNLOCKED: f32 = 0.96;
 /// How long the power key held takes the knob the whole way along.
 const SLIDE_MS: u64 = 700;
 /// The response, in seconds, of the spring the page scrolls on to show
@@ -2698,6 +2704,11 @@ pub struct App {
     dither: Option<glow::Dither>,
     toast: Option<(String, u64)>,
     drag: Drag,
+    /// Whether the panel woke to a lock over the page, how far its knob has
+    /// been dragged, and where that knob was last drawn.
+    locked: bool,
+    unlock: f32,
+    lock_track: Option<Rect>,
     tracker: Tracker,
     /// The page gliding on after a flick.
     fling: Option<Fling>,
@@ -2812,6 +2823,9 @@ impl App {
             dither: None,
             toast: None,
             drag: Drag::Idle,
+            locked: false,
+            unlock: 0.0,
+            lock_track: None,
             tracker: Tracker::default(),
             fling: None,
             glide: None,
@@ -3184,6 +3198,11 @@ impl App {
             self.dirty = true;
             self.darkening = None;
             self.curtain.set(true, now);
+            // The panel wakes to a lock, as the phone's own system does: the
+            // page behind it shows again once the knob is dragged across.
+            self.locked = true;
+            self.unlock = 0.0;
+            self.lock_track = None;
         }
         self.woke_at = Some(now);
         self.stir(now);
@@ -3256,6 +3275,10 @@ impl App {
             Drag::Pattern => {
                 self.state.pattern.clear();
                 self.refresh();
+            }
+            Drag::Lock { .. } => {
+                self.unlock = 0.0;
+                self.dirty = true;
             }
             _ => {}
         }
@@ -4448,6 +4471,22 @@ impl App {
                 }
             }
         }
+        if self.locked {
+            self.paint_lock(out, &t, f, clock);
+        }
+    }
+
+    /// The lock the panel woke to: a near-black veil over the page, the time
+    /// in the middle of the upper half, and a knob at the foot to drag across.
+    fn paint_lock(&mut self, out: &mut Canvas, t: &Theme, f: &Fonts, clock: &str) {
+        let m = t.m;
+        let (w, h) = (m.w as f32, m.h as f32);
+        out.fill_rect(0.0, 0.0, w, h, Rgba::rgb(6, 6, 8).with_alpha(226));
+        let x = w / 2.0;
+        out.text_center(&f.heading, clock, x, m.dp(190.0), m.dp(84.0), t.pal.text);
+        let label = self.state.lang.pick(["滑动解锁", "滑動解鎖", "Swipe to unlock"]);
+        let track = widgets::confirm(out, t, f, h - m.dp(150.0), label, false, self.unlock);
+        self.lock_track = Some(track);
     }
 
     /// Draw the page shown as `view` has it: all of it but the status bar,
@@ -6034,6 +6073,47 @@ impl App {
         Vec::new()
     }
 
+    /// A finger on the lock: dragging the knob moves it, letting go past
+    /// `UNLOCKED` uncovers the page, and anything else springs back.
+    fn lock_touch(&mut self, ev: Touch, _now: u64) -> Vec<Effect> {
+        match ev {
+            Touch::Down(x, y) => {
+                if let Some(track) = self.lock_track {
+                    let knob = track.x + (track.w - track.h) * self.unlock;
+                    let reach = track.h * 0.6;
+                    let on = x >= track.x - reach
+                        && x <= track.x + track.w + reach
+                        && y >= track.y - reach
+                        && y <= track.y + track.h + reach;
+                    if on {
+                        self.drag = Drag::Lock { track, grab: x - knob };
+                    }
+                }
+            }
+            Touch::Move(x, _) => {
+                if let Drag::Lock { track, grab } = self.drag {
+                    let travel = (track.w - track.h).max(1.0);
+                    let along = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
+                    if (along - self.unlock).abs() > f32::EPSILON {
+                        self.unlock = along;
+                        self.dirty = true;
+                    }
+                }
+            }
+            Touch::Up => {
+                if matches!(self.drag, Drag::Lock { .. }) {
+                    self.drag = Drag::Idle;
+                    if self.unlock >= UNLOCKED {
+                        self.locked = false;
+                    }
+                    self.unlock = 0.0;
+                    self.dirty = true;
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
         // A finger on the dark panel lights nothing, as on the phone's own
         // system, where the power key lights it -- except that two taps close
@@ -6054,6 +6134,11 @@ impl App {
                 }
             }
             return Vec::new();
+        }
+        // The lock that the panel woke to takes every finger: only its knob
+        // moves, and the page is uncovered when the knob reaches the end.
+        if self.locked {
+            return self.lock_touch(ev, now);
         }
         // A finger on the charging screen sends it away for the page, and
         // does nothing else until it lifts.
