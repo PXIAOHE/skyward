@@ -847,6 +847,11 @@ fn clock(zone: usize) -> Result<String> {
     Ok(skyward_ui::fmt::clock(unix_now()?, zone))
 }
 
+/// The date the lock shows, in the language the pages speak.
+fn today(zone: usize, lang: skyward_ui::Lang) -> Result<String> {
+    Ok(skyward_ui::fmt::date(lang, unix_now()?, zone))
+}
+
 /// Tell the kernel log how the data partition was mounted, where opening
 /// it mounted it: the check made first, in full where it found something,
 /// and the device it is read through.
@@ -1490,6 +1495,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             shown_clock = time;
             app.redraw();
         }
+        app.set_date(today(app.state.time_zone, app.state.lang)?);
         for reading in readings.taken() {
             match reading {
                 Reading::Battery(battery, at) => {

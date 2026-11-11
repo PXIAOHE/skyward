@@ -2709,6 +2709,11 @@ pub struct App {
     locked: bool,
     unlock: f32,
     lock_track: Option<Rect>,
+    /// The date the lock shows, as the system keeps it.
+    date: String,
+    /// The knob of the lock going back to the start after a hand let it go
+    /// short of the end.
+    unlock_spring: Option<Spring>,
     tracker: Tracker,
     /// The page gliding on after a flick.
     fling: Option<Fling>,
@@ -2826,6 +2831,8 @@ impl App {
             locked: false,
             unlock: 0.0,
             lock_track: None,
+            date: String::new(),
+            unlock_spring: None,
             tracker: Tracker::default(),
             fling: None,
             glide: None,
@@ -2910,6 +2917,7 @@ impl App {
                 || self.seek.is_some()
                 || sliding
                 || self.cue.is_some()
+                || self.unlock_spring.is_some()
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
@@ -3110,6 +3118,12 @@ impl App {
             self.dirty = true;
             if s.at(now).1 {
                 self.cue = None;
+            }
+        }
+        if let Some(s) = self.unlock_spring {
+            self.dirty = true;
+            if s.at(now).1 {
+                self.unlock_spring = None;
             }
         }
         if self.screen() == Screen::About {
@@ -4472,21 +4486,48 @@ impl App {
             }
         }
         if self.locked {
-            self.paint_lock(out, &t, f, clock);
+            self.paint_lock(out, &t, f, info, clock, now);
         }
     }
 
-    /// The lock the panel woke to: a near-black veil over the page, the time
-    /// in the middle of the upper half, and a knob at the foot to drag across.
-    fn paint_lock(&mut self, out: &mut Canvas, t: &Theme, f: &Fonts, clock: &str) {
+    /// The lock the panel woke to: a near-black veil over the page, the date,
+    /// the time and how much is left in the battery in the middle of the
+    /// upper half, and a knob at the foot to drag across.
+    fn paint_lock(&mut self, out: &mut Canvas, t: &Theme, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
         let m = t.m;
         let (w, h) = (m.w as f32, m.h as f32);
+        let ink = Rgba::rgb(255, 255, 255);
         out.fill_rect(0.0, 0.0, w, h, Rgba::rgb(6, 6, 8).with_alpha(226));
         let x = w / 2.0;
-        out.text_center(&f.heading, clock, x, m.dp(190.0), m.dp(84.0), t.pal.text);
+        // The date over the time, and what is left in the battery under it,
+        // as the phone's own lock has them.
+        if !self.date.is_empty() {
+            out.text_center(&f.body, &self.date, x, m.dp(150.0), m.sub_px, ink.with_alpha(214));
+        }
+        out.text_center(&f.heading, clock, x, m.dp(232.0), m.dp(88.0), ink);
+        if let Some((level, _)) = self.bar(clock, info).battery {
+            out.text_center(&f.body, &format!("{level}%"), x, m.dp(300.0), m.sub_px, ink.with_alpha(214));
+        }
+        // The knob at the foot: a pill of the accent, the words through it,
+        // and a knob that goes back to the start when a hand lets it go
+        // short of the end.
+        let along = self.unlock_spring.map_or(self.unlock, |s| s.at(now).0.clamp(0.0, 1.0));
+        let (bx, bw, bh) = (m.margin, w - m.margin * 2.0, m.dp(64.0));
+        let top = h - m.dp(150.0);
+        let (cy, k) = (top + bh / 2.0, bh - m.dp(10.0));
+        out.fill_round_rect(bx, top, bw, bh, bh / 2.0, t.pal.accent);
+        if along > 0.0 {
+            out.fill_round_rect(bx, top, bh + (bw - bh) * along, bh, bh / 2.0, ink.with_alpha(34));
+        }
         let label = self.state.lang.pick(["滑动解锁", "滑動解鎖", "Swipe to unlock"]);
-        let track = widgets::confirm(out, t, f, h - m.dp(150.0), label, false, self.unlock);
-        self.lock_track = Some(track);
+        out.text_center(&f.heading, label, x + bh / 4.0, cy, m.row_title_px, ink);
+        let kcx = bx + bh / 2.0 + (bw - bh) * along;
+        out.fill_circle(kcx, cy, k / 2.0, ink);
+        let a = k * 0.3;
+        out.line(kcx - a * 0.5, cy, kcx + a * 0.5, cy, m.stroke, t.pal.accent);
+        out.line(kcx + a * 0.5, cy, kcx + a * 0.05, cy - a * 0.45, m.stroke, t.pal.accent);
+        out.line(kcx + a * 0.5, cy, kcx + a * 0.05, cy + a * 0.45, m.stroke, t.pal.accent);
+        self.lock_track = Some(Rect::new(bx, top, bw, bh));
     }
 
     /// Draw the page shown as `view` has it: all of it but the status bar,
@@ -6073,9 +6114,19 @@ impl App {
         Vec::new()
     }
 
+    /// The date the lock shows, as the system keeps it.
+    pub fn set_date(&mut self, date: String) {
+        if self.date != date {
+            self.date = date;
+            if self.locked {
+                self.dirty = true;
+            }
+        }
+    }
+
     /// A finger on the lock: dragging the knob moves it, letting go past
     /// `UNLOCKED` uncovers the page, and anything else springs back.
-    fn lock_touch(&mut self, ev: Touch, _now: u64) -> Vec<Effect> {
+    fn lock_touch(&mut self, ev: Touch, now: u64) -> Vec<Effect> {
         match ev {
             Touch::Down(x, y) => {
                 if let Some(track) = self.lock_track {
@@ -6105,8 +6156,12 @@ impl App {
                     self.drag = Drag::Idle;
                     if self.unlock >= UNLOCKED {
                         self.locked = false;
+                        self.unlock = 0.0;
+                    } else {
+                        // Short of the end: the knob springs back, rather than
+                        // being put back, so the hand sees where it got to.
+                        self.unlock_spring = Some(Spring::new(now, self.unlock, 0.0, 0.22));
                     }
-                    self.unlock = 0.0;
                     self.dirty = true;
                 }
             }
