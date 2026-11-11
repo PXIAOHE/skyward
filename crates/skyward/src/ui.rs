@@ -2358,6 +2358,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     answer(asked, fastboot)
                 }
                 Incoming::Input(Event::Touch(t, at)) => {
+                    if matches!(t, Touch::Down(..) | Touch::Up) {
+                        let _ = skyward_sys::kmsg(&format!("touch {t:?} at {at} ms, lit {}", app.panel_lit()));
+                    }
                     if app.panel_lit() {
                         // A lit panel is worked by touch as usual, and no tap
                         // is held over from before it lit.
