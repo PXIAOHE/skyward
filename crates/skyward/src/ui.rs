@@ -1592,15 +1592,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             surface.speed_up()?;
             keeps_running = false;
             rested_at = None;
-        } else if surface.is_on() {
-            // The double tap turned on is left to the touchscreen's own
-            // gesture, which the page's writes to its switch turn on: the
-            // panel still rests and the display still turns off, and the tap
-            // is looked for in the wakeup key the firmware reports.
-            if app.state.double_tap && !keeps_running {
-                let _ = skyward_sys::kmsg("the display is dark; the double tap is left to the touchscreen's own gesture");
+        } else if app.state.double_tap {
+            // The panel is left running rather than put at rest: at rest the
+            // touchscreen stops reporting a finger on it, and with it the
+            // double tap that lights the page. Measured here: with the display
+            // turned off the driver still logs the finger, but no event
+            // reaches the page. The backlight is off, so nothing shows.
+            if surface.is_on() && !keeps_running {
+                let _ = skyward_sys::kmsg("the display is dark; the panel keeps running for the double tap");
                 keeps_running = true;
             }
+        } else if surface.is_on() {
             // Turned off, the panel rests, and the touch controller following
             // it stops drawing power.
             surface.rest()?;
@@ -2358,9 +2360,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     answer(asked, fastboot)
                 }
                 Incoming::Input(Event::Touch(t, at)) => {
-                    if matches!(t, Touch::Down(..) | Touch::Up) {
-                        let _ = skyward_sys::kmsg(&format!("touch {t:?} at {at} ms, lit {}", app.panel_lit()));
-                    }
                     if app.panel_lit() {
                         // A lit panel is worked by touch as usual, and no tap
                         // is held over from before it lit.
@@ -2375,11 +2374,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             }
                             _ => false,
                         };
-                        if let Touch::Down(x, y) = t {
-                            let _ = skyward_sys::kmsg(&format!(
-                                "a touch came while the display was dark: down at {x:.0},{y:.0} at {at} ms, double tap {second}"
-                            ));
-                        }
                         if let (Touch::Down(..), true) = (t, second) {
                             // Lit the way its power key lights it -- onto the
                             // lock -- with the release following at once so
