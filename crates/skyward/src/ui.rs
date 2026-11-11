@@ -1171,6 +1171,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     Canvas::keep_ready(w, h, 3);
     let mut shown_clock = String::new();
     let mut shown_stage = skyward_ui::progress::stage();
+    // A screenshot asked for, taken once the next frame is drawn.
+    let mut pending_shot: Option<bool> = None;
     // The readings are taken again on a thread of their own; those taken
     // here as work ends say how it left the phone, and readings started
     // before them are out of date.
@@ -1537,6 +1539,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 let t0 = Instant::now();
                 app.compose(&mut screen, &fonts, &info, &shown_clock, now);
                 surface.present(&screen)?;
+                if let Some(storage) = pending_shot.take() {
+                    let t0 = Instant::now();
+                    let saved = save_screenshot(&screen, storage, app.state.time_zone).map_err(|e| format!("{e:#}"));
+                    eprintln!("screenshot {saved:?} in {} ms", t0.elapsed().as_millis());
+                    app.screenshot_saved(saved, now);
+                }
                 eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
                 if let Some(path) = dump {
                     fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
@@ -2412,10 +2420,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // The panel shows the last frame drawn, which is what is
                     // saved; one that cannot be is the page's to report.
                     Effect::Screenshot { storage } => {
-                        let t0 = Instant::now();
-                        let saved = save_screenshot(&screen, storage, app.state.time_zone).map_err(|e| format!("{e:#}"));
-                        eprintln!("screenshot {saved:?} in {} ms", t0.elapsed().as_millis());
-                        app.screenshot_saved(saved, now);
+                        // Taken once the next frame is drawn, not now: a shot
+                        // asked for from the control centre would otherwise
+                        // have the control centre on it.
+                        pending_shot = Some(storage);
+                        app.redraw();
                     }
                     Effect::Sideload => {
                         ensure!(installer.is_none(), "an installer is running already");
