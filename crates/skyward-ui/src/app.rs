@@ -2343,12 +2343,12 @@ const UNLOCK_BACK_MS: u64 = 220;
 /// centre is fully open.
 const SHADE_PULL_DP: f32 = 110.0;
 
-/// How far down the sheet has to be for it to stay open when a hand lets it
-/// go without speed.
-
 /// How springy the sheet is: a longer period is a softer, slower ride. The
 /// phone's own takes about half a second either way.
 const SHADE_PERIOD: f32 = 0.62;
+
+/// How far down the sheet has to be for it to stay open when a hand lets it
+/// go without speed.
 const SHADE_KEEPS: f32 = 0.36;
 
 /// How tall the control centre's sheet is, in dp, at full pull.
