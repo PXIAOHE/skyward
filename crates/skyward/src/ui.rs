@@ -2372,6 +2372,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             }
                             _ => false,
                         };
+                        if let Touch::Down(x, y) = t {
+                            let _ = skyward_sys::kmsg(&format!(
+                                "a touch came while the display was dark: down at {x:.0},{y:.0} at {at} ms, double tap {second}"
+                            ));
+                        }
                         if let (Touch::Down(..), true) = (t, second) {
                             // Lit the way its power key lights it -- onto the
                             // lock -- with the release following at once so
