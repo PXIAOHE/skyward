@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use skyward_config::{ramdisk, DeviceConfig};
+#[cfg(target_os = "android")]
+use skyward_config::ramdisk;
+use skyward_config::DeviceConfig;
 use skyward_sys::{bcb, Power};
 use skyward_vab::SnapshotState;
 use std::path::{Path, PathBuf};
@@ -800,13 +802,16 @@ fn recovery() -> Result<()> {
 /// Whether the devices, modules and services the recovery needs are up. The
 /// first frame does not wait for them: they come up on a thread of their own,
 /// and a page that needs them (opening data, above all) waits here instead.
+#[allow(dead_code)]
 static PREPARED: std::sync::OnceLock<(std::sync::Mutex<bool>, std::sync::Condvar)> = std::sync::OnceLock::new();
 
+#[allow(dead_code)]
 fn prepared_gate() -> &'static (std::sync::Mutex<bool>, std::sync::Condvar) {
     PREPARED.get_or_init(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()))
 }
 
 /// Mark the devices, modules and services as ready, and let whoever waits go.
+#[allow(dead_code)]
 fn mark_prepared() {
     let (lock, cv) = prepared_gate();
     if let Ok(mut done) = lock.lock() {
@@ -817,6 +822,7 @@ fn mark_prepared() {
 
 /// Wait until they are ready, half a minute at the most. A page that waits
 /// longer than that says so rather than hanging forever.
+#[allow(dead_code)]
 pub(crate) fn wait_prepared() {
     let (lock, cv) = prepared_gate();
     if let Ok(mut done) = lock.lock() {
