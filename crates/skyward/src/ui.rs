@@ -1,5 +1,6 @@
 use crate::backup;
 use crate::decrypt::{self, Decryptor};
+use crate::fetch;
 use crate::filework;
 use crate::haptics::Haptics;
 use crate::relabel;
