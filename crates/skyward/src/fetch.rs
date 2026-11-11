@@ -32,7 +32,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn start(url: String, path: PathBuf) -> Result<Worker> {
+    pub fn start(url: String, path: PathBuf, servers: skyward_net::http::Servers) -> Result<Worker> {
         let mut fds = [0; 2];
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
             return Err(std::io::Error::last_os_error()).context("make the fetching thread's wake pipe");
@@ -46,7 +46,7 @@ impl Worker {
         let thread = thread::Builder::new()
             .name("fetch".into())
             .spawn(move || {
-                let ended_as = match fetch(&url, &path, &stop_as, &done_as, &total_as) {
+                let ended_as = match fetch(&url, &path, &stop_as, &done_as, &total_as, servers) {
                     Ok(()) => Ended::Done { path: path.clone(), bytes: done_as.load(Ordering::Relaxed) },
                     Err(_) if stop_as.load(Ordering::Relaxed) => Ended::Stopped,
                     Err(e) => Ended::Failed(format!("{e:#}")),
@@ -108,8 +108,17 @@ pub fn name_of(url: &str) -> String {
     }
 }
 
-fn fetch(url: &str, path: &PathBuf, stop: &AtomicBool, done: &AtomicU64, total: &AtomicU64) -> Result<()> {
-    let agent = skyward_net::http::agent(Arc::new(std::sync::Mutex::new(Vec::new())));
+fn fetch(
+    url: &str,
+    path: &PathBuf,
+    stop: &AtomicBool,
+    done: &AtomicU64,
+    total: &AtomicU64,
+    servers: skyward_net::http::Servers,
+) -> Result<()> {
+    // The names in the address are looked up with the servers the network the
+    // phone joined gave: an empty list leaves nothing to ask.
+    let agent = skyward_net::http::agent(servers);
     let head = agent.head(url).call().context("ask the server about the file")?;
     let status = head.status().as_u16();
     if status != 200 {

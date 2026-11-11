@@ -2668,7 +2668,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let name = fetch::name_of(&url);
                         let path = Path::new(skyward_crypto::data::SDCARD).join(DOWNLOADS).join(name);
                         skyward_sys::kmsg(&format!("fetching {url} into {}", path.display()))?;
-                        fetcher = Some(fetch::Worker::start(url, path)?);
+                        fetcher = Some(fetch::Worker::start(url, path, servers.clone())?);
                     }
                     Effect::StopFetch => {
                         if let Some(f) = &fetcher {

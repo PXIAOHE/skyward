@@ -837,11 +837,13 @@ pub fn fetch(cx: &Ctx) -> Frame {
     let m = &t.m;
     let mut c = page(cx);
     let mut out = Vec::new();
-    // The field sits where the search page's does, and the keyboard takes the
-    // foot of the screen; what the page puts between them is planned against
-    // the room left over, so nothing hides behind the keys.
+    // The field and the button sit below the title row, clear of the back
+    // arrow, both of them centred on the page.
     let wide = m.w as f32 - m.margin * 2.0;
-    let top = t.m.content_top;
+    // The keyboard takes the bottom of the screen: what the page puts above it
+    // is planned against the room left over, so nothing hides behind the keys.
+    let floor = m.h as f32 - widgets::keyboard_height(t) - m.dp(10.0);
+    let top = m.content_top - m.dp(66.0);
     let hint = l.pick(["粘贴或输入完整网址", "貼上或輸入完整網址", "Type or paste a full address"]);
     let field = widgets::search_field(&mut c, t, f, m.margin, wide, top + m.dp(24.0), &s.fetch_url, hint);
     let running = matches!(s.fetch, Fetch::Running { .. });
@@ -851,12 +853,12 @@ pub fn fetch(cx: &Ctx) -> Frame {
     };
     // A button of its own size, in the middle, not the full width of the page.
     let (bh, bw) = (m.dp(48.0), m.dp(220.0).min(wide));
-    let mut y = field.field.y + field.field.h + m.dp(22.0);
+    let mut y = field.field.y + field.field.h + m.dp(26.0);
     let (bx, by) = ((m.w as f32 - bw) / 2.0, y);
     c.fill_round_rect(bx, by, bw, bh, bh / 2.0, t.pal.accent);
     c.text_center(&f.heading, label, bx + bw / 2.0, by + bh / 2.0, m.row_title_px, Rgba::rgb(255, 255, 255));
     out.push(Hit { rect: Rect::new(bx, by, bw, bh), action: match running { true => Action::FetchStop, false => Action::FetchStart } });
-    y = by + bh + m.dp(14.0);
+    y = by + bh;
     // A link too long to type can be put in a small file from a computer, and
     // taken from there with one tap.
     let from_file = l.pick([
@@ -864,39 +866,44 @@ pub fn fetch(cx: &Ctx) -> Frame {
         "從 /sdcard/Download/link.txt 讀連結",
         "Take the link from /sdcard/Download/link.txt",
     ]);
+    y += m.dp(16.0);
     c.text_center(&f.body, from_file, m.w as f32 / 2.0, y + m.dp(18.0), m.sub_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(m.margin, y, wide, m.dp(36.0)), action: Action::FetchFromFile });
     y += m.dp(36.0) + m.dp(10.0);
     // A link too long for this keyboard can be typed on another device, which
-    // opens a page this recovery serves; the code is where that page is.
-    if let Some(at) = s.fetch_portal.clone() {
-        let side = m.dp(150.0).min(wide);
+    // opens a page this recovery serves; the code below is where that page is.
+    // Only while nothing is under way: a fetch in progress has its own card to
+    // show, and the two would not fit above the keys together.
+    if let Some(at) = s.fetch_portal.clone().filter(|_| !running) {
+        // As large as fits above the keyboard, never larger than 168dp.
+        let caption = m.dp(40.0);
+        let room = (floor - y - caption - m.dp(14.0)).max(m.dp(96.0));
+        let side = m.dp(168.0).min(wide).min(room);
         let x0 = (m.w as f32 - side) / 2.0;
         let quiet = 2.0f32;
         if let Ok(code) = qrcodegen::QrCode::encode_text(&at, qrcodegen::QrCodeEcc::Medium) {
             let n = code.size();
             let cell = side / (n as f32 + quiet * 2.0);
-            c.fill_round_rect(x0 - m.dp(10.0), y, side + m.dp(20.0), side + m.dp(20.0), m.dp(12.0), Rgba::rgb(255, 255, 255));
+            c.fill_round_rect(x0 - m.dp(12.0), y - m.dp(6.0), side + m.dp(24.0), side + m.dp(24.0), m.dp(14.0), Rgba::rgb(255, 255, 255));
             for row in 0..n {
                 for col in 0..n {
                     if code.get_module(col, row) {
                         let px = x0 + (col as f32 + quiet) * cell;
-                        let py = y + m.dp(10.0) + (row as f32 + quiet) * cell;
+                        let py = y + m.dp(6.0) + (row as f32 + quiet) * cell;
                         c.fill_rect(px, py, cell + 0.5, cell + 0.5, Rgba::rgb(12, 12, 16));
                     }
                 }
             }
         }
-        y += side + m.dp(20.0) + m.dp(6.0);
+        y += side + m.dp(20.0);
         let how = l.pick([
             "用另一台手机扫这个码，在网页里输入网址，发回来就填进上面的框",
             "用另一台手機掃這個碼，在網頁裡輸入網址，傳回來就填進上面的框",
             "Scan this on another device, type the address there, and it fills the field above",
         ]);
-        y = widgets::footnote(&mut c, t, f, y, how);
+        widgets::footnote(&mut c, t, f, y, how);
+        y += caption;
     }
-    // How the fetch stands, under all of it.
-    y += m.dp(4.0);
     match &s.fetch {
         Fetch::Idle => {
             let how = l.pick([
@@ -904,7 +911,7 @@ pub fn fetch(cx: &Ctx) -> Frame {
                 "檔案儲存到 /sdcard/Download，名字取網址裡最後一段。",
                 "Files are saved in /sdcard/Download, named after the last part of the address.",
             ]);
-            y = widgets::footnote(&mut c, t, f, y, how);
+            widgets::footnote(&mut c, t, f, y, how);
         }
         Fetch::Running { done, total } => {
             let share = total.map(|t| (*done as f32 / (t.max(1) as f32)).clamp(0.0, 1.0));
@@ -915,27 +922,25 @@ pub fn fetch(cx: &Ctx) -> Frame {
                 }
                 _ => mb(*done),
             };
-            y = widgets::progress_card(&mut c, t, f, y, l.pick(DOWNLOADING), &detail, share);
+            widgets::progress_card(&mut c, t, f, y, l.pick(DOWNLOADING), &detail, share);
         }
         Fetch::Done { path, bytes } => {
             let (where_to, size_s) = (path.clone(), mb(*bytes));
             let detail = tr!(l, "已保存 {where_to}（{size_s}）", "已儲存 {where_to}（{size_s}）", "Saved {where_to} ({size_s})");
-            y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["完成", "完成", "Done"]), detail)]);
+            widgets::info_card(&mut c, t, f, y, &[(l.pick(["完成", "完成", "Done"]), detail)]);
         }
         Fetch::Failed(why) => {
-            y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["失败", "失敗", "Failed"]), why.clone())]);
+            widgets::info_card(&mut c, t, f, y, &[(l.pick(["失败", "失敗", "Failed"]), why.clone())]);
         }
         Fetch::Stopped => {
-            y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["已停止", "已停止", "Stopped"]), String::new())]);
+            widgets::info_card(&mut c, t, f, y, &[(l.pick(["已停止", "已停止", "Stopped"]), String::new())]);
         }
     }
-    let _ = y;
-    // The keyboard is drawn last and takes the foot of the screen.
+    let title = l.pick(FETCH);
     keyboard_hits(&mut c, t, f, s, label, &mut out);
     if let Some(rect) = field.clear {
         out.push(Hit { rect, action: Action::ClearSearch });
     }
-    let title = l.pick(FETCH);
     Frame { header: false, caret: Some(field.caret), ..Frame::new(t, c, out, title, 0.0) }
 }
 
