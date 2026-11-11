@@ -387,16 +387,6 @@ pub fn settings(cx: &Ctx) -> Frame {
         "When on, a computer can manage the files in internal storage, once it is decrypted.",
     ]);
     y = widgets::footnote(&mut c, t, f, usb.bottom, note);
-    // The WLAN's own setting, where the stock page keeps it: whether the
-    // recovery opens it as it starts, and joins the network it kept.
-    y = widgets::section(&mut c, t, f, y, "WiFi");
-    let wifi = widgets::list(&mut c, t, f, y, &[
-        Row::new(l.pick(["WiFi 自动连接", "WiFi 自動連線", "WLAN on at start"]))
-            .icon(BLUE, Icon::Wlan)
-            .trail(Trail::Switch(s.wlan_auto)),
-    ]);
-    out.extend(hits(&wifi.rows, &[Action::Toggle(Switch::WlanAuto)]));
-    y = wifi.bottom;
     y = widgets::section(&mut c, t, f, y, l.pick(["调试", "偵錯", "Debugging"]));
     let debug = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal)]);
     out.extend(hits(&debug.rows, &[Action::Open(Screen::Terminal)]));
@@ -2893,7 +2883,7 @@ pub fn wlan(cx: &Ctx) -> Frame {
     // starts that follow. A card of their own, told apart from the switch
     // above them.
     let kept = widgets::list(&mut c, t, f, y, &[
-        Row::new(l.pick(["启动时开启", "啟動時開啟", "Open at start"])).trail(Trail::Switch(s.wlan_auto)),
+        Row::new(l.pick(["WiFi 自动连接", "WiFi 自動連線", "WLAN on at start"])).trail(Trail::Switch(s.wlan_auto)),
         Row::new(l.pick(["记住密码", "記住密碼", "Keep the password"])).trail(Trail::Switch(s.wlan_keep)),
     ]);
     out.extend(hits(&kept.rows, &[Action::Toggle(Switch::WlanAuto), Action::Toggle(Switch::WlanKeep)]));
