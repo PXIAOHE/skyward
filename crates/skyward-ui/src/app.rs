@@ -4600,21 +4600,15 @@ impl App {
             ShadeHit::Sleep => icons::glyph(out, Icon::Power, cx, cy, size, ink),
             ShadeHit::Screenshot => {
                 // A camera: its body, the bump over its viewfinder, its lens.
-                let (w, h) = (size * 0.84, size * 0.62);
-                let top = cy - h / 2.0 + size * 0.05;
-                out.stroke_round_rect(cx - w / 2.0, top, w, h, size * 0.15, stroke, ink);
-                out.fill_round_rect(cx - size * 0.14, top - size * 0.11, size * 0.28, size * 0.13, size * 0.05, ink);
-                out.stroke_circle(cx, top + h / 2.0, size * 0.17, stroke, ink);
+                // Sized to carry the weight of the glyphs beside it, which
+                // fill about three quarters of their box.
+                let (w, h) = (size * 0.74, size * 0.54);
+                let top = cy - h / 2.0 + size * 0.04;
+                out.stroke_round_rect(cx - w / 2.0, top, w, h, size * 0.13, stroke, ink);
+                out.fill_round_rect(cx - size * 0.12, top - size * 0.10, size * 0.24, size * 0.11, size * 0.045, ink);
+                out.stroke_circle(cx, top + h / 2.0, size * 0.145, stroke, ink);
             }
-            ShadeHit::Reboot => {
-                // A ring left open at the top, with an arrow at its end.
-                let r = size * 0.33;
-                let start = -2.35f32;
-                out.stroke_arc(cx, cy, r, start, 4.9, stroke, ink);
-                let (ax, ay) = (cx + r * start.cos(), cy + r * start.sin());
-                out.line(ax, ay, ax - size * 0.16, ay - size * 0.04, stroke, ink);
-                out.line(ax, ay, ax + size * 0.02, ay - size * 0.17, stroke, ink);
-            }
+            ShadeHit::Reboot => icons::glyph(out, Icon::Restore, cx, cy, size, ink),
             ShadeHit::Brightness => {
                 // A sun: its disc and eight rays.
                 out.fill_circle(cx, cy, size * 0.19, ink);
