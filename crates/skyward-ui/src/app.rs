@@ -2361,10 +2361,10 @@ const SHADE_KEEPS: f32 = 0.36;
 /// How long the ring about the sign takes to come round once.
 const RING_MS: u64 = 1500;
 
-/// How fast the bar under it runs, as a share of its length per millisecond:
-/// one speed from its start to its end, so it never stands still waiting for
-/// the work to report.
-const DATA_RATE: f32 = 0.00017;
+/// How much of the way the bar under the sign covers at each frame towards
+/// where the work has got: small enough to be smooth, large enough to be at
+/// its end when the opening is.
+const DATA_EASE: f32 = 0.12;
 
 /// How tall the control centre's sheet is, in dp, at full pull.
 const SHADE_HEIGHT_DP: f32 = 508.0;
@@ -2771,9 +2771,6 @@ pub struct App {
     /// carry on from.
     shade_last: Option<(u64, f32)>,
     shade_speed: f32,
-    /// When the decrypt page was first shown, for the bar that runs by the
-    /// clock while the data partition is being opened.
-    data_started: Option<u64>,
     /// What a finger pressed there, and where it came down: a finger that
     /// moves was pulling the sheet, not pressing a tile.
     shade_press: Option<(ShadeHit, f32)>,
@@ -2901,7 +2898,6 @@ impl App {
             shade_settle: None,
             shade_last: None,
             shade_speed: 0.0,
-            data_started: None,
             shade_press: None,
             shade_hits: Vec::new(),
             tracker: Tracker::default(),
@@ -3204,12 +3200,18 @@ impl App {
         // the bar runs on with the clock, so a page that is waiting is seen to
         // be waiting rather than standing still.
         if self.decrypt_waiting() {
+            // The ring turns, and the bar comes up on where the work has got
+            // rather than on the clock: a bar that ran at one speed was still
+            // short of its end when the partition had already opened.
             self.state.data_phase = (now % RING_MS) as f32 / RING_MS as f32;
-            let started = *self.data_started.get_or_insert(now);
-            self.state.data_progress = ((now.saturating_sub(started)) as f32 * DATA_RATE).min(0.97);
+            let target = crate::progress::done();
+            let step = (target - self.state.data_progress) * DATA_EASE;
+            self.state.data_progress = (self.state.data_progress + step).clamp(0.0, 1.0);
             self.dirty = true;
         } else {
-            self.data_started = None;
+            // Off the page the bar starts over, so that the next visit runs it
+            // from its start rather than picking it up where it was left.
+            self.state.data_progress = 0.0;
         }
         if let Some((at, from, speed, period, target)) = self.shade_settle {
             self.dirty = true;
