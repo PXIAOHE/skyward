@@ -901,9 +901,9 @@ pub fn fetch(cx: &Ctx) -> Frame {
             "用另一台手機掃這個碼，在網頁裡輸入網址，傳回來就填進上面的框",
             "Scan this on another device, type the address there, and it fills the field above",
         ]);
-        widgets::footnote(&mut c, t, f, y, how);
-        y += caption;
+        y = widgets::footnote(&mut c, t, f, y, how) + m.dp(8.0);
     }
+    y += m.dp(12.0);
     match &s.fetch {
         Fetch::Idle => {
             let how = l.pick([
@@ -924,16 +924,20 @@ pub fn fetch(cx: &Ctx) -> Frame {
             };
             widgets::progress_card(&mut c, t, f, y, l.pick(DOWNLOADING), &detail, share);
         }
+        // The three endings share one shape: a title and one line under it, so
+        // the card does not change height as they follow one another.
         Fetch::Done { path, bytes } => {
-            let (where_to, size_s) = (path.clone(), mb(*bytes));
-            let detail = tr!(l, "已保存 {where_to}（{size_s}）", "已儲存 {where_to}（{size_s}）", "Saved {where_to} ({size_s})");
+            let name = path.rsplit('/').next().unwrap_or(path.as_str());
+            let detail = tr!(l, "已保存 {name}（{size}）", "已儲存 {name}（{size}）", "Saved {name} ({size})");
+            let detail = detail.replace("{size}", &mb(*bytes));
             widgets::info_card(&mut c, t, f, y, &[(l.pick(["完成", "完成", "Done"]), detail)]);
         }
         Fetch::Failed(why) => {
             widgets::info_card(&mut c, t, f, y, &[(l.pick(["失败", "失敗", "Failed"]), why.clone())]);
         }
         Fetch::Stopped => {
-            widgets::info_card(&mut c, t, f, y, &[(l.pick(["已停止", "已停止", "Stopped"]), String::new())]);
+            let why = l.pick(["下载已停止", "下載已停止", "The download was stopped"]);
+            widgets::info_card(&mut c, t, f, y, &[(l.pick(["已停止", "已停止", "Stopped"]), why.to_string())]);
         }
     }
     let title = l.pick(FETCH);

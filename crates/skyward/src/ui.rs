@@ -2266,15 +2266,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 match ended {
                     fetch::Ended::Done { path, bytes } => {
                         skyward_sys::kmsg(&format!("the fetch ended: {bytes} bytes in {}", path.display()))?;
-                        app.fetch_ended(Ok((path.display().to_string(), bytes)));
+                        app.fetch_ended(Ok((path.display().to_string(), bytes)), now);
                     }
                     fetch::Ended::Failed(why) => {
                         skyward_sys::kmsg(&format!("the fetch failed: {why}"))?;
-                        app.fetch_ended(Err(why));
+                        app.fetch_ended(Err(why), now);
                     }
                     fetch::Ended::Stopped => {
                         skyward_sys::kmsg("the fetch was stopped")?;
-                        app.fetch_stopped();
+                        app.fetch_stopped(now);
                     }
                 }
                 fetcher = None;

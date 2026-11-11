@@ -1700,6 +1700,8 @@ pub struct State {
     /// Where another device reaches the page that hands a link over, once the
     /// download page is served.
     pub fetch_portal: Option<String>,
+    /// When the fetch ended, so that the card it left goes away by itself.
+    pub fetch_ended_at: Option<u64>,
     pub data_progress: f32,
     pub data_phase: f32,
     /// Whether the screen lock is kept, so that the data partition opens as
@@ -1842,6 +1844,7 @@ impl Default for State {
             fetch_url: String::new(),
             fetch: Fetch::Idle,
             fetch_portal: None,
+            fetch_ended_at: None,
             data_progress: 0.0,
             data_phase: 0.0,
             remember: false,
@@ -3030,6 +3033,7 @@ impl App {
                 || self.cue.is_some()
                 || self.unlock_back.is_some()
                 || self.shade_settle.is_some()
+                || self.state.fetch_ended_at.is_some()
                 || self.decrypt_waiting()
                 || self.title.moving(now)
                 || self.bar.moving(now)
@@ -3256,6 +3260,9 @@ impl App {
             // from its start rather than picking it up where it was left.
             self.data_started = None;
             self.state.data_progress = 0.0;
+        }
+        if self.fetch_card_left(now) {
+            self.clear_fetch_card();
         }
         if let Some((at, from, speed, period, target)) = self.shade_settle {
             self.dirty = true;
@@ -4751,6 +4758,7 @@ impl App {
             return Vec::new();
         }
         self.state.fetch = Fetch::Running { done: 0, total: None };
+        self.state.fetch_ended_at = None;
         self.refresh();
         vec![Effect::Fetch(url)]
     }
@@ -4792,17 +4800,41 @@ impl App {
     }
 
     /// How the fetch ended.
-    pub fn fetch_ended(&mut self, ended: Result<(String, u64), String>) {
+    pub fn fetch_ended(&mut self, ended: Result<(String, u64), String>, now: u64) {
         self.state.fetch = match ended {
             Ok((path, bytes)) => Fetch::Done { path, bytes },
             Err(why) => Fetch::Failed(why),
         };
+        self.state.fetch_ended_at = Some(now);
         self.refresh();
     }
 
     /// The fetch was stopped before it ended.
-    pub fn fetch_stopped(&mut self) {
+    pub fn fetch_stopped(&mut self, now: u64) {
         self.state.fetch = Fetch::Stopped;
+        self.state.fetch_ended_at = Some(now);
+        self.refresh();
+    }
+
+    /// How long a card left by a finished fetch stays before the page is as it
+    /// was: a failure is left up longer, so that it can be read.
+    fn fetch_card_left(&self, now: u64) -> bool {
+        let Some(at) = self.state.fetch_ended_at else { return false };
+        let stay = match self.state.fetch {
+            Fetch::Failed(_) => 12000,
+            _ => 6000,
+        };
+        now.saturating_sub(at) >= stay
+    }
+
+    /// Take away the card a finished fetch left, and the address with it.
+    fn clear_fetch_card(&mut self) {
+        if matches!(self.state.fetch, Fetch::Running { .. } | Fetch::Idle) {
+            return;
+        }
+        self.state.fetch = Fetch::Idle;
+        self.state.fetch_ended_at = None;
+        self.state.fetch_url.clear();
         self.refresh();
     }
 
