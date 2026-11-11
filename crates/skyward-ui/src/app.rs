@@ -3,6 +3,7 @@ use crate::charge;
 use crate::color::Rgba;
 use crate::editor::{self, Editor};
 use crate::files::{self, FileType};
+use crate::icons::{self, Icon};
 use crate::fling::{Fling, Tracker};
 use crate::fmt;
 use crate::focus::{self, Group, Spot, Stop};
@@ -1683,6 +1684,10 @@ pub struct State {
     /// lock its users' own files wait on.
     pub data: Data,
     pub code: String,
+    /// How far along the bar under the sign is, and where the ring's turn is,
+    /// while the data partition is being opened.
+    pub data_progress: f32,
+    pub data_phase: f32,
     /// Whether the screen lock is kept, so that the data partition opens as
     /// the recovery starts next time.
     pub remember: bool,
@@ -1820,6 +1825,8 @@ impl Default for State {
             system_notice: None,
             data: Data::Closed,
             code: String::new(),
+            data_progress: 0.0,
+            data_phase: 0.0,
             remember: false,
             search: String::new(),
             layer: Layer::Letters,
@@ -2173,6 +2180,11 @@ enum Drag {
     Edge { start: f32, from_left: bool, armed: bool, x: f32, cy: f32 },
     Slider(Slider, Rect),
     Confirm { which: Confirm, track: Rect, grab: f32 },
+    /// Dragging the knob of the lock that covers the page: the page shows
+    /// again only once the knob reaches the far end.
+    Lock { track: Rect, grab: f32 },
+    /// Pulling the control centre down from the top edge, or pushing it back.
+    Shade { start: f32, from: f32 },
     /// Scrolling a terminal's screen back through what the shell wrote, or
     /// the editor's text, `carry` being the part of a row not yet scrolled.
     History { last: f32, carry: f32, pitch: f32 },
@@ -2326,6 +2338,49 @@ const CHORD_MS: u64 = 150;
 /// How far along its track the knob of a swipe-to-confirm control has to
 /// be let go to confirm.
 const SLID: f32 = 0.9;
+
+/// How far the lock's knob is dragged before letting go takes the lock away.
+const UNLOCKED: f32 = 0.96;
+
+/// How long the lock's knob takes to ease back to the start once a hand
+/// lets it go short of the end.
+const UNLOCK_BACK_MS: u64 = 220;
+
+/// How far a finger comes down from the top edge, in dp, before the control
+/// centre is fully open.
+const SHADE_PULL_DP: f32 = 110.0;
+
+/// How springy the sheet is: a longer period is a softer, slower ride. The
+/// phone's own takes about half a second either way.
+const SHADE_PERIOD: f32 = 0.62;
+
+/// How far down the sheet has to be for it to stay open when a hand lets it
+/// go without speed.
+const SHADE_KEEPS: f32 = 0.36;
+
+/// How long the ring about the sign takes to come round once.
+const RING_MS: u64 = 1500;
+
+/// How fast the bar under the sign runs, as a share of its length per
+/// millisecond. Taken from this phone: the decrypt page is on screen for
+/// about 4.8 s from its first frame to the page the opened partition brings,
+/// so the bar is at its end just as that happens. One speed the whole way,
+/// rather than easing towards whatever the work last reported.
+const DATA_RATE: f32 = 0.000225;
+
+/// How tall the control centre's sheet is, in dp, at full pull.
+const SHADE_HEIGHT_DP: f32 = 508.0;
+
+/// What a finger can press in the control centre.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShadeHit {
+    Wlan,
+    Screenshot,
+    Reboot,
+    Sleep,
+    Brightness,
+    Vibration,
+}
 /// How long the power key held takes the knob the whole way along.
 const SLIDE_MS: u64 = 700;
 /// The response, in seconds, of the spring the page scrolls on to show
@@ -2698,6 +2753,33 @@ pub struct App {
     dither: Option<glow::Dither>,
     toast: Option<(String, u64)>,
     drag: Drag,
+    /// Whether the panel woke to a lock over the page, how far its knob has
+    /// been dragged, and where that knob was last drawn.
+    locked: bool,
+    unlock: f32,
+    lock_track: Option<Rect>,
+    /// The date the lock shows, as the system keeps it.
+    date: String,
+    /// When a hand let the lock's knob go short of the end, and where it
+    /// was then: the knob eases back from there over [`UNLOCK_BACK_MS`].
+    unlock_back: Option<(u64, f32)>,
+    /// How far the control centre is pulled over the page, 0 shut to 1 open.
+    shade: f32,
+    /// Where it is going after a hand let it go, as a spring: when it began,
+    /// how far from where it is headed, how fast it was going, its period,
+    /// and where it is headed, all in dp of travel.
+    shade_settle: Option<(u64, f32, f32, f32, f32)>,
+    /// Where the finger last was and how fast it went, for the spring to
+    /// carry on from.
+    shade_last: Option<(u64, f32)>,
+    shade_speed: f32,
+    /// When the decrypt page was first shown, for the bar that runs on the
+    /// clock while the data partition is being opened.
+    data_started: Option<u64>,
+    /// What a finger pressed there, and where it came down: a finger that
+    /// moves was pulling the sheet, not pressing a tile.
+    shade_press: Option<(ShadeHit, f32)>,
+    shade_hits: Vec<(Rect, ShadeHit)>,
     tracker: Tracker,
     /// The page gliding on after a flick.
     fling: Option<Fling>,
@@ -2812,6 +2894,18 @@ impl App {
             dither: None,
             toast: None,
             drag: Drag::Idle,
+            locked: false,
+            unlock: 0.0,
+            lock_track: None,
+            date: String::new(),
+            unlock_back: None,
+            shade: 0.0,
+            shade_settle: None,
+            shade_last: None,
+            shade_speed: 0.0,
+            data_started: None,
+            shade_press: None,
+            shade_hits: Vec::new(),
             tracker: Tracker::default(),
             fling: None,
             glide: None,
@@ -2896,6 +2990,9 @@ impl App {
                 || self.seek.is_some()
                 || sliding
                 || self.cue.is_some()
+                || self.unlock_back.is_some()
+                || self.shade_settle.is_some()
+                || self.decrypt_waiting()
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
@@ -3098,6 +3195,41 @@ impl App {
                 self.cue = None;
             }
         }
+        if let Some((at, _)) = self.unlock_back {
+            self.dirty = true;
+            if now >= at + UNLOCK_BACK_MS {
+                self.unlock_back = None;
+                self.unlock = 0.0;
+            }
+        }
+        // While the data partition is being opened, the ring comes round and
+        // the bar runs on with the clock, so a page that is waiting is seen to
+        // be waiting rather than standing still.
+        if self.decrypt_waiting() {
+            // The ring turns, and the bar runs its length at one speed from
+            // the moment the page is shown, so that it finishes as the page
+            // does rather than jumping a fifth of the way at each stage.
+            self.state.data_phase = (now % RING_MS) as f32 / RING_MS as f32;
+            let started = *self.data_started.get_or_insert(now);
+            self.state.data_progress = ((now.saturating_sub(started)) as f32 * DATA_RATE).min(1.0);
+            self.dirty = true;
+        } else {
+            // Off the page the bar starts over, so that the next visit runs it
+            // from its start rather than picking it up where it was left.
+            self.data_started = None;
+            self.state.data_progress = 0.0;
+        }
+        if let Some((at, from, speed, period, target)) = self.shade_settle {
+            self.dirty = true;
+            let w = std::f32::consts::TAU / period;
+            let t = now.saturating_sub(at) as f32 / 1000.0;
+            let carried = (from + (speed + w * from) * t) * (-w * t).exp();
+            self.shade = ((target + carried) / SHADE_PULL_DP).clamp(0.0, 1.0);
+            if t >= SHADE_PERIOD * 0.92 && carried.abs() < 0.8 {
+                self.shade_settle = None;
+                self.shade = (target / SHADE_PULL_DP).clamp(0.0, 1.0);
+            }
+        }
         if self.screen() == Screen::About {
             let look = self.theme().hero.glow;
             match &mut self.glow {
@@ -3184,6 +3316,11 @@ impl App {
             self.dirty = true;
             self.darkening = None;
             self.curtain.set(true, now);
+            // The panel wakes to a lock, as the phone's own system does: the
+            // page behind it shows again once the knob is dragged across.
+            self.locked = true;
+            self.unlock = 0.0;
+            self.lock_track = None;
         }
         self.woke_at = Some(now);
         self.stir(now);
@@ -3256,6 +3393,10 @@ impl App {
             Drag::Pattern => {
                 self.state.pattern.clear();
                 self.refresh();
+            }
+            Drag::Lock { .. } => {
+                self.unlock = 0.0;
+                self.dirty = true;
             }
             _ => {}
         }
@@ -4448,6 +4589,351 @@ impl App {
                 }
             }
         }
+        self.paint_preparing(out, &t);
+        self.paint_shade(out, &t, f, info, clock);
+        if self.locked {
+            self.paint_lock(out, &t, f, info, clock, now);
+        }
+    }
+
+    /// The ring that turns about the sign while the phone's parts come up,
+    /// and the bar under it that says how far the work has come. Laid over
+    /// the page rather than drawn into it, so that it moves every frame
+    /// without the page being built again each time.
+    fn paint_preparing(&self, out: &mut Canvas, t: &Theme) {
+        if crate::progress::stage() >= crate::progress::READY {
+            return;
+        }
+        if !matches!(self.state.data, Data::Closed | Data::Opening) {
+            return;
+        }
+        let m = t.m;
+        let x = m.w as f32 / 2.0;
+        let cy = m.dp(150.0);
+        let r = m.dp(40.0);
+        let phase = self.state.data_phase;
+        let start = -std::f32::consts::FRAC_PI_2 + phase * std::f32::consts::TAU;
+        out.stroke_circle(x, cy, r, m.dp(1.5), t.pal.track);
+        for k in 0..4 {
+            let a = 0.5 + 0.5 * (k as f32 / 4.0);
+            let color = crate::color::mix(t.pal.bg, t.pal.accent, a * 0.55);
+            out.stroke_arc(x, cy, r, start - 0.14 * (4 - k) as f32, 0.15, m.dp(2.5), color);
+        }
+        out.stroke_arc(x, cy, r, start, 0.9, m.dp(2.5), t.pal.accent);
+        // The bar is the clock's: it runs its length at one speed from the
+        // moment the page is shown, whether the phone's own parts are up yet
+        // or the opening has begun, and waits near its end for the opening to
+        // finish. A bar that followed the stages would jump a fifth at a time.
+        let done = self.state.data_progress;
+        let (bw, bh) = (m.dp(200.0), m.dp(4.0));
+        let bar = cy + m.dp(124.0);
+        out.fill_round_rect(x - bw / 2.0, bar, bw, bh, bh / 2.0, t.pal.track);
+        if done > 0.0 {
+            out.fill_round_rect(x - bw / 2.0, bar, bw * done, bh, bh / 2.0, t.pal.accent);
+            out.fill_circle(x - bw / 2.0 + bw * done, bar + bh / 2.0, m.dp(3.5), t.pal.accent);
+        }
+    }
+
+    /// What each control of the control centre is drawn as.
+    fn shade_glyph(out: &mut Canvas, t: &Theme, hit: ShadeHit, cx: f32, cy: f32, size: f32, ink: Rgba) {
+        let stroke = (size * 0.075).max(t.m.dp(1.6));
+        match hit {
+            ShadeHit::Wlan => icons::glyph(out, Icon::Wlan, cx, cy, size, ink),
+            ShadeHit::Sleep => icons::glyph(out, Icon::Power, cx, cy, size, ink),
+            ShadeHit::Screenshot => {
+                // A camera: its body, the bump over its viewfinder, its lens.
+                // Sized to carry the weight of the glyphs beside it, which
+                // fill about three quarters of their box.
+                let (w, h) = (size * 0.74, size * 0.54);
+                let top = cy - h / 2.0 + size * 0.04;
+                out.stroke_round_rect(cx - w / 2.0, top, w, h, size * 0.13, stroke, ink);
+                out.fill_round_rect(cx - size * 0.12, top - size * 0.10, size * 0.24, size * 0.11, size * 0.045, ink);
+                out.stroke_circle(cx, top + h / 2.0, size * 0.145, stroke, ink);
+            }
+            ShadeHit::Reboot => icons::glyph(out, Icon::Restore, cx, cy, size, ink),
+            ShadeHit::Brightness => {
+                // A sun: its disc and eight rays.
+                out.fill_circle(cx, cy, size * 0.19, ink);
+                for k in 0..8 {
+                    let a = k as f32 * std::f32::consts::TAU / 8.0;
+                    let (sin, cos) = a.sin_cos();
+                    let (r0, r1) = (size * 0.30, size * 0.45);
+                    out.line(cx + cos * r0, cy + sin * r0, cx + cos * r1, cy + sin * r1, stroke, ink);
+                }
+            }
+            ShadeHit::Vibration => {
+                // Three bars, the middle one longer: a motor tapping.
+                for (i, tall) in [0.36f32, 0.68, 0.36].iter().enumerate() {
+                    let x = cx + (i as f32 - 1.0) * size * 0.24;
+                    out.fill_round_rect(x - size * 0.06, cy - size * tall / 2.0, size * 0.12, size * tall, size * 0.06, ink);
+                }
+            }
+        }
+    }
+
+    /// How far along the bar under the sign has come, 0 to 1.
+    pub fn data_progress(&self) -> f32 {
+        self.state.data_progress
+    }
+
+    /// Whether the decrypt page is up and the data partition is still being
+    /// opened, which is when the ring and the bar move.
+    pub fn decrypt_waiting(&self) -> bool {
+        self.screen() == Screen::Decrypt && matches!(self.state.data, Data::Closed | Data::Opening)
+    }
+
+    /// Set one of the sheet's sliders from where a finger is.
+    fn shade_slider(&mut self, which: Slider, track: Rect, x: f32) {
+        let level = ((x - track.x) / track.w).clamp(0.0, 1.0);
+        match which {
+            Slider::Brightness => self.state.brightness = level.max(MIN_BRIGHTNESS),
+            Slider::Vibration => self.state.vibration = level,
+        }
+        self.dirty = true;
+    }
+
+    /// The control centre, pulled down from the top edge: the time and the
+    /// battery, the toggles a recovery has a use for, and the backlight.
+    fn paint_shade(&mut self, out: &mut Canvas, t: &Theme, f: &Fonts, info: &DeviceInfo, clock: &str) {
+        self.shade_hits.clear();
+        if self.shade <= 0.0 {
+            return;
+        }
+        let m = t.m;
+        let w = m.w as f32;
+        let l = self.state.lang;
+        let white = Rgba::rgb(255, 255, 255);
+        let tall = m.dp(SHADE_HEIGHT_DP);
+        let sheet = tall * self.shade;
+        let top = sheet - tall;
+        // Glass: what the page shows under the sheet, blurred and darkened,
+        // with the paper's corners at the foot left as they were, and a veil
+        // over the rest of the screen that still shows through.
+        let corner = m.dp(34.0);
+        let rw = corner as u32;
+        let sheet_px = sheet.max(1.0) as u32;
+        let corners = if sheet_px > rw * 2 && w as u32 > rw * 2 {
+            let y0 = sheet_px - rw;
+            let left = out.crop(0, y0, rw, rw);
+            let right = out.crop(w as u32 - rw, y0, rw, rw);
+            Some((left, right, y0))
+        } else {
+            None
+        };
+        out.frost(0, 0, w as u32, sheet_px, 8, Rgba::rgb(14, 14, 18).with_alpha(162));
+        if let Some((left, right, y0)) = corners {
+            let (rr, rwm) = (corner, rw as f32);
+            out.restore_where(&left, 0, y0, |dx, dy| {
+                let (cx, cy) = (rwm, 0.0);
+                (dx as f32 - cx).powi(2) + (dy as f32 - cy).powi(2) > rr * rr
+            });
+            out.restore_where(&right, w as u32 - rw, y0, |dx, dy| {
+                (dx as f32).powi(2) + (dy as f32).powi(2) > rr * rr
+            });
+        }
+        // Below the sheet the page is left exactly as it is: the sheet is
+        // seen to come over it, not to put the lights out behind it.
+        // A grabber at the foot of the sheet, as the phone's own has.
+        out.fill_round_rect(w / 2.0 - m.dp(18.0), sheet - m.dp(13.0), m.dp(36.0), m.dp(5.0), m.dp(2.5), white.with_alpha(80));
+        // The time at the left, what is left in the battery at the right.
+        out.text(&f.heading, clock, m.margin, top + m.dp(66.0), m.dp(44.0), white, None);
+        if let Some((level, _)) = self.bar(clock, info).battery {
+            let said = format!("{level}%");
+            let wide = out.text_width(&f.body, &said, m.row_title_px);
+            out.text(&f.body, &said, w - m.margin - wide, top + m.dp(58.0), m.row_title_px, white.with_alpha(190), None);
+        }
+        // The toggles, as round-cornered panes of glass over the sheet.
+        let on = self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On);
+        let wlan = if on {
+            l.pick(["WLAN · 已开", "WLAN · 已開", "WLAN · on"])
+        } else {
+            l.pick(["WLAN · 已关", "WLAN · 已關", "WLAN · off"])
+        };
+        let tiles: [(ShadeHit, &str, bool); 4] = [
+            (ShadeHit::Wlan, wlan, on),
+            (ShadeHit::Screenshot, l.pick(["截图", "截圖", "Screenshot"]), false),
+            (ShadeHit::Reboot, l.pick(["重启", "重新啟動", "Reboot"]), false),
+            (ShadeHit::Sleep, l.pick(["熄屏", "關閉螢幕", "Screen off"]), false),
+        ];
+        let (gap, th) = (m.dp(14.0), m.dp(98.0));
+        let tw = (w - m.margin * 2.0 - gap) / 2.0;
+        let tiles_top = top + m.dp(128.0);
+        let mut hits = Vec::new();
+        for (i, (hit, label, on)) in tiles.iter().enumerate() {
+            let (col, row) = (i % 2, i / 2);
+            let x = m.margin + col as f32 * (tw + gap);
+            let y = tiles_top + row as f32 * (th + gap);
+            let rect = Rect::new(x, y, tw, th);
+            let fill = if *on { t.pal.accent.with_alpha(72) } else { white.with_alpha(20) };
+            out.fill_round_rect(x, y, tw, th, m.dp(26.0), fill);
+            let ink = if *on { white } else { white.with_alpha(238) };
+            Self::shade_glyph(out, t, *hit, x + m.dp(33.0), y + m.dp(35.0), m.dp(26.0), ink);
+            out.text(&f.body, label, x + m.dp(18.0), y + th - m.dp(21.0), m.row_title_px, ink, None);
+            hits.push((rect, *hit));
+        }
+        // The backlight and the motor, each over a track of thin glass.
+        let glyph_x = m.margin + m.dp(13.0);
+        let label_x = m.margin + m.dp(36.0);
+        let mut row = tiles_top + 2.0 * (th + gap) + m.dp(24.0);
+        for (which, hit, name) in [
+            (Slider::Brightness, ShadeHit::Brightness, l.pick(["亮度", "亮度", "Brightness"])),
+            (Slider::Vibration, ShadeHit::Vibration, l.pick(["振动", "震動", "Vibration"])),
+        ] {
+            let value = match which {
+                Slider::Brightness => self.state.brightness,
+                Slider::Vibration => self.state.vibration,
+            };
+            Self::shade_glyph(out, t, hit, glyph_x, row - m.dp(5.0), m.dp(21.0), white.with_alpha(210));
+            out.text(&f.body, name, label_x, row, m.sub_px, white.with_alpha(210), None);
+            let track = Rect::new(m.margin, row + m.dp(13.0), w - m.margin * 2.0, m.slider_h);
+            out.fill_round_rect(track.x, track.y, track.w, track.h, track.h / 2.0, white.with_alpha(28));
+            let filled = (track.w * value.clamp(0.0, 1.0)).max(track.h);
+            out.fill_round_rect(track.x, track.y, filled, track.h, track.h / 2.0, t.pal.accent);
+            out.fill_circle(track.x + filled - track.h / 2.0, track.y + track.h / 2.0, m.slider_knob / 2.0, white);
+            hits.push((track, hit));
+            row += m.dp(13.0) + m.slider_h + m.dp(26.0);
+        }
+        self.shade_hits = hits;
+    }
+
+    /// Shut the control centre at once, for a toggle that opens a page.
+    fn close_shade(&mut self) {
+        self.shade = 0.0;
+        self.shade_settle = None;
+        self.shade_last = None;
+        self.shade_speed = 0.0;
+        self.dirty = true;
+    }
+
+    /// A finger on the control centre, or one pulling it down from the top.
+    fn shade_touch(&mut self, ev: Touch, now: u64) -> Vec<Effect> {
+        let t = self.theme();
+        match ev {
+            Touch::Down(x, y) => {
+                if self.shade > 0.0 {
+                    if let Some((rect, hit)) = self.shade_hits.iter().find(|(r, _)| r.contains(x, y)).copied() {
+                        match hit {
+                            ShadeHit::Brightness | ShadeHit::Vibration => {
+                                let which = if hit == ShadeHit::Brightness { Slider::Brightness } else { Slider::Vibration };
+                                self.shade_slider(which, rect, x);
+                                self.drag = Drag::Slider(which, rect);
+                            }
+                            _ => self.shade_press = Some((hit, y)),
+                        }
+                        return Vec::new();
+                    }
+                }
+                self.drag = Drag::Shade { start: y, from: self.shade };
+                Vec::new()
+            }
+            Touch::Move(x, y) => {
+                if let Drag::Slider(which, track) = self.drag {
+                    self.shade_slider(which, track, x);
+                    return Vec::new();
+                }
+                // A finger that came down on a tile and then moved was pulling
+                // the sheet: the tile is not pressed after all.
+                if let Some((_, down)) = self.shade_press {
+                    if (y - down).abs() > t.m.dp(14.0) {
+                        self.shade_press = None;
+                        self.drag = Drag::Shade { start: down, from: self.shade };
+                    }
+                }
+                if let Drag::Shade { start, from } = self.drag {
+                    let pulled = from * SHADE_PULL_DP + (y - start);
+                    // A sheet pulled past its end gives less and less, as the
+                    // phone's own does.
+                    let eased = if pulled > 0.0 { pulled * (1.0 - 0.22 * (pulled / SHADE_PULL_DP).min(1.0)) } else { pulled };
+                    self.shade = (eased / SHADE_PULL_DP).clamp(0.0, 1.0);
+                    if let Some((was_at, was_y)) = self.shade_last {
+                        let dt = now.saturating_sub(was_at) as f32 / 1000.0;
+                        if dt > 0.0005 {
+                            self.shade_speed = self.shade_speed * 0.55 + ((y - was_y) / dt) * 0.45;
+                        }
+                    }
+                    self.shade_last = Some((now, y));
+                    self.shade_settle = None;
+                    self.dirty = true;
+                }
+                Vec::new()
+            }
+            Touch::Up => {
+                let mut fx = Vec::new();
+                if let Some((hit, _)) = self.shade_press.take() {
+                    match hit {
+                        ShadeHit::Wlan => {
+                            let on = self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On);
+                            fx.push(Effect::Wlan(!on));
+                        }
+                        ShadeHit::Screenshot => {
+                            self.close_shade();
+                            fx.push(Effect::Screenshot { storage: true });
+                        }
+                        ShadeHit::Reboot => {
+                            self.close_shade();
+                            fx.extend(self.act(Action::Open(Screen::Reboot), now));
+                        }
+                        ShadeHit::Sleep => {
+                            self.close_shade();
+                            self.sleep(now);
+                        }
+                        ShadeHit::Brightness | ShadeHit::Vibration => {}
+                    }
+                    return fx;
+                }
+                if matches!(self.drag, Drag::Slider(..)) {
+                    self.drag = Drag::Idle;
+                }
+                if matches!(self.drag, Drag::Shade { .. }) {
+                    self.drag = Drag::Idle;
+                    // Let go, it carries on a little on the way it was going,
+                    // so a flick opens it and a slow drag settles by where it
+                    // got to.
+                    let heading = self.shade + self.shade_speed / 1400.0;
+                    let target = if heading >= SHADE_KEEPS { SHADE_PULL_DP } else { 0.0 };
+                    let from = self.shade * SHADE_PULL_DP - target;
+                    let speed = self.shade_speed.clamp(-2600.0, 2600.0);
+                    self.shade_settle = Some((now, from, speed, SHADE_PERIOD, target));
+                    self.shade_last = None;
+                    self.shade_speed = 0.0;
+                    self.dirty = true;
+                }
+                fx
+            }
+        }
+    }
+
+    /// The lock the panel woke to: a near-black veil over the page, the date,
+    /// the time and how much is left in the battery in the middle of the
+    /// upper half, and a knob at the foot to drag across.
+    fn paint_lock(&mut self, out: &mut Canvas, t: &Theme, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+        let m = t.m;
+        let (w, h) = (m.w as f32, m.h as f32);
+        let ink = Rgba::rgb(255, 255, 255);
+        out.fill_rect(0.0, 0.0, w, h, Rgba::rgb(6, 6, 8).with_alpha(226));
+        let x = w / 2.0;
+        // The date over the time, and what is left in the battery under it,
+        // as the phone's own lock has them.
+        // The date sits right over the time, as the phone's own lock has it.
+        if !self.date.is_empty() {
+            out.text_center(&f.body, &self.date, x, m.dp(190.0), m.dp(22.0), ink.with_alpha(224));
+        }
+        out.text_center(&f.heading, clock, x, m.dp(256.0), m.dp(88.0), ink);
+        if let Some((level, _)) = self.bar(clock, info).battery {
+            out.text_center(&f.body, &format!("{level}%"), x, m.dp(322.0), m.sub_px, ink.with_alpha(214));
+        }
+        // The knob at the foot, in the style every other swipe-to-confirm in
+        // the recovery uses, easing back when a hand lets it go short.
+        let along = match self.unlock_back {
+            Some((at, from)) => {
+                let t = (now.saturating_sub(at) as f32 / UNLOCK_BACK_MS as f32).clamp(0.0, 1.0);
+                from * (1.0 - t) * (1.0 - t)
+            }
+            None => self.unlock,
+        };
+        let label = self.state.lang.pick(["滑动解锁", "滑動解鎖", "Swipe to unlock"]);
+        let track = widgets::confirm(out, t, f, h - m.dp(150.0), label, false, along);
+        self.lock_track = Some(track);
     }
 
     /// Draw the page shown as `view` has it: all of it but the status bar,
@@ -6034,6 +6520,61 @@ impl App {
         Vec::new()
     }
 
+    /// The date the lock shows, as the system keeps it.
+    pub fn set_date(&mut self, date: String) {
+        if self.date != date {
+            self.date = date;
+            if self.locked {
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// A finger on the lock: dragging the knob moves it, letting go past
+    /// `UNLOCKED` uncovers the page, and anything else springs back.
+    fn lock_touch(&mut self, ev: Touch, now: u64) -> Vec<Effect> {
+        match ev {
+            Touch::Down(x, y) => {
+                if let Some(track) = self.lock_track {
+                    let knob = track.x + (track.w - track.h) * self.unlock;
+                    let reach = track.h * 0.6;
+                    let on = x >= track.x - reach
+                        && x <= track.x + track.w + reach
+                        && y >= track.y - reach
+                        && y <= track.y + track.h + reach;
+                    if on {
+                        self.drag = Drag::Lock { track, grab: x - knob };
+                    }
+                }
+            }
+            Touch::Move(x, _) => {
+                if let Drag::Lock { track, grab } = self.drag {
+                    let travel = (track.w - track.h).max(1.0);
+                    let along = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
+                    if (along - self.unlock).abs() > f32::EPSILON {
+                        self.unlock = along;
+                        self.dirty = true;
+                    }
+                }
+            }
+            Touch::Up => {
+                if matches!(self.drag, Drag::Lock { .. }) {
+                    self.drag = Drag::Idle;
+                    if self.unlock >= UNLOCKED {
+                        self.locked = false;
+                        self.unlock = 0.0;
+                    } else if self.unlock > 0.0 {
+                        // Short of the end: the knob eases back from where the
+                        // hand left it, so that it is seen to move.
+                        self.unlock_back = Some((now, self.unlock));
+                    }
+                    self.dirty = true;
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
         // A finger on the dark panel lights nothing, as on the phone's own
         // system, where the power key lights it -- except that two taps close
@@ -6054,6 +6595,18 @@ impl App {
                 }
             }
             return Vec::new();
+        }
+        // The lock that the panel woke to takes every finger: only its knob
+        // moves, and the page is uncovered when the knob reaches the end.
+        if self.locked {
+            return self.lock_touch(ev, now);
+        }
+        // The control centre takes every finger while it is over the page or
+        // being pulled out, and one that comes down from the top edge starts
+        // that pull.
+        let pulling = matches!(self.drag, Drag::Shade { .. });
+        if self.shade > 0.0 || pulling || matches!(ev, Touch::Down(_, y) if y <= self.theme().m.dp(40.0)) {
+            return self.shade_touch(ev, now);
         }
         // A finger on the charging screen sends it away for the page, and
         // does nothing else until it lifts.
@@ -6245,6 +6798,10 @@ impl App {
                 }
                 Drag::Waking => self.drag = Drag::Waking,
                 Drag::Held => self.drag = Drag::Held,
+                // The lock takes every finger of its own, so a knob dragged
+                // there never reaches the page's own handling.
+                Drag::Lock { .. } => {}
+                Drag::Shade { start, from } => self.drag = Drag::Shade { start, from },
                 Drag::Idle => {}
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {
@@ -6388,6 +6945,12 @@ impl App {
             if key == Key::Power {
                 self.wake(now);
             }
+            self.button = Some((key, Press::Spent));
+            return fx;
+        }
+        // The lock takes every button but the power key, which darkens the
+        // panel again: nothing behind the lock answers to a key.
+        if self.locked && key != Key::Power {
             self.button = Some((key, Press::Spent));
             return fx;
         }

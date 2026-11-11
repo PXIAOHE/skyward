@@ -720,37 +720,12 @@ fn data_status(cx: &Ctx, mut c: Canvas, icon: Icon, title: &str, note: Option<&s
     let sign_cy = m.dp(150.0);
     c.fill_circle(x, sign_cy, m.dp(30.0), t.pal.card);
     icons::glyph(&mut c, icon, x, sign_cy, m.dp(40.0), t.pal.accent);
-    // While the phone's parts come up, a ring turns about the sign and a bar
-    // under it says how far the work has come, so the wait is seen to move
-    // rather than looking like a screen that stopped.
-    let preparing = matches!(cx.state.data, Data::Closed | Data::Opening);
-    if preparing {
-        let r = m.dp(40.0);
-        let phase = (crate::progress::phase_ms() % 1500) as f32 / 1500.0;
-        let start = -std::f32::consts::FRAC_PI_2 + phase * std::f32::consts::TAU;
-        c.stroke_circle(x, sign_cy, r, m.dp(1.5), t.pal.track);
-        // 拖尾：越往后越淡
-        for k in 0..4 {
-            let a = 0.5 + 0.5 * (k as f32 / 4.0);
-            let color = crate::color::mix(t.pal.bg, t.pal.accent, a * 0.55);
-            c.stroke_arc(x, sign_cy, r, start - 0.14 * (4 - k) as f32, 0.15, m.dp(2.5), color);
-        }
-        c.stroke_arc(x, sign_cy, r, start, 0.9, m.dp(2.5), t.pal.accent);
-    }
+    // The ring that turns about the sign while the phone's parts come up is
+    // laid over the page rather than drawn into it: it moves every frame,
+    // and a page rebuilt every frame is a page drawn slowly.
     c.text_center(&f.heading, title, x, sign_cy + m.dp(64.0), m.dp(24.0), t.pal.text);
     if let Some(note) = note {
         c.text_center(&f.body, note, x, sign_cy + m.dp(98.0), m.sub_px, t.pal.subtitle);
-    }
-    if preparing {
-        let done = crate::progress::done();
-        let (w, h) = (m.dp(200.0), m.dp(4.0));
-        let bar = sign_cy + m.dp(124.0);
-        c.fill_round_rect(x - w / 2.0, bar, w, h, h / 2.0, t.pal.track);
-        if done > 0.0 {
-            c.fill_round_rect(x - w / 2.0, bar, w * done, h, h / 2.0, t.pal.accent);
-            // 进度头的一点光
-            c.fill_circle(x - w / 2.0 + w * done, bar + h / 2.0, m.dp(3.5), t.pal.accent);
-        }
     }
     let mut out = Vec::new();
     if let Some(why) = why {
@@ -762,7 +737,9 @@ fn data_status(cx: &Ctx, mut c: Canvas, icon: Icon, title: &str, note: Option<&s
     let leave = l.pick(if matches!(cx.state.data, Data::Open | Data::Erased) { ["完成", "完成", "Done"] } else { NOT_NOW });
     c.text_center(&f.heading, leave, x, leave_cy, m.row_title_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(x - m.dp(80.0), leave_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
-    Frame { header: false, ..Frame::new(t, c, out, l.pick(DECRYPT), 0.0) }
+    // No `<` on this page: it is the one the recovery opens on, and there is
+    // nothing behind it to go back to.
+    Frame { back: false, header: false, ..Frame::new(t, c, out, l.pick(DECRYPT), 0.0) }
 }
 
 /// What leaves the decrypt page with the data partition left as it is.

@@ -847,6 +847,11 @@ fn clock(zone: usize) -> Result<String> {
     Ok(skyward_ui::fmt::clock(unix_now()?, zone))
 }
 
+/// The date the lock shows, in the language the pages speak.
+fn today(zone: usize, lang: skyward_ui::Lang) -> Result<String> {
+    Ok(skyward_ui::fmt::date(lang, unix_now()?, zone))
+}
+
 /// Tell the kernel log how the data partition was mounted, where opening
 /// it mounted it: the check made first, in full where it found something,
 /// and the device it is read through.
@@ -1165,6 +1170,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // besides the panel's: made ready now, the first slide finds them so.
     Canvas::keep_ready(w, h, 3);
     let mut shown_clock = String::new();
+    let mut shown_stage = skyward_ui::progress::stage();
+    // A screenshot asked for, taken once the next frame is drawn.
+    let mut pending_shot: Option<bool> = None;
+    // How long the decrypt page was up, and where its bar had got to, so that
+    // the bar's speed can be set from what the phone really takes.
+    let (mut was_waiting, mut waiting_since) = (false, 0u64);
+    let mut last_progress = 0.0f32;
     // The readings are taken again on a thread of their own; those taken
     // here as work ends say how it left the phone, and readings started
     // before them are out of date.
@@ -1490,6 +1502,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             shown_clock = time;
             app.redraw();
         }
+        app.set_date(today(app.state.time_zone, app.state.lang)?);
         for reading in readings.taken() {
             match reading {
                 Reading::Battery(battery, at) => {
@@ -1530,6 +1543,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 let t0 = Instant::now();
                 app.compose(&mut screen, &fonts, &info, &shown_clock, now);
                 surface.present(&screen)?;
+                if let Some(storage) = pending_shot.take() {
+                    let t0 = Instant::now();
+                    let saved = save_screenshot(&screen, storage, app.state.time_zone).map_err(|e| format!("{e:#}"));
+                    eprintln!("screenshot {saved:?} in {} ms", t0.elapsed().as_millis());
+                    app.screenshot_saved(saved, now);
+                }
                 eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
                 if let Some(path) = dump {
                     fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
@@ -1580,11 +1599,37 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // A resting panel turns off once its rest is over.
         let rest_left = rested_at.map(|at| REST.saturating_sub(at.elapsed()).as_millis() as i32);
         let mut timeout = if ahead { 0 } else { until_due.into_iter().chain(rest_left).min().map_or(1000, |t| t.clamp(floor, 1000)) };
-        // While the phone's parts are still coming up, the page is redrawn
-        // every frame so the ring beside it keeps turning.
-        if skyward_ui::progress::stage() < skyward_ui::progress::READY {
-            timeout = timeout.min(33);
+        // The ring on the decrypt page keeps turning while the phone's parts
+        // come up. It is laid over the page as the screen is composed, so the
+        // page itself is built again only when the stage it names changes,
+        // and the frame is drawn again each frame meanwhile.
+        let stage = skyward_ui::progress::stage();
+        if stage != shown_stage {
+            shown_stage = stage;
+            app.refresh();
         }
+        let waiting_now = app.decrypt_waiting();
+        if waiting_now && !was_waiting {
+            waiting_since = now;
+        }
+        if !waiting_now && was_waiting {
+            // `last_progress` is read before the tick cleared it, so the note
+            // says where the bar had really got to.
+            skyward_sys::kmsg(&format!(
+                "the decrypt page was up {} ms; its bar had reached {}%",
+                now.saturating_sub(waiting_since),
+                (last_progress * 100.0).round() as i32
+            ))?;
+        }
+        was_waiting = waiting_now;
+        if waiting_now {
+            last_progress = app.data_progress();
+        }
+        if waiting_now {
+            app.redraw();
+            timeout = timeout.min(16);
+        }
+
         // With the display off, the phone sleeps unless something needs it
         // awake: work under way, fastboot or sideload, a restart on its way,
         // a command running in the terminal, a network being joined, the
@@ -2396,10 +2441,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // The panel shows the last frame drawn, which is what is
                     // saved; one that cannot be is the page's to report.
                     Effect::Screenshot { storage } => {
-                        let t0 = Instant::now();
-                        let saved = save_screenshot(&screen, storage, app.state.time_zone).map_err(|e| format!("{e:#}"));
-                        eprintln!("screenshot {saved:?} in {} ms", t0.elapsed().as_millis());
-                        app.screenshot_saved(saved, now);
+                        // Taken once the next frame is drawn, not now: a shot
+                        // asked for from the control centre would otherwise
+                        // have the control centre on it.
+                        pending_shot = Some(storage);
+                        app.redraw();
                     }
                     Effect::Sideload => {
                         ensure!(installer.is_none(), "an installer is running already");
@@ -2471,15 +2517,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::OpenData => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
                         // The devices and the secure services come up on a
-                        // thread of their own, so the page is drawn before
-                        // they are; opening data is the first thing that
-                        // cannot do without them.
-                        crate::wait_prepared();
+                        // thread of their own; the decrypting thread waits
+                        // for them itself, so the page goes on being drawn.
                         decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
                     }
                     Effect::Unlock { user, code } => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
-                        crate::wait_prepared();
                         let credential = code.into_bytes();
                         last_credential = Some(credential.clone());
                         attempt_was_remembered = false;

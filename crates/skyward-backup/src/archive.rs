@@ -99,13 +99,20 @@ fn children(folder: &Path) -> Result<Vec<(std::ffi::OsString, PathBuf, fs::Metad
 /// `skipped`, sockets, which only the program that made them answers, and
 /// what another filesystem mounted inside holds. A folder comes before what
 /// it holds. Tells how many bytes of file contents are archived so far.
-pub fn pack(root: &Path, skipped: &Skipped, out: impl Write, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
+pub fn pack(root: &Path, skipped: &Skipped, out: impl Write, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<usize> {
     let mut b = Builder::new(out);
     let meta = fs::symlink_metadata(root).with_context(|| format!("look at {}", root.display()))?;
-    let mut packing = Packing { links: HashMap::new(), done: 0, cancel, progress };
+    let mut packing = Packing { links: HashMap::new(), done: 0, cancel, progress, locked: 0 };
     packing.folder(&mut b, root, Path::new(""), meta.dev(), skipped, key(root)?.as_deref())?;
     b.into_inner().context("finish the archive")?.flush().context("finish the archive")?;
-    Ok(())
+    Ok(packing.locked)
+}
+
+/// Whether `e` is a file this recovery cannot read now rather than one that
+/// is broken: a key it does not hold, as the second space's files keep theirs
+/// behind the owner's credential, or a permission the running system set.
+fn locked(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(1) | Some(13) | Some(126))
 }
 
 struct Packing<'a> {
@@ -115,6 +122,9 @@ struct Packing<'a> {
     done: u64,
     cancel: &'a AtomicBool,
     progress: &'a mut dyn FnMut(u64),
+    /// Files left out because this recovery cannot read them, such as those
+    /// whose key the second space keeps behind the owner's credential.
+    locked: usize,
 }
 
 impl Packing<'_> {
@@ -177,7 +187,16 @@ impl Packing<'_> {
             }
             header.set_entry_type(EntryType::Regular);
             header.set_size(meta.len());
-            let file = File::open(path)?;
+            let file = match File::open(path) {
+                Ok(file) => file,
+                Err(e) if locked(&e) => {
+                    // Counted and left out: a file whose key is not here now
+                    // is no reason to lose the rest of the backup.
+                    self.locked += 1;
+                    return Ok(());
+                }
+                Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
+            };
             let feed = Feed { file, left: meta.len(), done: &mut self.done, cancel: self.cancel, progress: &mut *self.progress };
             b.append_data(&mut header, rel, feed)?;
         } else {
@@ -562,7 +581,15 @@ fn open_bare(path: &Path) -> Result<File> {
 #[cfg(target_os = "android")]
 fn fs_attributes(path: &Path) -> Result<FsXattr> {
     use std::os::fd::AsRawFd;
-    let file = open_bare(path)?;
+    // The second space keeps its files behind the owner's credential, and
+    // this recovery leaves them closed: asking the kernel about one answers
+    // ENOKEY, and the file is left out of the archive rather than the whole
+    // backup failing.
+    let file = match open_bare(path) {
+        Ok(file) => file,
+        Err(e) if e.downcast_ref::<io::Error>().is_some_and(locked) => return Ok(FsXattr::default()),
+        Err(e) => return Err(e),
+    };
     let mut fsx = FsXattr::default();
     if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FSGETXATTR, &mut fsx) } != 0 {
         let e = io::Error::last_os_error();

@@ -131,7 +131,7 @@ groups = ["root"]
 # recovery's own terminal.
 [[service]]
 path = "/system/bin/sh"
-args = ["-c", "(sleep 25; D=/mnt/vendor/persist/skyward; mkdir -p $D; { echo '== ps =='; ps -A 2>/dev/null | grep -E 'wpa_supplicant|hostapd|qseecom|ssgtzd|keymint|weaver'; echo; echo '== sockets =='; ls -l /skyward/run/supplicant/sockets/ 2>&1; echo; echo '== supplicant conf =='; cat $D/wpa_supplicant.conf 2>&1; echo; echo '== touch nodes =='; cat /sys/devices/platform/goodix_ts.0/*_enable 2>&1; cat /sys/class/touch/touch_dev/enable_touch_raw 2>&1; echo; echo '== dmesg touch =='; dmesg 2>/dev/null | grep -E 'goodix_ts_report_finger|brl_event|enable_touch_raw' | tail -25; echo; echo '== dmesg wlan =='; dmesg 2>/dev/null | grep -iE 'wlan|cnss|supplicant' | tail -20; } > $D/diag.txt 2>&1; chmod 644 $D/diag.txt) >/dev/null 2>&1 &"]
+args = ["-c", "(sleep 25; D=/mnt/vendor/persist/skyward; mkdir -p $D; { echo '== ps =='; ps -A 2>/dev/null | grep -E 'wpa_supplicant|hostapd|qseecom|ssgtzd|keymint|weaver'; echo; echo '== sockets =='; ls -l /skyward/run/supplicant/sockets/ 2>&1; echo; echo '== supplicant conf =='; cat $D/wpa_supplicant.conf 2>&1; echo; echo '== touch nodes =='; cat /sys/devices/platform/goodix_ts.0/*_enable 2>&1; cat /sys/class/touch/touch_dev/enable_touch_raw 2>&1; echo; echo '== dmesg touch =='; dmesg 2>/dev/null | grep -E 'goodix_ts_report_finger|brl_event|enable_touch_raw' | tail -25; echo; echo '== dmesg wlan =='; dmesg 2>/dev/null | grep -iE 'wlan|cnss|supplicant' | tail -20; echo; echo '== decrypt page =='; dmesg 2>/dev/null | grep -i 'decrypt page' | tail -5; } > $D/diag.txt 2>&1; chmod 644 $D/diag.txt) >/dev/null 2>&1 &"]
 oneshot = true
 user = "root"
 groups = ["root"]
@@ -184,3 +184,12 @@ resonance = "/sys/class/qcom-haptics/lra_frequency_hz"
 drive_swings = 1.2
 max_amplitude = 0.45
 strength = { lightest = 0.2, strongest = 0.6 }
+
+# What a backup takes in beyond the parts every Android phone keeps: the
+# baseband's own settings and the identity the phone was made with, and the
+# sensors' calibration, all of which the phone's own recovery restores too.
+# Files of the data partition that this recovery holds no key for — the
+# second space's, which HyperOS keeps behind the owner's credential — are
+# left out by the archiver itself and counted, rather than failing the backup.
+[backup]
+efs = ["modemst1", "modemst2", "fsc", "persist", "bluetooth_a", "bluetooth_b"]
