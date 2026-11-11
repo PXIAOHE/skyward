@@ -2332,6 +2332,10 @@ const SLID: f32 = 0.9;
 
 /// How far the lock's knob is dragged before letting go takes the lock away.
 const UNLOCKED: f32 = 0.96;
+
+/// How long the lock's knob takes to ease back to the start once a hand
+/// lets it go short of the end.
+const UNLOCK_BACK_MS: u64 = 220;
 /// How long the power key held takes the knob the whole way along.
 const SLIDE_MS: u64 = 700;
 /// The response, in seconds, of the spring the page scrolls on to show
@@ -2711,9 +2715,9 @@ pub struct App {
     lock_track: Option<Rect>,
     /// The date the lock shows, as the system keeps it.
     date: String,
-    /// The knob of the lock going back to the start after a hand let it go
-    /// short of the end.
-    unlock_spring: Option<Spring>,
+    /// When a hand let the lock's knob go short of the end, and where it
+    /// was then: the knob eases back from there over [`UNLOCK_BACK_MS`].
+    unlock_back: Option<(u64, f32)>,
     tracker: Tracker,
     /// The page gliding on after a flick.
     fling: Option<Fling>,
@@ -2832,7 +2836,7 @@ impl App {
             unlock: 0.0,
             lock_track: None,
             date: String::new(),
-            unlock_spring: None,
+            unlock_back: None,
             tracker: Tracker::default(),
             fling: None,
             glide: None,
@@ -2917,7 +2921,7 @@ impl App {
                 || self.seek.is_some()
                 || sliding
                 || self.cue.is_some()
-                || self.unlock_spring.is_some()
+                || self.unlock_back.is_some()
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
@@ -3120,10 +3124,11 @@ impl App {
                 self.cue = None;
             }
         }
-        if let Some(s) = self.unlock_spring {
+        if let Some((at, _)) = self.unlock_back {
             self.dirty = true;
-            if s.at(now).1 {
-                self.unlock_spring = None;
+            if now >= at + UNLOCK_BACK_MS {
+                self.unlock_back = None;
+                self.unlock = 0.0;
             }
         }
         if self.screen() == Screen::About {
@@ -4502,32 +4507,24 @@ impl App {
         // The date over the time, and what is left in the battery under it,
         // as the phone's own lock has them.
         if !self.date.is_empty() {
-            out.text_center(&f.body, &self.date, x, m.dp(150.0), m.sub_px, ink.with_alpha(214));
+            out.text_center(&f.body, &self.date, x, m.dp(176.0), m.dp(22.0), ink.with_alpha(224));
         }
-        out.text_center(&f.heading, clock, x, m.dp(232.0), m.dp(88.0), ink);
+        out.text_center(&f.heading, clock, x, m.dp(240.0), m.dp(88.0), ink);
         if let Some((level, _)) = self.bar(clock, info).battery {
-            out.text_center(&f.body, &format!("{level}%"), x, m.dp(300.0), m.sub_px, ink.with_alpha(214));
+            out.text_center(&f.body, &format!("{level}%"), x, m.dp(308.0), m.sub_px, ink.with_alpha(214));
         }
-        // The knob at the foot: a pill of the accent, the words through it,
-        // and a knob that goes back to the start when a hand lets it go
-        // short of the end.
-        let along = self.unlock_spring.map_or(self.unlock, |s| s.at(now).0.clamp(0.0, 1.0));
-        let (bx, bw, bh) = (m.margin, w - m.margin * 2.0, m.dp(64.0));
-        let top = h - m.dp(150.0);
-        let (cy, k) = (top + bh / 2.0, bh - m.dp(10.0));
-        out.fill_round_rect(bx, top, bw, bh, bh / 2.0, t.pal.accent);
-        if along > 0.0 {
-            out.fill_round_rect(bx, top, bh + (bw - bh) * along, bh, bh / 2.0, ink.with_alpha(34));
-        }
+        // The knob at the foot, in the style every other swipe-to-confirm in
+        // the recovery uses, easing back when a hand lets it go short.
+        let along = match self.unlock_back {
+            Some((at, from)) => {
+                let t = (now.saturating_sub(at) as f32 / UNLOCK_BACK_MS as f32).clamp(0.0, 1.0);
+                from * (1.0 - t) * (1.0 - t)
+            }
+            None => self.unlock,
+        };
         let label = self.state.lang.pick(["滑动解锁", "滑動解鎖", "Swipe to unlock"]);
-        out.text_center(&f.heading, label, x + bh / 4.0, cy, m.row_title_px, ink);
-        let kcx = bx + bh / 2.0 + (bw - bh) * along;
-        out.fill_circle(kcx, cy, k / 2.0, ink);
-        let a = k * 0.3;
-        out.line(kcx - a * 0.5, cy, kcx + a * 0.5, cy, m.stroke, t.pal.accent);
-        out.line(kcx + a * 0.5, cy, kcx + a * 0.05, cy - a * 0.45, m.stroke, t.pal.accent);
-        out.line(kcx + a * 0.5, cy, kcx + a * 0.05, cy + a * 0.45, m.stroke, t.pal.accent);
-        self.lock_track = Some(Rect::new(bx, top, bw, bh));
+        let track = widgets::confirm(out, t, f, h - m.dp(150.0), label, false, along);
+        self.lock_track = Some(track);
     }
 
     /// Draw the page shown as `view` has it: all of it but the status bar,
@@ -6157,10 +6154,10 @@ impl App {
                     if self.unlock >= UNLOCKED {
                         self.locked = false;
                         self.unlock = 0.0;
-                    } else {
-                        // Short of the end: the knob springs back, rather than
-                        // being put back, so the hand sees where it got to.
-                        self.unlock_spring = Some(Spring::new(now, self.unlock, 0.0, 0.22));
+                    } else if self.unlock > 0.0 {
+                        // Short of the end: the knob eases back from where the
+                        // hand left it, so that it is seen to move.
+                        self.unlock_back = Some((now, self.unlock));
                     }
                     self.dirty = true;
                 }
