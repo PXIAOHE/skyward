@@ -1173,6 +1173,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut shown_stage = skyward_ui::progress::stage();
     // A screenshot asked for, taken once the next frame is drawn.
     let mut pending_shot: Option<bool> = None;
+    // How long the decrypt page was up, and where its bar had got to, so that
+    // the bar's speed can be set from what the phone really takes.
+    let (mut was_waiting, mut waiting_since) = (false, 0u64);
     // The readings are taken again on a thread of their own; those taken
     // here as work ends say how it left the phone, and readings started
     // before them are out of date.
@@ -1604,7 +1607,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             shown_stage = stage;
             app.refresh();
         }
-        if app.decrypt_waiting() {
+        let waiting_now = app.decrypt_waiting();
+        if waiting_now && !was_waiting {
+            waiting_since = now;
+        }
+        if !waiting_now && was_waiting {
+            skyward_sys::kmsg(&format!(
+                "the decrypt page was up {} ms; its bar had reached {}%",
+                now.saturating_sub(waiting_since),
+                (app.data_progress() * 100.0).round() as i32
+            ))?;
+        }
+        was_waiting = waiting_now;
+        if waiting_now {
             app.redraw();
             timeout = timeout.min(16);
         }

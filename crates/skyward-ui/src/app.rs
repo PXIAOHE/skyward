@@ -4671,6 +4671,11 @@ impl App {
         }
     }
 
+    /// How far along the bar under the sign has come, 0 to 1.
+    pub fn data_progress(&self) -> f32 {
+        self.state.data_progress
+    }
+
     /// Whether the decrypt page is up and the data partition is still being
     /// opened, which is when the ring and the bar move.
     pub fn decrypt_waiting(&self) -> bool {
