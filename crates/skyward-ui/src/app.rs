@@ -4659,7 +4659,9 @@ impl App {
     /// Shut the control centre at once, for a toggle that opens a page.
     fn close_shade(&mut self) {
         self.shade = 0.0;
-        self.shade_ease = None;
+        self.shade_settle = None;
+        self.shade_last = None;
+        self.shade_speed = 0.0;
         self.dirty = true;
     }
 
