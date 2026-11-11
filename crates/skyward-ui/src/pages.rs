@@ -387,6 +387,16 @@ pub fn settings(cx: &Ctx) -> Frame {
         "When on, a computer can manage the files in internal storage, once it is decrypted.",
     ]);
     y = widgets::footnote(&mut c, t, f, usb.bottom, note);
+    // The WLAN's own setting, where the stock page keeps it: whether the
+    // recovery opens it as it starts, and joins the network it kept.
+    y = widgets::section(&mut c, t, f, y, "WiFi");
+    let wifi = widgets::list(&mut c, t, f, y, &[
+        Row::new(l.pick(["WiFi 自动连接", "WiFi 自動連線", "WLAN on at start"]))
+            .icon(BLUE, Icon::Wlan)
+            .trail(Trail::Switch(s.wlan_auto)),
+    ]);
+    out.extend(hits(&wifi.rows, &[Action::Toggle(Switch::WlanAuto)]));
+    y = wifi.bottom;
     y = widgets::section(&mut c, t, f, y, l.pick(["调试", "偵錯", "Debugging"]));
     let debug = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal)]);
     out.extend(hits(&debug.rows, &[Action::Open(Screen::Terminal)]));
