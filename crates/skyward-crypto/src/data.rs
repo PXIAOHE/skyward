@@ -494,7 +494,7 @@ fn note_opened(user: u32, protector: &crate::user::Protector) {
     }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
-        let _ = write!(file, "user {user}: opened {} ({bound})\n", protector.id);
+        let _ = writeln!(file, "user {user}: opened {} ({bound})", protector.id);
     }
 }
 
