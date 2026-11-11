@@ -44,6 +44,11 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         if !Path::new(&s.path).is_file() {
             bail!("{} is missing; is its partition mounted?", s.path);
         }
+        // How long each one takes to come up, so a slow start can be named
+        // rather than guessed at.
+        let began = std::time::Instant::now();
+        let label = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
+        let _ = skyward_sys::kmsg(&format!("starting {label}"));
         let mut s = s.clone();
         if let Some(dir) = libraries {
             s.libraries.push(dir.to_string_lossy().into_owned());
@@ -52,13 +57,14 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         if s.oneshot {
             let status = command(&s, &who).status().with_context(|| format!("run {}", s.path))?;
             ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
-            skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
+            skyward_sys::kmsg(&format!("ran {} {} ({} ms)", s.path, s.args.join(" "), began.elapsed().as_millis()))?;
             continue;
         }
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
         thread::Builder::new().name(name).spawn(move || supervise(&s, &who)).context("start a supervising thread")?;
         ready(&waiting)?;
+        let _ = skyward_sys::kmsg(&format!("{label} is ready after {} ms", began.elapsed().as_millis()));
     }
     Ok(())
 }
