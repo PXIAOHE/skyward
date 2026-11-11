@@ -17,7 +17,7 @@ gamma = 2.2
 
 [modules]
 sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
-load = ["goodix_core", "xiaomi_touch", "stm_nfc_i2c", "nxp-nci"]
+load = ["goodix_core", "xiaomi_touch"]
 
 [touch]
 writes = [
@@ -117,23 +117,6 @@ libraries = ["/system/lib64", "/vendor/lib64"]
 ready_service = "android.hardware.boot.IBootControl/default"
 user = "root"
 groups = ["root"]
-
-# The weaver: the slot every user's secret is bound to on this NXP secure
-# element. Keymint wraps the keys with it, so it is the other half of the
-# way the data partition opens; where it cannot answer, the same secret's
-# other blob, the one the credential service guards, is tried instead. It
-# goes last, so that a weaver that never comes up holds nothing else back.
-# The phone describes it in no file a recovery reads — its init script
-# declares it — so the description is written here and published as the
-# service directory starts, without which the directory refuses it.
-[[service]]
-path = "/kmlibs/km.sh"
-args = ["/odm/bin/hw/android.hardware.weaver-service.nxp-qti"]
-libraries = ["/kmlibs", "/odm/lib64", "/vendor/lib64", "/system/lib64", "/mnt/system/system/lib64/bootstrap"]
-ready_service = "android.hardware.weaver.IWeaver/default"
-manifest = '''<manifest version="1.0" type="device"><hal format="aidl"><name>android.hardware.weaver</name><version>2</version><fqname>IWeaver/default</fqname></hal></manifest>'''
-user = "root"
-groups = ["root", "drmrpc"]
 
 # WLAN: the kiwi node in the device tree, driven by qca_cld3_kiwi_v2, the
 # one WLAN driver the phone's own modules.load lists. The cfg80211 that

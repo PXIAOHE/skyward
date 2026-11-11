@@ -517,9 +517,11 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let at = skyward_block::fstab::mount(name)?;
         skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
     }
+    skyward_ui::progress::reached(skyward_ui::progress::DRIVERS);
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }
+    skyward_ui::progress::reached(skyward_ui::progress::DESCRIPTIONS);
     if !cfg.owners.is_empty() {
         let handed = hand_over(&cfg.owners)?;
         skyward_sys::kmsg(&format!("{handed} of the phone's own files handed to the accounts its init gives them"))?;
@@ -552,7 +554,9 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
+    skyward_ui::progress::reached(skyward_ui::progress::SERVICES);
     services::start(&services, libraries.as_deref())?;
+    skyward_ui::progress::reached(skyward_ui::progress::READY);
     agree_on_the_notes_key(&registering)
 }
 
@@ -844,6 +848,7 @@ pub(crate) fn wait_prepared() {
 
 #[cfg(target_os = "android")]
 fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
+    skyward_ui::progress::reached(skyward_ui::progress::PARTITIONS);
     match skyward_vab::mount_partitions(slot) {
         Ok(mounts) => {
             for d in &mounts.damaged {
@@ -860,6 +865,7 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         }
         Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
     }
+    skyward_ui::progress::reached(skyward_ui::progress::READY);
     Ok(())
 }
 
