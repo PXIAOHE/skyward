@@ -11,7 +11,14 @@ use std::path::Path;
 use std::str::FromStr;
 
 /// Version of this build, shown on the About page.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The build's version, as the build itself was named: `0.2.1-abc1234` where
+/// the workflow that made it said so, and the crate's own version otherwise.
+/// A build that tells only `0.2.1` cannot tell one of its own builds from
+/// another, and offers the update it is already running.
+pub const VERSION: &str = match option_env!("SKYWARD_BUILD") {
+    Some(named) => named,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 const CPU: &str = "/sys/devices/system/cpu";
 const POWER_SUPPLY: &str = "/sys/class/power_supply";
