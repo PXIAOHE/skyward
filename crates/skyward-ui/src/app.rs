@@ -1684,6 +1684,10 @@ pub struct State {
     /// lock its users' own files wait on.
     pub data: Data,
     pub code: String,
+    /// How far along the bar under the sign is, and where the ring's turn is,
+    /// while the data partition is being opened.
+    pub data_progress: f32,
+    pub data_phase: f32,
     /// Whether the screen lock is kept, so that the data partition opens as
     /// the recovery starts next time.
     pub remember: bool,
@@ -1821,6 +1825,8 @@ impl Default for State {
             system_notice: None,
             data: Data::Closed,
             code: String::new(),
+            data_progress: 0.0,
+            data_phase: 0.0,
             remember: false,
             search: String::new(),
             layer: Layer::Letters,
@@ -2352,6 +2358,14 @@ const SHADE_PERIOD: f32 = 0.62;
 /// go without speed.
 const SHADE_KEEPS: f32 = 0.36;
 
+/// How long the ring about the sign takes to come round once.
+const RING_MS: u64 = 1500;
+
+/// How fast the bar under it runs, as a share of its length per millisecond:
+/// one speed from its start to its end, so it never stands still waiting for
+/// the work to report.
+const DATA_RATE: f32 = 0.00017;
+
 /// How tall the control centre's sheet is, in dp, at full pull.
 const SHADE_HEIGHT_DP: f32 = 508.0;
 
@@ -2757,6 +2771,9 @@ pub struct App {
     /// carry on from.
     shade_last: Option<(u64, f32)>,
     shade_speed: f32,
+    /// When the decrypt page was first shown, for the bar that runs by the
+    /// clock while the data partition is being opened.
+    data_started: Option<u64>,
     /// What a finger pressed there, and where it came down: a finger that
     /// moves was pulling the sheet, not pressing a tile.
     shade_press: Option<(ShadeHit, f32)>,
@@ -2884,6 +2901,7 @@ impl App {
             shade_settle: None,
             shade_last: None,
             shade_speed: 0.0,
+            data_started: None,
             shade_press: None,
             shade_hits: Vec::new(),
             tracker: Tracker::default(),
@@ -2972,6 +2990,7 @@ impl App {
                 || self.cue.is_some()
                 || self.unlock_back.is_some()
                 || self.shade_settle.is_some()
+                || self.decrypt_waiting()
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
@@ -3180,6 +3199,17 @@ impl App {
                 self.unlock_back = None;
                 self.unlock = 0.0;
             }
+        }
+        // While the data partition is being opened, the ring comes round and
+        // the bar runs on with the clock, so a page that is waiting is seen to
+        // be waiting rather than standing still.
+        if self.decrypt_waiting() {
+            self.state.data_phase = (now % RING_MS) as f32 / RING_MS as f32;
+            let started = *self.data_started.get_or_insert(now);
+            self.state.data_progress = ((now.saturating_sub(started)) as f32 * DATA_RATE).min(0.97);
+            self.dirty = true;
+        } else {
+            self.data_started = None;
         }
         if let Some((at, from, speed, period, target)) = self.shade_settle {
             self.dirty = true;
@@ -4573,7 +4603,7 @@ impl App {
         let x = m.w as f32 / 2.0;
         let cy = m.dp(150.0);
         let r = m.dp(40.0);
-        let phase = (crate::progress::phase_ms() % 1500) as f32 / 1500.0;
+        let phase = self.state.data_phase;
         let start = -std::f32::consts::FRAC_PI_2 + phase * std::f32::consts::TAU;
         out.stroke_circle(x, cy, r, m.dp(1.5), t.pal.track);
         for k in 0..4 {
@@ -4582,13 +4612,17 @@ impl App {
             out.stroke_arc(x, cy, r, start - 0.14 * (4 - k) as f32, 0.15, m.dp(2.5), color);
         }
         out.stroke_arc(x, cy, r, start, 0.9, m.dp(2.5), t.pal.accent);
-        let done = crate::progress::done();
-        let (w, h) = (m.dp(200.0), m.dp(4.0));
+        // The bar is the clock's: it runs its length at one speed from the
+        // moment the page is shown, whether the phone's own parts are up yet
+        // or the opening has begun, and waits near its end for the opening to
+        // finish. A bar that followed the stages would jump a fifth at a time.
+        let done = self.state.data_progress;
+        let (bw, bh) = (m.dp(200.0), m.dp(4.0));
         let bar = cy + m.dp(124.0);
-        out.fill_round_rect(x - w / 2.0, bar, w, h, h / 2.0, t.pal.track);
+        out.fill_round_rect(x - bw / 2.0, bar, bw, bh, bh / 2.0, t.pal.track);
         if done > 0.0 {
-            out.fill_round_rect(x - w / 2.0, bar, w * done, h, h / 2.0, t.pal.accent);
-            out.fill_circle(x - w / 2.0 + w * done, bar + h / 2.0, m.dp(3.5), t.pal.accent);
+            out.fill_round_rect(x - bw / 2.0, bar, bw * done, bh, bh / 2.0, t.pal.accent);
+            out.fill_circle(x - bw / 2.0 + bw * done, bar + bh / 2.0, m.dp(3.5), t.pal.accent);
         }
     }
 
@@ -4627,6 +4661,12 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Whether the decrypt page is up and the data partition is still being
+    /// opened, which is when the ring and the bar move.
+    pub fn decrypt_waiting(&self) -> bool {
+        self.screen() == Screen::Decrypt && matches!(self.state.data, Data::Closed | Data::Opening)
     }
 
     /// Set one of the sheet's sliders from where a finger is.

@@ -1596,7 +1596,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             shown_stage = stage;
             app.refresh();
         }
-        if stage < skyward_ui::progress::READY {
+        if app.decrypt_waiting() {
             app.redraw();
             timeout = timeout.min(16);
         }

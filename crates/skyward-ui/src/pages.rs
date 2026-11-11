@@ -737,7 +737,9 @@ fn data_status(cx: &Ctx, mut c: Canvas, icon: Icon, title: &str, note: Option<&s
     let leave = l.pick(if matches!(cx.state.data, Data::Open | Data::Erased) { ["完成", "完成", "Done"] } else { NOT_NOW });
     c.text_center(&f.heading, leave, x, leave_cy, m.row_title_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(x - m.dp(80.0), leave_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
-    Frame { header: false, ..Frame::new(t, c, out, l.pick(DECRYPT), 0.0) }
+    // No `<` on this page: it is the one the recovery opens on, and there is
+    // nothing behind it to go back to.
+    Frame { back: false, header: false, ..Frame::new(t, c, out, l.pick(DECRYPT), 0.0) }
 }
 
 /// What leaves the decrypt page with the data partition left as it is.
