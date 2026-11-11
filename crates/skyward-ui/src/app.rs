@@ -4601,10 +4601,32 @@ impl App {
         let sheet = tall * self.shade;
         let top = sheet - tall;
         // Glass: what the page shows under the sheet, blurred and darkened,
-        // and a veil over the rest of the screen.
-        out.frost(0, 0, w as u32, sheet.max(1.0) as u32, 8, Rgba::rgb(14, 14, 18).with_alpha(190));
+        // with the paper's corners at the foot left as they were, and a veil
+        // over the rest of the screen that still shows through.
+        let corner = m.dp(34.0);
+        let rw = corner as u32;
+        let sheet_px = sheet.max(1.0) as u32;
+        let corners = if sheet_px > rw * 2 && w as u32 > rw * 2 {
+            let y0 = sheet_px - rw;
+            let left = out.crop(0, y0, rw, rw);
+            let right = out.crop(w as u32 - rw, y0, rw, rw);
+            Some((left, right, y0))
+        } else {
+            None
+        };
+        out.frost(0, 0, w as u32, sheet_px, 8, Rgba::rgb(14, 14, 18).with_alpha(162));
+        if let Some((left, right, y0)) = corners {
+            let (rr, rwm) = (corner, rw as f32);
+            out.restore_where(&left, 0, y0, |dx, dy| {
+                let (cx, cy) = (rwm, 0.0);
+                (dx as f32 - cx).powi(2) + (dy as f32 - cy).powi(2) > rr * rr
+            });
+            out.restore_where(&right, w as u32 - rw, y0, |dx, dy| {
+                (dx as f32).powi(2) + (dy as f32).powi(2) > rr * rr
+            });
+        }
         if sheet < h {
-            out.fill_rect(0.0, sheet, w, h - sheet, Rgba::rgb(0, 0, 0).with_alpha((120.0 * self.shade) as u8));
+            out.veil(0.0, sheet, w, h - sheet, Rgba::rgb(0, 0, 0), 0.5 * self.shade);
         }
         // A grabber at the foot of the sheet, as the phone's own has.
         out.fill_round_rect(w / 2.0 - m.dp(18.0), sheet - m.dp(13.0), m.dp(36.0), m.dp(5.0), m.dp(2.5), white.with_alpha(80));

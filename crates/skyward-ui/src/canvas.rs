@@ -217,6 +217,54 @@ impl Canvas {
     }
 
     #[inline]
+    /// Lay `color` over the part of this canvas under `x, y, w, h`, blended
+    /// by its own alpha times `cover`: a veil over what lies there, which
+    /// still shows through.
+    pub fn veil(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba, cover: f32) {
+        let cover = (cover * (color.a as f32 / 255.0)).clamp(0.0, 1.0);
+        if cover <= 0.0 {
+            return;
+        }
+        let (x0, x1) = self.columns(x.floor().max(0.0) as i32, (x + w).ceil().max(0.0) as i32);
+        let (y0, y1) = self.rows(y.floor().max(0.0) as i32, (y + h).ceil().max(0.0) as i32);
+        if x0 >= x1 {
+            return;
+        }
+        let (sr, sg, sb) = (color.r as f32, color.g as f32, color.b as f32);
+        let keep = 1.0 - cover;
+        for row in y0..y1 {
+            let (start, end) = (self.at(x0, row), self.at(x1, row));
+            for p in self.data[start..end].as_chunks_mut::<4>().0.iter_mut() {
+                p[0] = (p[0] as f32 * keep + sr * cover) as u8;
+                p[1] = (p[1] as f32 * keep + sg * cover) as u8;
+                p[2] = (p[2] as f32 * keep + sb * cover) as u8;
+            }
+        }
+    }
+
+    /// Put `part` back at `x, y` of this canvas, wherever `keep` says so and
+    /// nowhere else: the corners a rounded sheet leaves out, put back as they
+    /// were before it was laid.
+    pub fn restore_where(&mut self, part: &Canvas, x: u32, y: u32, keep: impl Fn(u32, u32) -> bool) {
+        let (held, cols) = (self.held(), self.cols());
+        let span = cols.end - cols.start;
+        for dy in 0..part.h {
+            let py = y + dy;
+            if py < held.start || py >= held.end {
+                continue;
+            }
+            for dx in 0..part.w {
+                let px = x + dx;
+                if px < cols.start || px >= cols.end || !keep(dx, dy) {
+                    continue;
+                }
+                let from = ((dy * part.w + dx) * 4) as usize;
+                let to = (((py - held.start) * span + (px - cols.start)) * 4) as usize;
+                self.data[to..to + 4].copy_from_slice(&part.data[from..from + 4]);
+            }
+        }
+    }
+
     pub fn blend(&mut self, x: i32, y: i32, color: Rgba, cov: f32) {
         if let Some(p) = self.px(x, y) {
             blend_over(p, color, cov);
