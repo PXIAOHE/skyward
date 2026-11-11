@@ -1592,16 +1592,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             surface.speed_up()?;
             keeps_running = false;
             rested_at = None;
-        } else if app.state.double_tap {
-            // The panel is left running rather than put at rest: at rest the
-            // touchscreen stops reporting a finger on it, and with it the
-            // double tap that lights the page. The backlight is off, so
-            // nothing shows; the display itself keeps drawing its power.
-            if surface.is_on() && !keeps_running {
-                let _ = skyward_sys::kmsg("the display is dark; the panel keeps running for the double tap");
+        } else if surface.is_on() {
+            // The double tap turned on is left to the touchscreen's own
+            // gesture, which the page's writes to its switch turn on: the
+            // panel still rests and the display still turns off, and the tap
+            // is looked for in the wakeup key the firmware reports.
+            if app.state.double_tap && !keeps_running {
+                let _ = skyward_sys::kmsg("the display is dark; the double tap is left to the touchscreen's own gesture");
                 keeps_running = true;
             }
-        } else if surface.is_on() {
             // Turned off, the panel rests, and the touch controller following
             // it stops drawing power.
             surface.rest()?;
