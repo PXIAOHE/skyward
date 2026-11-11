@@ -50,6 +50,7 @@ use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long init may take to hand the USB port to another function: the
@@ -1015,8 +1016,16 @@ fn install_options(app: &App) -> Options {
 /// How often the WLAN page scans while it shows.
 const SCAN_EVERY: Duration = Duration::from_secs(10);
 
-fn wlan_worker(w: &Option<wlan::Worker>) -> Result<&wlan::Worker> {
-    w.as_ref().context("the phone's WLAN is not brought up")
+/// The WLAN worker, once its thread has it up. A page asking before that is
+/// told so rather than made to wait.
+fn wlan_of(w: &Arc<Mutex<Option<wlan::Worker>>>) -> Result<std::sync::MutexGuard<'_, Option<wlan::Worker>>> {
+    w.lock().map_err(|_| anyhow::anyhow!("the WLAN worker is held by a thread that panicked"))
+}
+
+fn wlan_worker(w: &Arc<Mutex<Option<wlan::Worker>>>, cmd: wlan::Command) -> Result<()> {
+    let held = wlan_of(w)?;
+    held.as_ref().context("the phone's WLAN is not brought up")?.send(cmd);
+    Ok(())
 }
 
 /// The installed system, as the update server is told of it.
@@ -1374,24 +1383,31 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // The WLAN, on a phone whose driver the recovery brings up; it starts
     // off. Without the bundle of the vendor interface's libraries the
     // supplicant does not start, and the WLAN page says why.
-    let wlan = match &cfg.wlan {
-        Some(w) => {
-            app.state.wlan = Some(Wlan::default());
-            let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
-            let libraries = secure::libraries().unwrap_or_else(|e| {
-                let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
-                None
-            });
-            let worker = wlan::Worker::start(w.clone(), modules, libraries, servers.clone())?;
-            // The WLAN comes up by itself: a recovery joined to nothing is one
-            // whose update pages cannot ask anything, and one a network joined
-            // before is asked to rejoin without a tap. Turning it off still
-            // works, and stays off until the next start.
-            worker.send(wlan::Command::On);
-            Some(worker)
-        }
-        None => None,
-    };
+    // The WLAN comes up on a thread of its own: loading the driver, starting
+    // the supplicant and joining what was joined before takes seconds, and the
+    // pages do not need any of it to be drawn or touched.
+    let wlan: Arc<Mutex<Option<wlan::Worker>>> = Arc::new(Mutex::new(None));
+    if let Some(w) = cfg.wlan.clone() {
+        app.state.wlan = Some(Wlan::default());
+        let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
+        let libraries = secure::libraries().unwrap_or_else(|e| {
+            let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
+            None
+        });
+        let slot = wlan.clone();
+        let servers = servers.clone();
+        thread::spawn(move || match wlan::Worker::start(w, modules, libraries, servers) {
+            Ok(worker) => {
+                worker.send(wlan::Command::On);
+                if let Ok(mut held) = slot.lock() {
+                    *held = Some(worker);
+                }
+            }
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!("the WLAN did not come up: {e:#}"));
+            }
+        });
+    }
     let mut scanned_at = Instant::now();
     app.state.update_server = cfg.update.is_some();
     // Asking the update server, and downloading the full package.
@@ -1612,8 +1628,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(p) = &part_worker {
             fds.push(p.fd());
         }
-        if let Some(w) = &wlan {
-            fds.push(w.fd());
+        if let Ok(held) = wlan_of(&wlan) {
+            if let Some(w) = held.as_ref() {
+                fds.push(w.fd());
+            }
         }
         if let Some(c) = &checker {
             fds.push(c.fd());
@@ -1968,7 +1986,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         let wlan_on = app.state.wlan.as_ref().is_some_and(|w| w.power == WlanPower::On);
         if app.screen() == Screen::Wlan && wlan_on && scanned_at.elapsed() >= SCAN_EVERY {
             scanned_at = Instant::now();
-            wlan_worker(&wlan)?.send(wlan::Command::Scan);
+            wlan_worker(&wlan, wlan::Command::Scan)?;
         }
         // Settings changed go into their file a moment after the last
         // change, while nothing else has /metadata: not in fastboot, whose
@@ -2535,15 +2553,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         skyward_sys::kmsg("merging the update, as the update page asked")?;
                         merger = Some(merge::Merger::start(slot, true)?);
                     }
-                    Effect::Wlan(on) => wlan_worker(&wlan)?.send(if on { wlan::Command::On } else { wlan::Command::Off }),
+                    Effect::Wlan(on) => {
+                        wlan_worker(&wlan, if on { wlan::Command::On } else { wlan::Command::Off })?;
+                    }
                     Effect::ScanWlan => {
                         scanned_at = Instant::now();
-                        wlan_worker(&wlan)?.send(wlan::Command::Scan);
+                        wlan_worker(&wlan, wlan::Command::Scan)?;
                     }
                     Effect::JoinWlan { ssid, name, security, password } => {
-                        wlan_worker(&wlan)?.send(wlan::Command::Join { ssid, name, security, password: password.0 })
+                        wlan_worker(&wlan, wlan::Command::Join { ssid, name, security, password: password.0 })?;
                     }
-                    Effect::LeaveWlan => wlan_worker(&wlan)?.send(wlan::Command::Leave),
+                    Effect::LeaveWlan => {
+                        wlan_worker(&wlan, wlan::Command::Leave)?;
+                    }
                     // What the installed system is called is the page's to
                     // report when it cannot be read.
                     Effect::CheckUpdate => {
