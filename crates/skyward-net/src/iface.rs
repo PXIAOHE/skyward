@@ -136,3 +136,28 @@ pub fn unconfigure(interface: &str) -> Result<()> {
     r.ifr_ifru.ifru_addr = sockaddr(Ipv4Addr::UNSPECIFIED);
     ioctl(&fd, libc::SIOCSIFADDR as libc::c_int, (&mut r as *mut libc::ifreq).cast(), &format!("take the address of {interface} away"))
 }
+
+/// The IPv4 address an interface holds, where it holds one: nothing while the
+/// network has not given it one yet.
+pub fn address(interface: &str) -> Result<Option<std::net::Ipv4Addr>> {
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("ask the interfaces their addresses");
+    }
+    let mut found = None;
+    let mut at = head;
+    while !at.is_null() {
+        let entry = unsafe { &*at };
+        if !entry.ifa_addr.is_null() && unsafe { (*entry.ifa_addr).sa_family } as i32 == libc::AF_INET {
+            let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }.to_string_lossy();
+            if name == interface {
+                let sin = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
+                found = Some(std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)));
+                break;
+            }
+        }
+        at = entry.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(head) };
+    Ok(found)
+}

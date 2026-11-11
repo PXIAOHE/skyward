@@ -1697,6 +1697,9 @@ pub struct State {
     /// The address typed on the download page, and where its fetch stands.
     pub fetch_url: String,
     pub fetch: Fetch,
+    /// Where another device reaches the page that hands a link over, once the
+    /// download page is served.
+    pub fetch_portal: Option<String>,
     pub data_progress: f32,
     pub data_phase: f32,
     /// Whether the screen lock is kept, so that the data partition opens as
@@ -1838,6 +1841,7 @@ impl Default for State {
             code: String::new(),
             fetch_url: String::new(),
             fetch: Fetch::Idle,
+            fetch_portal: None,
             data_progress: 0.0,
             data_phase: 0.0,
             remember: false,
@@ -4709,6 +4713,26 @@ impl App {
     /// dark one is where the double tap that lights it is looked for.
     pub fn panel_lit(&self) -> bool {
         self.display_on
+    }
+
+    /// The page another device reaches to hand a link over, once it serves.
+    pub fn set_portal(&mut self, at: Option<String>) {
+        if self.state.fetch_portal != at {
+            self.state.fetch_portal = at;
+            self.dirty = true;
+        }
+    }
+
+    /// A link another device typed on that page.
+    pub fn hand_link(&mut self, link: String, now: u64) {
+        self.state.fetch_url = link;
+        let said = self.state.lang.pick([
+            "已从另一台手机取回链接",
+            "已從另一台手機取回連結",
+            "The link came from the other device",
+        ]);
+        self.say(said, now);
+        self.refresh();
     }
 
     /// Begin fetching what the address typed on the page names.

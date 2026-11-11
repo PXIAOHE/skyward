@@ -1181,6 +1181,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut shown_stage = skyward_ui::progress::stage();
     // The file being fetched from an address typed on the download page.
     let mut fetcher: Option<fetch::Worker> = None;
+    // The page another device reaches to hand a link over, while the download
+    // page is open, and when to try serving it again after a failure.
+    let mut portal: Option<crate::portal::Portal> = None;
+    let mut portal_retry_at: Option<u64> = None;
     // A screenshot asked for, taken once the next frame is drawn.
     let mut pending_shot: Option<bool> = None;
     // How long the decrypt page was up, and where its bar had got to, so that
@@ -1747,6 +1751,38 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         fds.push(readings.fd());
         wait(&fds, timeout)?;
         let now = monotonic_ms();
+
+        // The download page offers a page another device can reach, where a
+        // long address is typed and handed over: it is served while that page
+        // is open, and what is typed there fills its field.
+        if app.screen() == skyward_ui::app::Screen::Fetch {
+            if portal.is_none() && portal_retry_at.is_none_or(|at| now >= at) {
+                if let Some(ip) = skyward_net::iface::address(&cfg.wlan.interface).ok().flatten() {
+                    match crate::portal::Portal::start(&ip.to_string()) {
+                        Ok(p) => {
+                            let _ = skyward_sys::kmsg(&format!("the download page is served at {}", p.url()));
+                            app.set_portal(Some(p.url().to_string()));
+                            portal = Some(p);
+                            portal_retry_at = None;
+                        }
+                        Err(e) => {
+                            let _ = skyward_sys::kmsg(&format!("the download page is not served: {e:#}"));
+                            portal_retry_at = Some(now + 3000);
+                        }
+                    }
+                }
+            }
+            if let Some(p) = &portal {
+                if let Some(link) = p.take() {
+                    let _ = skyward_sys::kmsg("a link came from the page another device opened");
+                    app.hand_link(link, now);
+                }
+            }
+        } else if portal.is_some() {
+            portal = None;
+            portal_retry_at = None;
+            app.set_portal(None);
+        }
         for slept in sleeper.slept() {
             match slept {
                 Slept::Woke => skyward_sys::kmsg("the phone slept and woke")?,

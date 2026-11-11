@@ -24,6 +24,8 @@ mod merge;
 #[cfg(target_os = "android")]
 mod partwork;
 #[cfg(target_os = "android")]
+mod portal;
+#[cfg(target_os = "android")]
 mod pty;
 #[cfg(target_os = "android")]
 mod readings;

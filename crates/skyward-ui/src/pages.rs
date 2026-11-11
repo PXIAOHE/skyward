@@ -868,6 +868,36 @@ pub fn fetch(cx: &Ctx) -> Frame {
     c.text_center(&f.body, from_file, m.w as f32 / 2.0, y + m.dp(18.0), m.sub_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(m.margin, y, wide, m.dp(36.0)), action: Action::FetchFromFile });
     y += m.dp(36.0) + m.dp(12.0);
+    // A link too long for this keyboard can be typed on another device, which
+    // opens a page this recovery serves; the code is where that page is.
+    if let Some(at) = s.fetch_portal.clone() {
+        let caption = m.dp(40.0);
+        let room = (floor - y - caption - m.dp(14.0)).max(m.dp(96.0));
+        let side = m.dp(168.0).min(wide).min(room);
+        let x0 = (m.w as f32 - side) / 2.0;
+        let quiet = 2.0f32;
+        if let Ok(code) = qrcodegen::QrCode::encode_text(&at, qrcodegen::QrCodeEcc::Medium) {
+            let n = code.size();
+            let cell = side / (n as f32 + quiet * 2.0);
+            c.fill_round_rect(x0 - m.dp(12.0), y - m.dp(6.0), side + m.dp(24.0), side + m.dp(24.0), m.dp(14.0), Rgba::rgb(255, 255, 255));
+            for row in 0..n {
+                for col in 0..n {
+                    if code.get_module(col, row) {
+                        let px = x0 + (col as f32 + quiet) * cell;
+                        let py = y + (row as f32 + quiet) * cell;
+                        c.fill_rect(px, py, cell + 0.5, cell + 0.5, Rgba::rgb(12, 12, 16));
+                    }
+                }
+            }
+        }
+        y += side + m.dp(8.0);
+        let how = l.pick([
+            "用另一台手机扫这个码，在网页里输入网址，发回来就填进上面的框",
+            "用另一台手機掃這個碼，在網頁裡輸入網址，傳回來就填進上面的框",
+            "Scan this on another device, type the address there, and it fills the field above",
+        ]);
+        y = widgets::footnote(&mut c, t, f, y, how);
+    }
     match &s.fetch {
         Fetch::Idle => {
             let how = l.pick([
