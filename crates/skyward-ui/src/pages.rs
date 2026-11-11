@@ -928,8 +928,8 @@ pub fn fetch(cx: &Ctx) -> Frame {
         // the card does not change height as they follow one another.
         Fetch::Done { path, bytes } => {
             let name = path.rsplit('/').next().unwrap_or(path.as_str());
+            let size = mb(*bytes);
             let detail = tr!(l, "已保存 {name}（{size}）", "已儲存 {name}（{size}）", "Saved {name} ({size})");
-            let detail = detail.replace("{size}", &mb(*bytes));
             widgets::info_card(&mut c, t, f, y, &[(l.pick(["完成", "完成", "Done"]), detail)]);
         }
         Fetch::Failed(why) => {
