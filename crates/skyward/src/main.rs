@@ -12,6 +12,8 @@ mod backup;
 #[cfg(target_os = "android")]
 mod decrypt;
 #[cfg(target_os = "android")]
+mod fetch;
+#[cfg(target_os = "android")]
 mod filework;
 #[cfg(target_os = "android")]
 mod haptics;
@@ -21,6 +23,8 @@ mod input;
 mod merge;
 #[cfg(target_os = "android")]
 mod partwork;
+#[cfg(target_os = "android")]
+mod portal;
 #[cfg(target_os = "android")]
 mod pty;
 #[cfg(target_os = "android")]

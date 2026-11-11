@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 ab_glyph = "0.2.32"
+# QR codes for the page another device scans.
+qrcodegen = { path = "../../vendor/qrcodegen" }
 # The stock status bar's outlines are filled as glyphs are.
 ab_glyph_rasterizer = "0.1.10"
 icu_locale_core = { version = "2.4.0", features = ["alloc"] }

@@ -920,8 +920,10 @@ fn extract_script() -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("take away the {BINARY} an earlier install left")),
     }
     let mut out = OpenOptions::new().write(true).create_new(true).open(BINARY).with_context(|| format!("make {BINARY}"))?;
-    io::copy(&mut script, &mut out).with_context(|| format!("write {BINARY}"))?;
-    out.set_permissions(fs::Permissions::from_mode(0o755)).with_context(|| format!("make {BINARY} runnable"))
+    let copied = io::copy(&mut script, &mut out).with_context(|| format!("write {BINARY}"))?;
+    out.set_permissions(fs::Permissions::from_mode(0o755)).with_context(|| format!("make {BINARY} runnable"))?;
+    let _ = kmsg(&format!("install: {BINARY} written, {copied} bytes, {} there now", Path::new(BINARY).exists()));
+    Ok(())
 }
 
 /// Give scripts written for other recoveries the shell they start with.
@@ -961,6 +963,10 @@ impl Drop for Group {
 /// whether it asked for the cache partition to be erased after. What it
 /// leaves running is ended with it.
 fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
+    // Said before it is started, so that a script gone between the writing and
+    // the running is seen for what it is.
+    ensure!(Path::new(BINARY).exists(), "{BINARY} is not there when the script is to run");
+    let _ = kmsg(&format!("install: running {BINARY}, {} bytes", fs::metadata(BINARY).map(|m| m.len()).unwrap_or(0)));
     let mut log = File::create(SCRIPT_LOG).with_context(|| format!("create {SCRIPT_LOG}"))?;
     let (requests_read, requests_write) = pipe(0)?;
     let (output_read, output_write) = pipe(0)?;

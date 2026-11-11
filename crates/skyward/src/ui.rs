@@ -1,5 +1,6 @@
 use crate::backup;
 use crate::decrypt::{self, Decryptor};
+use crate::fetch;
 use crate::filework;
 use crate::haptics::Haptics;
 use crate::relabel;
@@ -40,7 +41,7 @@ use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
     FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place,
     RenameRefused, Screen, Shot, SkywardEnd, SkywardStage, Target, UsbDrive, UsbLink, Wipe, DATA_OPENING, DATA_PARTITION, DOWNLOADS,
-    INSTALL_UNFINISHED, USB_DRIVE,
+    Touch, INSTALL_UNFINISHED, USB_DRIVE,
 };
 use skyward_ui::settings::Keeper;
 use skyward_ui::surface::kms::KmsSurface;
@@ -68,9 +69,16 @@ const LEAVE_AFTER_MS: u64 = 1500;
 const TOUCH_WAIT: Duration = Duration::from_secs(5);
 
 /// How long a panel gone dark rests, ready to light again at once, before
-/// the display turns off; the phone's own system keeps its panel dozing
-/// about as long after the screen goes off.
+/// the display turns off, on a page whose double tap is turned off.
 const REST: Duration = Duration::from_secs(5);
+
+/// How quickly a second tap on a dark panel must follow the first for the
+/// pair to be taken as a double tap, and how far it may land from it, in
+/// screen pixels. The panel reports touches while the page is dark, but
+/// reports its own wakeup key only when the firmware is put in its gesture
+/// mode, which the page does not reach.
+const DOUBLE_TAP_MS: u64 = 600;
+const DOUBLE_TAP_SLOP: f32 = 300.0;
 
 /// Where logs saved to the temporary folder go, in the recovery service's
 /// own folder, and where in internal storage the others do.
@@ -1171,6 +1179,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     Canvas::keep_ready(w, h, 3);
     let mut shown_clock = String::new();
     let mut shown_stage = skyward_ui::progress::stage();
+    // The file being fetched from an address typed on the download page.
+    let mut fetcher: Option<fetch::Worker> = None;
+    // The page another device reaches to hand a link over, while the download
+    // page is open, and when to try serving it again after a failure.
+    let mut portal: Option<crate::portal::Portal> = None;
+    let mut portal_retry_at: Option<u64> = None;
     // A screenshot asked for, taken once the next frame is drawn.
     let mut pending_shot: Option<bool> = None;
     // How long the decrypt page was up, and where its bar had got to, so that
@@ -1187,7 +1201,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // panel; cleared once a real frame is shown again.
     let mut blanked = false;
     // When the panel gone dark began to rest.
+    // Whether the dark panel is already being kept running for the double
+    // tap, so that it is said once for each dark stretch.
+    let mut keeps_running = false;
+    // When the dark panel was put at rest, on a page whose double tap is off.
     let mut rested_at: Option<Instant> = None;
+    // The last tap taken on a dark panel: where it landed and when, for the
+    // double tap that lights the page.
+    let mut last_tap: Option<(f32, f32, u64)> = None;
     // Started for fastboot, the port goes to the phone's own fastbootd. The
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
@@ -1576,15 +1597,25 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             // Lit, a panel that came on again switches to its fastest
             // refresh.
             surface.speed_up()?;
+            keeps_running = false;
             rested_at = None;
+        } else if app.state.double_tap {
+            // The panel is left running rather than put at rest: at rest the
+            // touchscreen stops reporting a finger on it, and with it the
+            // double tap that lights the page. Measured here: with the display
+            // turned off the driver still logs the finger, but no event
+            // reaches the page. The backlight is off, so nothing shows.
+            if surface.is_on() && !keeps_running {
+                let _ = skyward_sys::kmsg("the display is dark; the panel keeps running for the double tap");
+                keeps_running = true;
+            }
         } else if surface.is_on() {
-            // With the backlight off, the panel rests, and the touch
-            // controller following it stops drawing power.
+            // Turned off, the panel rests, and the touch controller following
+            // it stops drawing power.
             surface.rest()?;
             rested_at = Some(Instant::now());
         } else if rested_at.is_some_and(|at| at.elapsed() >= REST) {
-            // Rested long enough, the display goes off: the panel and the
-            // display processor feeding it stop drawing power.
+            // Rested long enough, the display goes off entirely.
             surface.turn_off()?;
             rested_at = None;
         }
@@ -1596,7 +1627,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // gets at least a millisecond.
         let floor = if shown { 0 } else { 1 };
         let until_due = app.deadline(now).map(|d| d.saturating_sub(now) as i32);
-        // A resting panel turns off once its rest is over.
         let rest_left = rested_at.map(|at| REST.saturating_sub(at.elapsed()).as_millis() as i32);
         let mut timeout = if ahead { 0 } else { until_due.into_iter().chain(rest_left).min().map_or(1000, |t| t.clamp(floor, 1000)) };
         // The ring on the decrypt page keeps turning while the phone's parts
@@ -1715,9 +1745,45 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(s) = &systems_worker {
             fds.push(s.fd());
         }
+        if let Some(f) = &fetcher {
+            fds.push(f.fd());
+        }
         fds.push(readings.fd());
         wait(&fds, timeout)?;
         let now = monotonic_ms();
+
+        // The download page offers a page another device can reach, where a
+        // long address is typed and handed over: it is served while that page
+        // is open, and what is typed there fills its field.
+        if app.screen() == skyward_ui::app::Screen::Fetch {
+            if portal.is_none() && portal_retry_at.is_none_or(|at| now >= at) {
+                let wire = cfg.wlan.as_ref().map(|w| w.interface.clone()).unwrap_or_else(|| "wlan0".to_string());
+                if let Some(ip) = skyward_net::iface::address(&wire).ok().flatten() {
+                    match crate::portal::Portal::start(&ip.to_string()) {
+                        Ok(p) => {
+                            let _ = skyward_sys::kmsg(&format!("the download page is served at {}", p.url()));
+                            app.set_portal(Some(p.url().to_string()));
+                            portal = Some(p);
+                            portal_retry_at = None;
+                        }
+                        Err(e) => {
+                            let _ = skyward_sys::kmsg(&format!("the download page is not served: {e:#}"));
+                            portal_retry_at = Some(now + 3000);
+                        }
+                    }
+                }
+            }
+            if let Some(p) = &portal {
+                if let Some(link) = p.take() {
+                    let _ = skyward_sys::kmsg("a link came from the page another device opened");
+                    app.hand_link(link, now);
+                }
+            }
+        } else if portal.is_some() {
+            portal = None;
+            portal_retry_at = None;
+            app.set_portal(None);
+        }
         for slept in sleeper.slept() {
             match slept {
                 Slept::Woke => skyward_sys::kmsg("the phone slept and woke")?,
@@ -2193,6 +2259,27 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if updated {
             skyward_updater = None;
         }
+        if let Some(f) = &fetcher {
+            let (done, total) = f.progress();
+            app.fetch_progress(done, total);
+            if let Some(ended) = f.ended() {
+                match ended {
+                    fetch::Ended::Done { path, bytes } => {
+                        skyward_sys::kmsg(&format!("the fetch ended: {bytes} bytes in {}", path.display()))?;
+                        app.fetch_ended(Ok((path.display().to_string(), bytes)), now);
+                    }
+                    fetch::Ended::Failed(why) => {
+                        skyward_sys::kmsg(&format!("the fetch failed: {why}"))?;
+                        app.fetch_ended(Err(why), now);
+                    }
+                    fetch::Ended::Stopped => {
+                        skyward_sys::kmsg("the fetch was stopped")?;
+                        app.fetch_stopped(now);
+                    }
+                }
+                fetcher = None;
+            }
+        }
         if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
             decryptor = None;
             match ended {
@@ -2336,9 +2423,56 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     skyward_sys::kmsg(&format!("asked on the recovery socket: {asked:?}"))?;
                     answer(asked, fastboot)
                 }
-                Incoming::Input(Event::Touch(t, at)) => app.touch(t, &fonts, at),
+                Incoming::Input(Event::Touch(t, at)) => {
+                    if app.panel_lit() {
+                        // A lit panel is worked by touch as usual, and no tap
+                        // is held over from before it lit.
+                        last_tap = None;
+                        app.touch(t, &fonts, at)
+                    } else if app.state.double_tap {
+                        let second = match (t, last_tap) {
+                            (Touch::Down(x, y), Some((was_x, was_y, was_at))) => {
+                                at.saturating_sub(was_at) <= DOUBLE_TAP_MS
+                                    && (x - was_x).abs() <= DOUBLE_TAP_SLOP
+                                    && (y - was_y).abs() <= DOUBLE_TAP_SLOP
+                            }
+                            _ => false,
+                        };
+                        if let (Touch::Down(..), true) = (t, second) {
+                            // Lit the way its power key lights it -- onto the
+                            // lock -- with the release following at once so
+                            // the press cannot grow into a hold.
+                            last_tap = None;
+                            let _ = skyward_sys::kmsg("a double tap on the dark panel lit the display");
+                            let mut fx = app.key(skyward_ui::app::Key::Power, now);
+                            fx.extend(app.key_up(skyward_ui::app::Key::Power, now));
+                            fx
+                        } else {
+                            if let Touch::Down(x, y) = t {
+                                last_tap = Some((x, y, at));
+                            }
+                            // A finger on the dark panel lights nothing.
+                            app.touch(t, &fonts, at)
+                        }
+                    } else {
+                        last_tap = None;
+                        // A finger on the dark panel lights nothing.
+                        app.touch(t, &fonts, at)
+                    }
+                }
                 Incoming::Input(Event::Key(k, true)) => app.key(k, now),
                 Incoming::Input(Event::Key(k, false)) => app.key_up(k, now),
+                // The touchscreen's own double tap, reported as the wakeup
+                // key: a dark panel is lit the way its power key lights it.
+                Incoming::Input(Event::Wake) => {
+                    if app.panel_lit() || !app.state.double_tap {
+                        Vec::new()
+                    } else {
+                        let mut fx = app.key(skyward_ui::app::Key::Power, now);
+                        fx.extend(app.key_up(skyward_ui::app::Key::Power, now));
+                        fx
+                    }
+                }
             };
             // What the pages ask for in answer to the work done goes on
             // after it.
@@ -2528,6 +2662,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         attempt_was_remembered = false;
                         let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential };
                         decryptor = Some(Decryptor::start(job)?);
+                    }
+                    Effect::Fetch(url) => {
+                        ensure!(fetcher.is_none(), "a file is being fetched already");
+                        let name = fetch::name_of(&url);
+                        let path = Path::new(skyward_crypto::data::SDCARD).join(DOWNLOADS).join(name);
+                        skyward_sys::kmsg(&format!("fetching {url} into {}", path.display()))?;
+                        fetcher = Some(fetch::Worker::start(url, path, servers.clone())?);
+                    }
+                    Effect::StopFetch => {
+                        if let Some(f) = &fetcher {
+                            f.stop();
+                        }
                     }
                     Effect::Remember(on) => {
                         // Turned off: what was kept goes at once, so the next

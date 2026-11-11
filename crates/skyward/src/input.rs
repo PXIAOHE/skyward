@@ -36,6 +36,9 @@ pub enum Event {
     Touch(Touch, u64),
     /// A button going down, or coming back up.
     Key(Key, bool),
+    /// The touchscreen's own double tap: the panel saw two taps while it was
+    /// in its low-power state and reported the wakeup key for them.
+    Wake,
 }
 
 /// Milliseconds on the monotonic clock, which the touch panel stamps its
@@ -55,7 +58,13 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-const KEYS: [KeyCode; 4] = [KeyCode::KEY_POWER, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_BACK];
+const KEYS: [KeyCode; 5] =
+    [KeyCode::KEY_POWER, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_BACK, KeyCode::KEY_WAKEUP];
+
+/// How far apart two double taps must be for both to be taken: the panel
+/// reports one wakeup key per gesture, and a gesture repeated within this
+/// many milliseconds is the same one reported twice.
+const WAKE_GAP_MS: u64 = 400;
 
 fn key_of(code: KeyCode) -> Option<Key> {
     match code {
@@ -102,6 +111,9 @@ struct Panel {
     /// The kernel dropped events that were not read in time; what arrives
     /// up to the next report is incomplete.
     dropped: bool,
+    /// When the last double tap was taken, on the clock the panel stamps its
+    /// events by.
+    last_wake: Option<u64>,
 }
 
 impl Panel {
@@ -129,7 +141,7 @@ impl Panel {
         }
         set_nonblocking(dev.as_raw_fd()).context("make touch non-blocking")?;
         let mut panel =
-            Panel { dev, path, x_range, y_range, slots, slot: 0, down: false, was_down: false, raw: (0, 0), moved: false, dropped: false };
+            Panel { dev, path, x_range, y_range, slots, slot: 0, down: false, was_down: false, raw: (0, 0), moved: false, dropped: false, last_wake: None };
         // The kernel drops a position equal to the one a slot already holds,
         // so a touch landing where the last one lifted carries no position;
         // start from what the panel holds now.
@@ -177,6 +189,16 @@ impl Panel {
                     }
                     self.was_down = self.down;
                     self.moved = false;
+                }
+                // The panel's double tap: the driver reports the wakeup key
+                // for it, once per gesture, and only on the way down.
+                EventSummary::Key(_, KeyCode::KEY_WAKEUP, 1) => {
+                    let time = e.as_ref().time;
+                    let at = time.tv_sec as u64 * 1000 + time.tv_usec as u64 / 1000;
+                    if self.last_wake.is_none_or(|last| at.saturating_sub(last) > WAKE_GAP_MS) {
+                        self.last_wake = Some(at);
+                        out.push(Event::Wake);
+                    }
                 }
                 _ if self.dropped => {}
                 EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, v) => self.slot = v,
