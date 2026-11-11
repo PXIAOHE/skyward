@@ -1178,6 +1178,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     Canvas::keep_ready(w, h, 3);
     let mut shown_clock = String::new();
     let mut shown_stage = skyward_ui::progress::stage();
+    // The file being fetched from an address typed on the download page.
+    let mut fetcher: Option<fetch::Worker> = None;
     // A screenshot asked for, taken once the next frame is drawn.
     let mut pending_shot: Option<bool> = None;
     // How long the decrypt page was up, and where its bar had got to, so that
@@ -1738,6 +1740,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(s) = &systems_worker {
             fds.push(s.fd());
         }
+        if let Some(f) = &fetcher {
+            fds.push(f.fd());
+        }
         fds.push(readings.fd());
         wait(&fds, timeout)?;
         let now = monotonic_ms();
@@ -2216,6 +2221,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if updated {
             skyward_updater = None;
         }
+        if let Some(f) = &fetcher {
+            let (done, total) = f.progress();
+            app.fetch_progress(done, total);
+            if let Some(ended) = f.ended() {
+                match ended {
+                    fetch::Ended::Done { path, bytes } => app.fetch_ended(Ok((path.display().to_string(), bytes))),
+                    fetch::Ended::Failed(why) => app.fetch_ended(Err(why)),
+                    fetch::Ended::Stopped => app.fetch_stopped(),
+                }
+                fetcher = None;
+            }
+        }
         if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
             decryptor = None;
             match ended {
@@ -2598,6 +2615,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         attempt_was_remembered = false;
                         let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential };
                         decryptor = Some(Decryptor::start(job)?);
+                    }
+                    Effect::Fetch(url) => {
+                        ensure!(fetcher.is_none(), "a file is being fetched already");
+                        let name = fetch::name_of(&url);
+                        let path = Path::new(skyward_crypto::data::SDCARD).join(DOWNLOADS).join(name);
+                        fetcher = Some(fetch::Worker::start(url, path)?);
+                    }
+                    Effect::StopFetch => {
+                        if let Some(f) = &fetcher {
+                            f.stop();
+                        }
                     }
                     Effect::Remember(on) => {
                         // Turned off: what was kept goes at once, so the next

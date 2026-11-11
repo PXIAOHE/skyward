@@ -1,6 +1,6 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
-    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
+    FileOp, FileTask, Fetch, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
     SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
     BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
     USB_DRIVE_WANTED, WIPES, installs, starting,
@@ -81,6 +81,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::BackupJob => backup_job(cx),
         Screen::Advanced => advanced(cx),
         Screen::Files => files(cx),
+        Screen::Fetch => fetch(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
         Screen::Editor => editor(cx),
@@ -827,6 +828,99 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
     c.text_center(&f.heading, l.pick(NOT_NOW), x, skip_cy, m.row_title_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
     Frame { header: false, pattern, ..Frame::new(t, c, out, l.pick(DECRYPT), 0.0) }
+}
+
+/// A file fetched from an address typed here: the field, the button under it,
+/// a way to take the address from a file, and how the fetch stands.
+pub fn fetch(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let m = &t.m;
+    let mut c = page(cx);
+    let mut out = Vec::new();
+    let wide = m.w as f32 - m.margin * 2.0;
+    // The keyboard takes the bottom of the screen: what the page puts above it
+    // is planned against the room left over, so nothing hides behind the keys.
+    let floor = m.h as f32 - widgets::keyboard_height(t) - m.dp(10.0);
+    let top = m.content_top - m.dp(66.0);
+    let hint = l.pick(["粘贴或输入完整网址", "貼上或輸入完整網址", "Type or paste a full address"]);
+    let field = widgets::search_field(&mut c, t, f, m.margin, wide, top + m.dp(24.0), &s.fetch_url, hint);
+    let running = matches!(s.fetch, Fetch::Running { .. });
+    let label = match running {
+        true => l.pick(["停止下载", "停止下載", "Stop"]),
+        false => l.pick(["开始下载", "開始下載", "Download"]),
+    };
+    // A button of its own size, in the middle, not the full width of the page.
+    let (bh, bw) = (m.dp(48.0), m.dp(220.0).min(wide));
+    let mut y = field.field.y + field.field.h + m.dp(26.0);
+    let (bx, by) = ((m.w as f32 - bw) / 2.0, y);
+    c.fill_round_rect(bx, by, bw, bh, bh / 2.0, t.pal.accent);
+    c.text_center(&f.heading, label, bx + bw / 2.0, by + bh / 2.0, m.row_title_px, Rgba::rgb(255, 255, 255));
+    out.push(Hit { rect: Rect::new(bx, by, bw, bh), action: match running { true => Action::FetchStop, false => Action::FetchStart } });
+    y = by + bh;
+    // A link too long to type can be put in a small file from a computer, and
+    // taken from there with one tap.
+    y += m.dp(16.0);
+    let from_file = l.pick([
+        "从 /sdcard/Download/link.txt 读链接",
+        "從 /sdcard/Download/link.txt 讀連結",
+        "Take the link from /sdcard/Download/link.txt",
+    ]);
+    c.text_center(&f.body, from_file, m.w as f32 / 2.0, y + m.dp(18.0), m.sub_px, t.pal.accent);
+    out.push(Hit { rect: Rect::new(m.margin, y, wide, m.dp(36.0)), action: Action::FetchFromFile });
+    y += m.dp(36.0) + m.dp(12.0);
+    match &s.fetch {
+        Fetch::Idle => {
+            let how = l.pick([
+                "文件保存到 /sdcard/Download，名字取网址里最后一段。",
+                "檔案儲存到 /sdcard/Download，名字取網址裡最後一段。",
+                "Files are saved in /sdcard/Download, named after the last part of the address.",
+            ]);
+            y = widgets::footnote(&mut c, t, f, y, how);
+        }
+        Fetch::Running { done, total } => {
+            let share = total.map(|t| (*done as f32 / (t.max(1) as f32)).clamp(0.0, 1.0));
+            let detail = match (total, share) {
+                (Some(total), Some(share)) => {
+                    let (done_s, total_s, pct) = (mb(*done), mb(*total), percent(share));
+                    tr!(l, "{done_s} / {total_s}（{pct}%）", "{done_s} / {total_s}（{pct}%）", "{done_s} of {total_s} ({pct}%)")
+                }
+                _ => mb(*done),
+            };
+            y = widgets::progress_card(&mut c, t, f, y, l.pick(DOWNLOADING), &detail, share);
+        }
+        Fetch::Done { path, bytes } => {
+            let (where_to, size_s) = (path.clone(), mb(*bytes));
+            let detail = tr!(l, "已保存 {where_to}（{size_s}）", "已儲存 {where_to}（{size_s}）", "Saved {where_to} ({size_s})");
+            y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["完成", "完成", "Done"]), detail)]);
+        }
+        Fetch::Failed(why) => {
+            y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["失败", "失敗", "Failed"]), why.clone())]);
+        }
+        Fetch::Stopped => {
+            y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["已停止", "已停止", "Stopped"]), String::new())]);
+        }
+    }
+    let _ = floor;
+    let _ = y;
+    // The page types with the screen's own keyboard, laid over its foot.
+    let key_top = m.h as f32 - widgets::keyboard_height(t);
+    let caps = widgets::keyboard(&mut c, t, f, l, key_top, s.layer, s.key_held(), label);
+    out.extend(caps.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
+    if let Some(rect) = field.clear {
+        out.push(Hit { rect, action: Action::ClearSearch });
+    }
+    let title = l.pick(FETCH);
+    Frame { header: false, caret: Some(field.caret), ..Frame::new(t, c, out, title, 0.0) }
+}
+
+/// A length of bytes in the units the pages speak.
+fn mb(bytes: u64) -> String {
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    if mib >= 1.0 {
+        format!("{mib:.1} MB")
+    } else {
+        format!("{:.0} KB", (bytes as f64 / 1024.0).max(0.0))
+    }
 }
 
 /// What a slot is shown as where the boot control could not be read.
@@ -2231,6 +2325,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(RELABEL)).icon(PURPLE, Icon::Shield),
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
         Row::new(l.pick(LOGS)).icon(ORANGE, Icon::Log),
+        Row::new(l.pick(FETCH)).icon(BLUE, Icon::Layers),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
     ]);
     let out = hits(&tools.rows, &[
@@ -2239,6 +2334,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Relabel),
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
+        Action::Open(Screen::Fetch),
         Action::Open(Screen::Update),
     ]);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
@@ -2630,6 +2726,8 @@ pub fn update(cx: &Ctx) -> Frame {
 const WLAN_FIRST: Text = ["需先连接 WLAN", "需先連接 Wi-Fi", "Connect to Wi-Fi first"];
 const CHECKING: Text = ["正在检查更新", "正在檢查更新", "Checking for updates"];
 const CHECK_FOR_UPDATES: Text = ["检查更新", "檢查更新", "Check for updates"];
+const FETCH: Text = ["网络下载", "網路下載", "Download from a link"];
+
 const DOWNLOADING: Text = ["正在下载", "正在下載", "Downloading"];
 const CHECKING_PART: Text = ["正在校验已下载的部分", "正在驗證已下載的部分", "Verifying what was downloaded"];
 

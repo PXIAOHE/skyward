@@ -63,6 +63,8 @@ pub enum Screen {
     BackupJob,
     /// Tools for the experienced: files, a terminal, the logs.
     Advanced,
+    /// Downloading a file from an address typed on the screen's keyboard.
+    Fetch,
     Files,
     /// One file, and what can be done with it.
     FileInfo,
@@ -1178,6 +1180,12 @@ pub enum Action {
     OpenData,
     /// Keep the screen lock, or stop keeping it.
     Remember,
+    /// Fetch the file the address typed on the page names.
+    FetchStart,
+    /// Stop the fetch under way.
+    FetchStop,
+    /// Take the address from `/sdcard/Download/link.txt`.
+    FetchFromFile,
     Back,
     Theme { dark: bool },
     Toggle(Switch),
@@ -1825,6 +1833,8 @@ impl Default for State {
             system_notice: None,
             data: Data::Closed,
             code: String::new(),
+            fetch_url: String::new(),
+            fetch: Fetch::Idle,
             data_progress: 0.0,
             data_phase: 0.0,
             remember: false,
@@ -1952,6 +1962,23 @@ impl State {
     }
 }
 
+/// Where a file being fetched from an address stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Fetch {
+    #[default]
+    Idle,
+    Running {
+        done: u64,
+        total: Option<u64>,
+    },
+    Done {
+        path: String,
+        bytes: u64,
+    },
+    Failed(String),
+    Stopped,
+}
+
 /// One finger, in screen pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Touch {
@@ -2048,6 +2075,10 @@ pub enum Effect {
     OpenData,
     /// Keep the screen lock, or stop keeping it.
     Remember(bool),
+    /// Fetch the file at `url`, saving it under its own name.
+    Fetch(String),
+    /// Stop the fetch under way.
+    StopFetch,
     /// Open the own files of `user` with what they entered at their screen
     /// lock, telling what still waits with [`App::data_waiting`] or why it
     /// did not open with [`App::unlock_failed`].
@@ -4677,6 +4708,85 @@ impl App {
         self.display_on
     }
 
+    /// The address typed on the download page, and where its fetch stands.
+    pub fetch_url: String,
+    pub fetch: Fetch,
+    /// Begin fetching what the address typed on the page names.
+    fn fetch_start(&mut self, now: u64) -> Vec<Effect> {
+        let l = self.state.lang;
+        if self.fetching() {
+            return Vec::new();
+        }
+        let url = self.state.fetch_url.trim().to_string();
+        if url.is_empty() {
+            self.say(l.pick(["请输入网址", "請輸入網址", "Type an address"]), now);
+            return Vec::new();
+        }
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            self.say(l.pick(["网址要以 http:// 或 https:// 开头", "網址要以 http:// 或 https:// 開頭", "The address must start with http:// or https://"]), now);
+            return Vec::new();
+        }
+        self.state.fetch = Fetch::Running { done: 0, total: None };
+        self.refresh();
+        vec![Effect::Fetch(url)]
+    }
+
+    /// Take the address from the small file a computer can leave behind.
+    fn fetch_from_file(&mut self, now: u64) {
+        let l = self.state.lang;
+        let at = std::path::Path::new("/storage/emulated/0/Download/link.txt");
+        match std::fs::read_to_string(at) {
+            Ok(text) => match text.lines().map(str::trim).find(|line| !line.is_empty()) {
+                Some(link) => {
+                    self.state.fetch_url = link.to_string();
+                    self.refresh();
+                }
+                None => self.state.fetch = Fetch::Failed(l.pick(["文件里没有网址", "檔案裡沒有網址", "The file holds no address"]).to_string()),
+            },
+            Err(_) => {
+                self.state.fetch = Fetch::Failed(l.pick([
+                    "读不到 /sdcard/Download/link.txt",
+                    "讀不到 /sdcard/Download/link.txt",
+                    "Could not read /sdcard/Download/link.txt",
+                ]).to_string());
+            }
+        }
+        let _ = now;
+        self.refresh();
+    }
+
+    /// How far the fetch under way has come, as the runtime reports it.
+    pub fn fetch_progress(&mut self, done: u64, total: Option<u64>) {
+        let stood = match self.state.fetch {
+            Fetch::Running { done: was, total: had } => (was, had),
+            _ => (u64::MAX, None),
+        };
+        if stood != (done, total) {
+            self.state.fetch = Fetch::Running { done, total };
+            self.dirty = true;
+        }
+    }
+
+    /// How the fetch ended.
+    pub fn fetch_ended(&mut self, ended: Result<(String, u64), String>) {
+        self.state.fetch = match ended {
+            Ok((path, bytes)) => Fetch::Done { path, bytes },
+            Err(why) => Fetch::Failed(why),
+        };
+        self.refresh();
+    }
+
+    /// The fetch was stopped before it ended.
+    pub fn fetch_stopped(&mut self) {
+        self.state.fetch = Fetch::Stopped;
+        self.refresh();
+    }
+
+    /// Whether a fetch is under way.
+    pub fn fetching(&self) -> bool {
+        matches!(self.state.fetch, Fetch::Running { .. })
+    }
+
     /// How far along the bar under the sign has come, 0 to 1.
     pub fn data_progress(&self) -> f32 {
         self.state.data_progress
@@ -5691,6 +5801,13 @@ impl App {
                 return self.arrive_at(s);
             }
             Action::OpenData => return self.open_data(),
+            Action::FetchStart => return self.fetch_start(now),
+            Action::FetchStop => {
+                if self.fetching() {
+                    return vec![Effect::StopFetch];
+                }
+            }
+            Action::FetchFromFile => self.fetch_from_file(now),
             Action::Remember => {
                 self.state.remember = !self.state.remember;
                 self.refresh();
@@ -6008,6 +6125,9 @@ impl App {
                 }
             }
             Action::ClearSearch => {
+                if self.screen() == Screen::Fetch {
+                    self.state.fetch_url.clear();
+                }
                 self.state.search.clear();
                 self.edits += 1;
                 self.refresh();
@@ -6253,6 +6373,7 @@ impl App {
     fn typing(&mut self) -> &mut String {
         match self.screen() {
             Screen::Search => &mut self.state.search,
+            Screen::Fetch => &mut self.state.fetch_url,
             Screen::Decrypt => &mut self.state.code,
             Screen::Rename => &mut self.state.new_name,
             Screen::WlanPassword => &mut self.state.password,
@@ -6439,6 +6560,7 @@ impl App {
             }
             Cap::Show(layer) => self.state.layer = layer,
             Cap::Enter => match self.screen() {
+                Screen::Fetch => return self.fetch_start(now),
                 Screen::Search => {
                     if let Some(first) = search::find_on(&self.state.search, l, |screen| self.state.offers(screen)).first() {
                         return self.act(Action::Open(first.screen), now);
