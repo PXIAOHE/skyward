@@ -184,3 +184,12 @@ resonance = "/sys/class/qcom-haptics/lra_frequency_hz"
 drive_swings = 1.2
 max_amplitude = 0.45
 strength = { lightest = 0.2, strongest = 0.6 }
+
+# What a backup takes in beyond the parts every Android phone keeps: the
+# baseband's own settings and the identity the phone was made with, and the
+# sensors' calibration, all of which the phone's own recovery restores too.
+# Files of the data partition that this recovery holds no key for — the
+# second space's, which HyperOS keeps behind the owner's credential — are
+# left out by the archiver itself and counted, rather than failing the backup.
+[backup]
+efs = ["modemst1", "modemst2", "fsc", "persist", "bluetooth_a", "bluetooth_b"]

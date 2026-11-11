@@ -423,8 +423,11 @@ fn backup(t: BackupTask, tell: &dyn Fn(Event), cancel: &AtomicBool) -> Result<Pa
                     copied.with_context(|| format!("back up {name}"))?;
                 }
                 Source::Data => {
-                    archive::pack(Path::new(DATA), &skipped, &mut writer, cancel, &mut |done| telling.done(done))
+                    let locked = archive::pack(Path::new(DATA), &skipped, &mut writer, cancel, &mut |done| telling.done(done))
                         .context("back up the data partition's files")?;
+                    if locked > 0 {
+                        skyward_sys::kmsg(&format!("{locked} files needed a key the recovery does not hold; left out of the backup"))?;
+                    }
                 }
             }
             items.push(Item { part: *part, name: name.clone(), stored: writer.finish()? });
