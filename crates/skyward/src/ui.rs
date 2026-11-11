@@ -1529,9 +1529,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             port_at = Instant::now();
         }
         // The ring on the decrypt page keeps turning while the phone's parts
-        // come up: the page is drawn again each frame until they have.
+        // come up. It is drawn into the page's own frame, which is kept as
+        // drawn until something clears it, so the frame is built anew each
+        // frame rather than the screen composed again from the old one.
         if skyward_ui::progress::stage() < skyward_ui::progress::READY {
-            app.redraw();
+            app.refresh();
         }
         let panel = app.panel(now);
         let mut shown = false;
