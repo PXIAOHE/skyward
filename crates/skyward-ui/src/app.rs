@@ -3,6 +3,7 @@ use crate::charge;
 use crate::color::Rgba;
 use crate::editor::{self, Editor};
 use crate::files::{self, FileType};
+use crate::icons::{self, Icon};
 use crate::fling::{Fling, Tracker};
 use crate::fmt;
 use crate::focus::{self, Group, Spot, Stop};
@@ -2352,7 +2353,7 @@ const SHADE_PERIOD: f32 = 0.62;
 const SHADE_KEEPS: f32 = 0.36;
 
 /// How tall the control centre's sheet is, in dp, at full pull.
-const SHADE_HEIGHT_DP: f32 = 452.0;
+const SHADE_HEIGHT_DP: f32 = 508.0;
 
 /// What a finger can press in the control centre.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2362,6 +2363,7 @@ enum ShadeHit {
     Reboot,
     Sleep,
     Brightness,
+    Vibration,
 }
 /// How long the power key held takes the knob the whole way along.
 const SLIDE_MS: u64 = 700;
@@ -4590,6 +4592,59 @@ impl App {
         }
     }
 
+    /// What each control of the control centre is drawn as.
+    fn shade_glyph(out: &mut Canvas, t: &Theme, hit: ShadeHit, cx: f32, cy: f32, size: f32, ink: Rgba) {
+        let stroke = (size * 0.075).max(t.m.dp(1.6));
+        match hit {
+            ShadeHit::Wlan => icons::glyph(out, Icon::Wlan, cx, cy, size, ink),
+            ShadeHit::Sleep => icons::glyph(out, Icon::Power, cx, cy, size, ink),
+            ShadeHit::Screenshot => {
+                // A camera: its body, the bump over its viewfinder, its lens.
+                let (w, h) = (size * 0.84, size * 0.62);
+                let top = cy - h / 2.0 + size * 0.05;
+                out.stroke_round_rect(cx - w / 2.0, top, w, h, size * 0.15, stroke, ink);
+                out.fill_round_rect(cx - size * 0.14, top - size * 0.11, size * 0.28, size * 0.13, size * 0.05, ink);
+                out.stroke_circle(cx, top + h / 2.0, size * 0.17, stroke, ink);
+            }
+            ShadeHit::Reboot => {
+                // A ring left open at the top, with an arrow at its end.
+                let r = size * 0.33;
+                let start = -2.35f32;
+                out.stroke_arc(cx, cy, r, start, 4.9, stroke, ink);
+                let (ax, ay) = (cx + r * start.cos(), cy + r * start.sin());
+                out.line(ax, ay, ax - size * 0.16, ay - size * 0.04, stroke, ink);
+                out.line(ax, ay, ax + size * 0.02, ay - size * 0.17, stroke, ink);
+            }
+            ShadeHit::Brightness => {
+                // A sun: its disc and eight rays.
+                out.fill_circle(cx, cy, size * 0.19, ink);
+                for k in 0..8 {
+                    let a = k as f32 * std::f32::consts::TAU / 8.0;
+                    let (sin, cos) = a.sin_cos();
+                    let (r0, r1) = (size * 0.30, size * 0.45);
+                    out.line(cx + cos * r0, cy + sin * r0, cx + cos * r1, cy + sin * r1, stroke, ink);
+                }
+            }
+            ShadeHit::Vibration => {
+                // Three bars, the middle one longer: a motor tapping.
+                for (i, tall) in [0.36f32, 0.68, 0.36].iter().enumerate() {
+                    let x = cx + (i as f32 - 1.0) * size * 0.24;
+                    out.fill_round_rect(x - size * 0.06, cy - size * tall / 2.0, size * 0.12, size * tall, size * 0.06, ink);
+                }
+            }
+        }
+    }
+
+    /// Set one of the sheet's sliders from where a finger is.
+    fn shade_slider(&mut self, which: Slider, track: Rect, x: f32) {
+        let level = ((x - track.x) / track.w).clamp(0.0, 1.0);
+        match which {
+            Slider::Brightness => self.state.brightness = level.max(MIN_BRIGHTNESS),
+            Slider::Vibration => self.state.vibration = level,
+        }
+        self.dirty = true;
+    }
+
     /// The control centre, pulled down from the top edge: the time and the
     /// battery, the toggles a recovery has a use for, and the backlight.
     fn paint_shade(&mut self, out: &mut Canvas, t: &Theme, f: &Fonts, info: &DeviceInfo, clock: &str) {
@@ -4664,20 +4719,33 @@ impl App {
             let rect = Rect::new(x, y, tw, th);
             let fill = if *on { t.pal.accent.with_alpha(72) } else { white.with_alpha(20) };
             out.fill_round_rect(x, y, tw, th, m.dp(26.0), fill);
-            let ink = if *on { white } else { white.with_alpha(236) };
-            out.text(&f.heading, label, x + m.dp(18.0), y + th / 2.0 + m.dp(6.0), m.row_title_px, ink, None);
+            let ink = if *on { white } else { white.with_alpha(238) };
+            Self::shade_glyph(out, t, *hit, x + m.dp(33.0), y + m.dp(35.0), m.dp(26.0), ink);
+            out.text(&f.body, label, x + m.dp(18.0), y + th - m.dp(21.0), m.row_title_px, ink, None);
             hits.push((rect, *hit));
         }
-        // The backlight, over a track of thin glass.
-        let label = l.pick(["亮度", "亮度", "Brightness"]);
-        let ly = tiles_top + 2.0 * (th + gap) + m.dp(12.0);
-        out.text(&f.body, label, m.margin, ly, m.sub_px, white.with_alpha(170), None);
-        let track = Rect::new(m.margin, ly + m.dp(15.0), w - m.margin * 2.0, m.slider_h);
-        out.fill_round_rect(track.x, track.y, track.w, track.h, track.h / 2.0, white.with_alpha(28));
-        let filled = (track.w * self.state.brightness.clamp(0.0, 1.0)).max(track.h);
-        out.fill_round_rect(track.x, track.y, filled, track.h, track.h / 2.0, t.pal.accent);
-        out.fill_circle(track.x + filled - track.h / 2.0, track.y + track.h / 2.0, m.slider_knob / 2.0, white);
-        hits.push((track, ShadeHit::Brightness));
+        // The backlight and the motor, each over a track of thin glass.
+        let glyph_x = m.margin + m.dp(13.0);
+        let label_x = m.margin + m.dp(36.0);
+        let mut row = tiles_top + 2.0 * (th + gap) + m.dp(24.0);
+        for (which, hit, name) in [
+            (Slider::Brightness, ShadeHit::Brightness, l.pick(["亮度", "亮度", "Brightness"])),
+            (Slider::Vibration, ShadeHit::Vibration, l.pick(["振动", "震動", "Vibration"])),
+        ] {
+            let value = match which {
+                Slider::Brightness => self.state.brightness,
+                Slider::Vibration => self.state.vibration,
+            };
+            Self::shade_glyph(out, t, hit, glyph_x, row - m.dp(5.0), m.dp(21.0), white.with_alpha(210));
+            out.text(&f.body, name, label_x, row, m.sub_px, white.with_alpha(210), None);
+            let track = Rect::new(m.margin, row + m.dp(13.0), w - m.margin * 2.0, m.slider_h);
+            out.fill_round_rect(track.x, track.y, track.w, track.h, track.h / 2.0, white.with_alpha(28));
+            let filled = (track.w * value.clamp(0.0, 1.0)).max(track.h);
+            out.fill_round_rect(track.x, track.y, filled, track.h, track.h / 2.0, t.pal.accent);
+            out.fill_circle(track.x + filled - track.h / 2.0, track.y + track.h / 2.0, m.slider_knob / 2.0, white);
+            hits.push((track, hit));
+            row += m.dp(13.0) + m.slider_h + m.dp(26.0);
+        }
         self.shade_hits = hits;
     }
 
@@ -4697,11 +4765,13 @@ impl App {
             Touch::Down(x, y) => {
                 if self.shade > 0.0 {
                     if let Some((rect, hit)) = self.shade_hits.iter().find(|(r, _)| r.contains(x, y)).copied() {
-                        if hit == ShadeHit::Brightness {
-                            self.set_slider(&t, Slider::Brightness, rect, x);
-                            self.drag = Drag::Slider(Slider::Brightness, rect);
-                        } else {
-                            self.shade_press = Some((hit, y));
+                        match hit {
+                            ShadeHit::Brightness | ShadeHit::Vibration => {
+                                let which = if hit == ShadeHit::Brightness { Slider::Brightness } else { Slider::Vibration };
+                                self.shade_slider(which, rect, x);
+                                self.drag = Drag::Slider(which, rect);
+                            }
+                            _ => self.shade_press = Some((hit, y)),
                         }
                         return Vec::new();
                     }
@@ -4709,7 +4779,11 @@ impl App {
                 self.drag = Drag::Shade { start: y, from: self.shade };
                 Vec::new()
             }
-            Touch::Move(_, y) => {
+            Touch::Move(x, y) => {
+                if let Drag::Slider(which, track) = self.drag {
+                    self.shade_slider(which, track, x);
+                    return Vec::new();
+                }
                 // A finger that came down on a tile and then moved was pulling
                 // the sheet: the tile is not pressed after all.
                 if let Some((_, down)) = self.shade_press {
@@ -4756,9 +4830,12 @@ impl App {
                             self.close_shade();
                             self.sleep(now);
                         }
-                        ShadeHit::Brightness => {}
+                        ShadeHit::Brightness | ShadeHit::Vibration => {}
                     }
                     return fx;
+                }
+                if matches!(self.drag, Drag::Slider(..)) {
+                    self.drag = Drag::Idle;
                 }
                 if matches!(self.drag, Drag::Shade { .. }) {
                     self.drag = Drag::Idle;
