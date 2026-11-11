@@ -1694,6 +1694,9 @@ pub struct State {
     pub code: String,
     /// How far along the bar under the sign is, and where the ring's turn is,
     /// while the data partition is being opened.
+    /// The address typed on the download page, and where its fetch stands.
+    pub fetch_url: String,
+    pub fetch: Fetch,
     pub data_progress: f32,
     pub data_phase: f32,
     /// Whether the screen lock is kept, so that the data partition opens as
@@ -4708,9 +4711,6 @@ impl App {
         self.display_on
     }
 
-    /// The address typed on the download page, and where its fetch stands.
-    pub fetch_url: String,
-    pub fetch: Fetch,
     /// Begin fetching what the address typed on the page names.
     fn fetch_start(&mut self, now: u64) -> Vec<Effect> {
         let l = self.state.lang;
