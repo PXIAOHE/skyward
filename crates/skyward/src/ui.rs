@@ -1528,6 +1528,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             app.set_fastboot(running, link);
             port_at = Instant::now();
         }
+        // The ring on the decrypt page keeps turning while the phone's parts
+        // come up: the page is drawn again each frame until they have.
+        if skyward_ui::progress::stage() < skyward_ui::progress::READY {
+            app.redraw();
+        }
         let panel = app.panel(now);
         let mut shown = false;
         if panel.is_some() {
