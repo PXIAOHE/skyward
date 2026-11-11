@@ -4625,9 +4625,8 @@ impl App {
                 (dx as f32).powi(2) + (dy as f32).powi(2) > rr * rr
             });
         }
-        if sheet < h {
-            out.veil(0.0, sheet, w, h - sheet, Rgba::rgb(0, 0, 0), 0.5 * self.shade);
-        }
+        // Below the sheet the page is left exactly as it is: the sheet is
+        // seen to come over it, not to put the lights out behind it.
         // A grabber at the foot of the sheet, as the phone's own has.
         out.fill_round_rect(w / 2.0 - m.dp(18.0), sheet - m.dp(13.0), m.dp(36.0), m.dp(5.0), m.dp(2.5), white.with_alpha(80));
         // The time at the left, what is left in the battery at the right.
