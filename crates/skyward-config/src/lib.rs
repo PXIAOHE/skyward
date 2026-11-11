@@ -362,10 +362,6 @@ pub struct Touch {
     pub double_tap: bool,
 }
 
-fn yes() -> bool {
-    true
-}
-
 /// Partitions as the phone itself mounts them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Partitions {
