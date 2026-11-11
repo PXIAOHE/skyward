@@ -1176,6 +1176,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // How long the decrypt page was up, and where its bar had got to, so that
     // the bar's speed can be set from what the phone really takes.
     let (mut was_waiting, mut waiting_since) = (false, 0u64);
+    let mut last_progress = 0.0f32;
     // The readings are taken again on a thread of their own; those taken
     // here as work ends say how it left the phone, and readings started
     // before them are out of date.
@@ -1612,13 +1613,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             waiting_since = now;
         }
         if !waiting_now && was_waiting {
+            // `last_progress` is read before the tick cleared it, so the note
+            // says where the bar had really got to.
             skyward_sys::kmsg(&format!(
                 "the decrypt page was up {} ms; its bar had reached {}%",
                 now.saturating_sub(waiting_since),
-                (app.data_progress() * 100.0).round() as i32
+                (last_progress * 100.0).round() as i32
             ))?;
         }
         was_waiting = waiting_now;
+        if waiting_now {
+            last_progress = app.data_progress();
+        }
         if waiting_now {
             app.redraw();
             timeout = timeout.min(16);

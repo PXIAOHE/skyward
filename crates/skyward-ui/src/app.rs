@@ -2366,7 +2366,7 @@ const RING_MS: u64 = 1500;
 /// about 4.8 s from its first frame to the page the opened partition brings,
 /// so the bar is at its end just as that happens. One speed the whole way,
 /// rather than easing towards whatever the work last reported.
-const DATA_RATE: f32 = 0.000208;
+const DATA_RATE: f32 = 0.000225;
 
 /// How tall the control centre's sheet is, in dp, at full pull.
 const SHADE_HEIGHT_DP: f32 = 508.0;
