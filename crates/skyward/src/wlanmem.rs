@@ -96,7 +96,9 @@ fn store(text: &str) -> Result<()> {
 
 fn render(kept: &Kept) -> String {
     let mut text = format!("auto={}\nkeep={}\n", u8::from(kept.auto), u8::from(kept.keep));
-    if let Some(saved) = &kept.saved {
+    // A network kept without the setting is not kept at all: the password goes
+    // with the setting.
+    if let Some(saved) = kept.saved.as_ref().filter(|_| kept.keep) {
         text.push_str(&format!("ssid={}\npassword={}\n", hex(&saved.ssid), saved.password));
     }
     text
