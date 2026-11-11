@@ -2484,15 +2484,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::OpenData => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
                         // The devices and the secure services come up on a
-                        // thread of their own, so the page is drawn before
-                        // they are; opening data is the first thing that
-                        // cannot do without them.
-                        crate::wait_prepared();
+                        // thread of their own; the decrypting thread waits
+                        // for them itself, so the page goes on being drawn.
                         decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
                     }
                     Effect::Unlock { user, code } => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
-                        crate::wait_prepared();
                         let credential = code.into_bytes();
                         last_credential = Some(credential.clone());
                         attempt_was_remembered = false;

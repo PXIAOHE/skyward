@@ -42,6 +42,10 @@ impl Decryptor {
         let thread = thread::Builder::new()
             .name("decrypt".into())
             .spawn(move || {
+                // Waited for here rather than on the page's own thread: what
+                // the screen shows meanwhile -- the ring that turns while the
+                // phone's parts come up -- has to keep being drawn.
+                crate::wait_prepared();
                 let ended_as = match job {
                     Job::Open => Ended::Opened(with_key_service(data::open_without_credential)),
                     Job::Unlock { closed, user, credential } => {
