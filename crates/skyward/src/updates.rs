@@ -341,6 +341,10 @@ fn fetch(
         }
         if e.is::<skyward_net::download::Slow>() {
             let _ = skyward_sys::kmsg(&format!("downloading {name} from {}: too slow, asking the next", host(&urls[url])));
+            // The samples of the source left behind are not the next one's:
+            // kept, they make it look slow too, and every source is left in
+            // turn without a byte written.
+            samples.clear();
             url = (url + 1) % urls.len();
             failed = 0;
             continue;
