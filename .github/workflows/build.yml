@@ -8,6 +8,10 @@ on:
   push:
     branches: ["**"]
     tags: ["v*"]
+    # A record is not a build: writing one costs no runner and no release.
+    paths-ignore:
+      - '记录/**'
+      - '**.md'
   workflow_dispatch:
     inputs:
       device:
