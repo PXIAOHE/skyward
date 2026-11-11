@@ -4671,6 +4671,12 @@ impl App {
         }
     }
 
+    /// Whether the panel is lit: touches are worked by the page then, and a
+    /// dark one is where the double tap that lights it is looked for.
+    pub fn panel_lit(&self) -> bool {
+        self.display_on
+    }
+
     /// How far along the bar under the sign has come, 0 to 1.
     pub fn data_progress(&self) -> f32 {
         self.state.data_progress
