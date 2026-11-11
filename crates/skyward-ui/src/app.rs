@@ -6397,9 +6397,11 @@ impl App {
         if self.locked {
             return self.lock_touch(ev, now);
         }
-        // The control centre takes every finger while it is over the page,
-        // and one that comes down from the top edge pulls it out.
-        if self.shade > 0.0 || matches!(ev, Touch::Down(_, y) if y <= self.theme().m.dp(28.0)) {
+        // The control centre takes every finger while it is over the page or
+        // being pulled out, and one that comes down from the top edge starts
+        // that pull.
+        let pulling = matches!(self.drag, Drag::Shade { .. });
+        if self.shade > 0.0 || pulling || matches!(ev, Touch::Down(_, y) if y <= self.theme().m.dp(40.0)) {
             return self.shade_touch(ev, now);
         }
         // A finger on the charging screen sends it away for the page, and
