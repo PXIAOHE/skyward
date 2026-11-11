@@ -279,6 +279,98 @@ impl Canvas {
 
     /// Lay `layer`, whose top-left corner goes at (`x`, `y`), over this
     /// opaque canvas at `alpha` of its strength.
+    /// Frost the part of this canvas under `x, y, w, h`: a blurred copy of
+    /// what lies there, laid back over it in `tint`, as the control centre's
+    /// glass. `step` is how many pixels the copy is taken by; larger is
+    /// coarser and quicker.
+    pub fn frost(&mut self, x: u32, y: u32, w: u32, h: u32, step: u32, tint: Rgba) {
+        let (held, cols) = (self.held(), self.cols());
+        if step < 2 || w < step * 2 || h < step * 2 {
+            return;
+        }
+        let (left, top, span) = (cols.start, held.start, cols.end - cols.start);
+        let (sw, sh) = (w / step, h / step);
+        // A small copy of what lies there, in floating point so the blur does
+        // not lose what it gathers.
+        let mut small = vec![0f32; (sw * sh * 3) as usize];
+        for sy in 0..sh {
+            let py = (y + sy * step + step / 2).min(held.end - 1);
+            for sx in 0..sw {
+                let px = (x + sx * step + step / 2).min(cols.end - 1);
+                let i = (((py - top) * span + (px - left)) * 4) as usize;
+                let o = ((sy * sw + sx) * 3) as usize;
+                for c in 0..3 {
+                    small[o + c] = self.data[i + c] as f32;
+                }
+            }
+        }
+        // Two boxes, close enough to a Gaussian for glass.
+        for _ in 0..2 {
+            let mut next = small.clone();
+            for sy in 0..sh {
+                for sx in 0..sw {
+                    for c in 0..3 {
+                        let (mut sum, mut n) = (0.0, 0.0);
+                        for d in -2i32..=2 {
+                            let nx = sx as i32 + d;
+                            if nx < 0 || nx >= sw as i32 {
+                                continue;
+                            }
+                            sum += small[((sy * sw + nx as u32) * 3) as usize + c];
+                            n += 1.0;
+                        }
+                        next[((sy * sw + sx) * 3) as usize + c] = sum / n;
+                    }
+                }
+            }
+            let mut blur = next.clone();
+            for sy in 0..sh {
+                for sx in 0..sw {
+                    for c in 0..3 {
+                        let (mut sum, mut n) = (0.0, 0.0);
+                        for d in -2i32..=2 {
+                            let ny = sy as i32 + d;
+                            if ny < 0 || ny >= sh as i32 {
+                                continue;
+                            }
+                            sum += next[((ny as u32 * sw + sx) * 3) as usize + c];
+                            n += 1.0;
+                        }
+                        blur[((sy * sw + sx) * 3) as usize + c] = sum / n;
+                    }
+                }
+            }
+            small = blur;
+        }
+        // Back up to the screen, smooth between the small copy's pixels, and
+        // tinted as it goes.
+        let at = |sx: u32, sy: u32, c: usize| small[((sy.min(sh - 1) * sw + sx.min(sw - 1)) * 3) as usize + c];
+        let (tr, tg, tb) = (tint.r as f32, tint.g as f32, tint.b as f32);
+        let ta = tint.a as f32 / 255.0;
+        for dy in 0..h {
+            let fy = ((dy as f32 + 0.5) / step as f32 - 0.5).max(0.0);
+            let y0 = fy.floor() as u32;
+            let y1 = y0 + 1;
+            let wy = (fy - y0 as f32).clamp(0.0, 1.0);
+            let py = (y + dy).min(held.end - 1);
+            for dx in 0..w {
+                let fx = ((dx as f32 + 0.5) / step as f32 - 0.5).max(0.0);
+                let x0 = fx.floor() as u32;
+                let x1 = x0 + 1;
+                let wx = (fx - x0 as f32).clamp(0.0, 1.0);
+                let px = (x + dx).min(cols.end - 1);
+                let i = (((py - top) * span + (px - left)) * 4) as usize;
+                for c in 0..3 {
+                    let upper = at(x0, y0, c) * (1.0 - wx) + at(x1, y0, c) * wx;
+                    let lower = at(x0, y1, c) * (1.0 - wx) + at(x1, y1, c) * wx;
+                    let mixed = upper * (1.0 - wy) + lower * wy;
+                    let tone = [tr, tg, tb][c];
+                    self.data[i + c] = (mixed * (1.0 - ta) + tone * ta).clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
     pub fn lay(&mut self, layer: &Canvas, x: i32, y: i32, alpha: f32) {
         assert!(layer.whole(), "a layer laid holds all of itself");
         if alpha <= 0.0 {

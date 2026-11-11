@@ -2348,6 +2348,9 @@ const SHADE_PULL_DP: f32 = 110.0;
 const SHADE_EASE_MS: u64 = 220;
 const SHADE_KEEPS: f32 = 0.36;
 
+/// How tall the control centre's sheet is, in dp, at full pull.
+const SHADE_HEIGHT_DP: f32 = 452.0;
+
 /// What a finger can press in the control centre.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShadeHit {
@@ -2739,10 +2742,16 @@ pub struct App {
     /// When a hand let the lock's knob go short of the end, and where it
     /// was then: the knob eases back from there over [`UNLOCK_BACK_MS`].
     unlock_back: Option<(u64, f32)>,
-    /// How far the control centre is pulled over the page, 0 shut to 1 open,
-    /// and where it is easing to after a hand let it go.
+    /// How far the control centre is pulled over the page, 0 shut to 1 open.
     shade: f32,
-    shade_ease: Option<(u64, f32, f32)>,
+    /// Where it is going after a hand let it go, as a spring: when it began,
+    /// how far from where it is headed, how fast it was going, its period,
+    /// and where it is headed, all in dp of travel.
+    shade_settle: Option<(u64, f32, f32, f32, f32)>,
+    /// Where the finger last was and how fast it went, for the spring to
+    /// carry on from.
+    shade_last: Option<(u64, f32)>,
+    shade_speed: f32,
     /// What a finger pressed there, and where its controls were drawn.
     shade_press: Option<ShadeHit>,
     shade_hits: Vec<(Rect, ShadeHit)>,
@@ -2866,7 +2875,9 @@ impl App {
             date: String::new(),
             unlock_back: None,
             shade: 0.0,
-            shade_ease: None,
+            shade_settle: None,
+            shade_last: None,
+            shade_speed: 0.0,
             shade_press: None,
             shade_hits: Vec::new(),
             tracker: Tracker::default(),
@@ -2954,7 +2965,7 @@ impl App {
                 || sliding
                 || self.cue.is_some()
                 || self.unlock_back.is_some()
-                || self.shade_ease.is_some()
+                || self.shade_settle.is_some()
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
@@ -3164,13 +3175,15 @@ impl App {
                 self.unlock = 0.0;
             }
         }
-        if let Some((at, from, to)) = self.shade_ease {
+        if let Some((at, from, speed, period, target)) = self.shade_settle {
             self.dirty = true;
-            let f = (now.saturating_sub(at) as f32 / SHADE_EASE_MS as f32).clamp(0.0, 1.0);
-            self.shade = from + (to - from) * (1.0 - (1.0 - f) * (1.0 - f));
-            if f >= 1.0 {
-                self.shade_ease = None;
-                self.shade = to;
+            let w = std::f32::consts::TAU / period;
+            let t = now.saturating_sub(at) as f32 / 1000.0;
+            let carried = (from + (speed + w * from) * t) * (-w * t).exp();
+            self.shade = ((target + carried) / SHADE_PULL_DP).clamp(0.0, 1.0);
+            if t * 1000.0 >= SHADE_EASE_MS as f32 && carried.abs() < 0.6 {
+                self.shade_settle = None;
+                self.shade = (target / SHADE_PULL_DP).clamp(0.0, 1.0);
             }
         }
         if self.screen() == Screen::About {
@@ -4583,45 +4596,62 @@ impl App {
         let m = t.m;
         let (w, h) = (m.w as f32, m.h as f32);
         let l = self.state.lang;
-        let panel = m.dp(430.0);
-        let top = -panel * (1.0 - self.shade);
-        out.fill_rect(0.0, 0.0, w, h, Rgba::rgb(0, 0, 0).with_alpha((120.0 * self.shade) as u8));
-        let r = m.dp(30.0);
-        out.fill_round_rect(-r, top - r, w + r * 2.0, panel + r, r, t.pal.card);
-        // The time at the left and what is left in the battery at the right.
-        out.text(&f.heading, clock, m.margin, top + m.dp(62.0), m.dp(38.0), t.pal.text, None);
+        let white = Rgba::rgb(255, 255, 255);
+        let tall = m.dp(SHADE_HEIGHT_DP);
+        let sheet = tall * self.shade;
+        let top = sheet - tall;
+        // Glass: what the page shows under the sheet, blurred and darkened,
+        // and a veil over the rest of the screen.
+        out.frost(0, 0, w as u32, sheet.max(1.0) as u32, 8, Rgba::rgb(14, 14, 18).with_alpha(190));
+        if sheet < h {
+            out.fill_rect(0.0, sheet, w, h - sheet, Rgba::rgb(0, 0, 0).with_alpha((120.0 * self.shade) as u8));
+        }
+        // A grabber at the foot of the sheet, as the phone's own has.
+        out.fill_round_rect(w / 2.0 - m.dp(18.0), sheet - m.dp(13.0), m.dp(36.0), m.dp(5.0), m.dp(2.5), white.with_alpha(80));
+        // The time at the left, what is left in the battery at the right.
+        out.text(&f.heading, clock, m.margin, top + m.dp(66.0), m.dp(44.0), white, None);
         if let Some((level, _)) = self.bar(clock, info).battery {
             let said = format!("{level}%");
             let wide = out.text_width(&f.body, &said, m.row_title_px);
-            out.text(&f.body, &said, w - m.margin - wide, top + m.dp(54.0), m.row_title_px, t.pal.subtitle, None);
+            out.text(&f.body, &said, w - m.margin - wide, top + m.dp(58.0), m.row_title_px, white.with_alpha(190), None);
         }
+        // The toggles, as round-cornered panes of glass over the sheet.
         let on = self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On);
-        let tiles = [
-            (ShadeHit::Wlan, if on { "WLAN · 已开" } else { "WLAN · 已关" }, on),
-            (ShadeHit::Screenshot, "截图", false),
-            (ShadeHit::Reboot, "重启", false),
-            (ShadeHit::Sleep, "熄屏", false),
+        let wlan = if on {
+            l.pick(["WLAN · 已开", "WLAN · 已開", "WLAN · on"])
+        } else {
+            l.pick(["WLAN · 已关", "WLAN · 已關", "WLAN · off"])
+        };
+        let tiles: [(ShadeHit, &str, bool); 4] = [
+            (ShadeHit::Wlan, wlan, on),
+            (ShadeHit::Screenshot, l.pick(["截图", "截圖", "Screenshot"]), false),
+            (ShadeHit::Reboot, l.pick(["重启", "重新啟動", "Reboot"]), false),
+            (ShadeHit::Sleep, l.pick(["熄屏", "關閉螢幕", "Screen off"]), false),
         ];
-        let (gap, th) = (m.dp(12.0), m.dp(88.0));
+        let (gap, th) = (m.dp(14.0), m.dp(98.0));
         let tw = (w - m.margin * 2.0 - gap) / 2.0;
-        let tiles_top = top + m.dp(112.0);
+        let tiles_top = top + m.dp(128.0);
         let mut hits = Vec::new();
         for (i, (hit, label, on)) in tiles.iter().enumerate() {
             let (col, row) = (i % 2, i / 2);
             let x = m.margin + col as f32 * (tw + gap);
             let y = tiles_top + row as f32 * (th + gap);
             let rect = Rect::new(x, y, tw, th);
-            let ink = if *on { t.pal.accent } else { t.pal.text };
-            out.fill_round_rect(x, y, tw, th, m.dp(20.0), if *on { t.pal.accent.with_alpha(46) } else { t.pal.badge });
-            out.text(&f.heading, label, x + m.dp(16.0), y + th / 2.0 + m.dp(6.0), m.row_title_px, ink, None);
+            let fill = if *on { t.pal.accent.with_alpha(72) } else { white.with_alpha(20) };
+            out.fill_round_rect(x, y, tw, th, m.dp(26.0), fill);
+            let ink = if *on { white } else { white.with_alpha(236) };
+            out.text(&f.heading, label, x + m.dp(18.0), y + th / 2.0 + m.dp(6.0), m.row_title_px, ink, None);
             hits.push((rect, *hit));
         }
-        // The backlight, dragged as it is on the settings page.
+        // The backlight, over a track of thin glass.
         let label = l.pick(["亮度", "亮度", "Brightness"]);
-        let ly = tiles_top + 2.0 * (th + gap) + m.dp(14.0);
-        out.text(&f.body, label, m.margin, ly, m.sub_px, t.pal.subtitle, None);
-        let track = Rect::new(m.margin, ly + m.dp(14.0), w - m.margin * 2.0, m.slider_h);
-        widgets::slider(out, t, track.x, track.y, track.w, self.state.brightness);
+        let ly = tiles_top + 2.0 * (th + gap) + m.dp(12.0);
+        out.text(&f.body, label, m.margin, ly, m.sub_px, white.with_alpha(170), None);
+        let track = Rect::new(m.margin, ly + m.dp(15.0), w - m.margin * 2.0, m.slider_h);
+        out.fill_round_rect(track.x, track.y, track.w, track.h, track.h / 2.0, white.with_alpha(28));
+        let filled = (track.w * self.state.brightness.clamp(0.0, 1.0)).max(track.h);
+        out.fill_round_rect(track.x, track.y, filled, track.h, track.h / 2.0, t.pal.accent);
+        out.fill_circle(track.x + filled - track.h / 2.0, track.y + track.h / 2.0, m.slider_knob / 2.0, white);
         hits.push((track, ShadeHit::Brightness));
         self.shade_hits = hits;
     }
@@ -4654,12 +4684,19 @@ impl App {
             }
             Touch::Move(_, y) => {
                 if let Drag::Shade { start, from } = self.drag {
-                    let pulled = (y - start) / t.m.dp(SHADE_PULL_DP);
-                    let mut to = (from + pulled).clamp(0.0, 1.0);
-                    if from <= 0.0 {
-                        to = to.min(1.0);
+                    let pulled = from * SHADE_PULL_DP + (y - start);
+                    // A sheet pulled past its end gives less and less, as the
+                    // phone's own does.
+                    let eased = if pulled > 0.0 { pulled * (1.0 - 0.22 * (pulled / SHADE_PULL_DP).min(1.0)) } else { pulled };
+                    self.shade = (eased / SHADE_PULL_DP).clamp(0.0, 1.0);
+                    if let Some((was_at, was_y)) = self.shade_last {
+                        let dt = now.saturating_sub(was_at) as f32 / 1000.0;
+                        if dt > 0.0005 {
+                            self.shade_speed = self.shade_speed * 0.55 + ((y - was_y) / dt) * 0.45;
+                        }
                     }
-                    self.shade = to;
+                    self.shade_last = Some((now, y));
+                    self.shade_settle = None;
                     self.dirty = true;
                 }
                 Vec::new()
@@ -4690,8 +4727,15 @@ impl App {
                 }
                 if matches!(self.drag, Drag::Shade { .. }) {
                     self.drag = Drag::Idle;
-                    let to = if self.shade >= SHADE_KEEPS { 1.0 } else { 0.0 };
-                    self.shade_ease = Some((now, self.shade, to));
+                    // Let go, it carries on a little on the way it was going,
+                    // so a flick opens it and a slow drag settles by where it
+                    // got to.
+                    let heading = self.shade + self.shade_speed / 1400.0;
+                    let target = if heading >= SHADE_KEEPS { SHADE_PULL_DP } else { 0.0 };
+                    let from = self.shade * SHADE_PULL_DP - target;
+                    self.shade_settle = Some((now, from, self.shade_speed, 0.34, target));
+                    self.shade_last = None;
+                    self.shade_speed = 0.0;
                     self.dirty = true;
                 }
                 fx
