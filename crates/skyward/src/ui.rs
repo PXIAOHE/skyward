@@ -2264,9 +2264,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             app.fetch_progress(done, total);
             if let Some(ended) = f.ended() {
                 match ended {
-                    fetch::Ended::Done { path, bytes } => app.fetch_ended(Ok((path.display().to_string(), bytes))),
-                    fetch::Ended::Failed(why) => app.fetch_ended(Err(why)),
-                    fetch::Ended::Stopped => app.fetch_stopped(),
+                    fetch::Ended::Done { path, bytes } => {
+                        skyward_sys::kmsg(&format!("the fetch ended: {bytes} bytes in {}", path.display()))?;
+                        app.fetch_ended(Ok((path.display().to_string(), bytes)));
+                    }
+                    fetch::Ended::Failed(why) => {
+                        skyward_sys::kmsg(&format!("the fetch failed: {why}"))?;
+                        app.fetch_ended(Err(why));
+                    }
+                    fetch::Ended::Stopped => {
+                        skyward_sys::kmsg("the fetch was stopped")?;
+                        app.fetch_stopped();
+                    }
                 }
                 fetcher = None;
             }
@@ -2658,6 +2667,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         ensure!(fetcher.is_none(), "a file is being fetched already");
                         let name = fetch::name_of(&url);
                         let path = Path::new(skyward_crypto::data::SDCARD).join(DOWNLOADS).join(name);
+                        skyward_sys::kmsg(&format!("fetching {url} into {}", path.display()))?;
                         fetcher = Some(fetch::Worker::start(url, path)?);
                     }
                     Effect::StopFetch => {
