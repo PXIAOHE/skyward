@@ -24,6 +24,11 @@ const USB_DRIVE: &str = "usb_drive";
 const LOGS: [&str; 2] = ["recovery", "kernel"];
 const LOG_PLACES: [&str; 2] = ["temporary", "storage"];
 
+/// A setting that is on unless the file kept from before says otherwise.
+fn yes() -> bool {
+    true
+}
+
 /// The settings as they are kept. A value missing is the one a recovery
 /// starts with, and one this version does not know is left out.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +50,11 @@ pub struct Settings {
     /// The time zone, by its name in the tz database.
     pub time_zone: String,
     pub vibrate: bool,
+    /// Whether two taps on the dark panel light it. The panel is kept running
+    /// while dark for it, which draws power: off, the display rests and then
+    /// turns off as it did before.
+    #[serde(default = "yes")]
+    pub double_tap: bool,
     /// The vibration slider's place, from 0 at its left end to 1.
     pub vibration: f32,
     /// A computer connected over USB is offered internal storage.
@@ -124,6 +134,7 @@ impl Settings {
             screen_off: SCREEN_OFF[state.screen_off].map_or(0, |ms| ms / 1000),
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
             vibrate: state.vibrate,
+            double_tap: state.double_tap,
             vibration: state.vibration,
             file_transfer: state.file_transfer,
             install: Install { check_signature: state.check_signature, keep_recovery: state.keep_recovery },
@@ -180,6 +191,7 @@ impl Settings {
             state.time_zone = at;
         }
         state.vibrate = self.vibrate;
+        state.double_tap = self.double_tap;
         if (0.0..=1.0).contains(&self.vibration) {
             state.vibration = self.vibration;
         }
@@ -306,6 +318,7 @@ mod tests {
             screen_off: 6,
             time_zone: 7,
             vibrate: false,
+            double_tap: true,
             vibration: 0.4,
             file_transfer: false,
             check_signature: true,

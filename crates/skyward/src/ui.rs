@@ -67,6 +67,10 @@ const LEAVE_AFTER_MS: u64 = 1500;
 /// none by then, the pages are worked with the keys, their light shown.
 const TOUCH_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a panel gone dark rests, ready to light again at once, before
+/// the display turns off, on a page whose double tap is turned off.
+const REST: Duration = Duration::from_secs(5);
+
 /// How quickly a second tap on a dark panel must follow the first for the
 /// pair to be taken as a double tap, and how far it may land from it, in
 /// screen pixels. The panel reports touches while the page is dark, but
@@ -1193,6 +1197,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Whether the dark panel is already being kept running for the double
     // tap, so that it is said once for each dark stretch.
     let mut keeps_running = false;
+    // When the dark panel was put at rest, on a page whose double tap is off.
+    let mut rested_at: Option<Instant> = None;
     // The last tap taken on a dark panel: where it landed and when, for the
     // double tap that lights the page.
     let mut last_tap: Option<(f32, f32, u64)> = None;
@@ -1585,13 +1591,25 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             // refresh.
             surface.speed_up()?;
             keeps_running = false;
-        } else if surface.is_on() && !keeps_running {
+            rested_at = None;
+        } else if app.state.double_tap {
             // The panel is left running rather than put at rest: at rest the
             // touchscreen stops reporting a finger on it, and with it the
             // double tap that lights the page. The backlight is off, so
             // nothing shows; the display itself keeps drawing its power.
-            skyward_sys::kmsg("the display is dark; the panel keeps running for the double tap")?;
-            keeps_running = true;
+            if surface.is_on() && !keeps_running {
+                let _ = skyward_sys::kmsg("the display is dark; the panel keeps running for the double tap");
+                keeps_running = true;
+            }
+        } else if surface.is_on() {
+            // Turned off, the panel rests, and the touch controller following
+            // it stops drawing power.
+            surface.rest()?;
+            rested_at = Some(Instant::now());
+        } else if rested_at.is_some_and(|at| at.elapsed() >= REST) {
+            // Rested long enough, the display goes off entirely.
+            surface.turn_off()?;
+            rested_at = None;
         }
         // A page at rest draws the rows it has yet to while nothing else
         // is to be done, a band at a time, looking for input between bands.
@@ -1601,7 +1619,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // gets at least a millisecond.
         let floor = if shown { 0 } else { 1 };
         let until_due = app.deadline(now).map(|d| d.saturating_sub(now) as i32);
-        let mut timeout = if ahead { 0 } else { until_due.map_or(1000, |t| t.clamp(floor, 1000)) };
+        let rest_left = rested_at.map(|at| REST.saturating_sub(at.elapsed()).as_millis() as i32);
+        let mut timeout = if ahead { 0 } else { until_due.into_iter().chain(rest_left).min().map_or(1000, |t| t.clamp(floor, 1000)) };
         // The ring on the decrypt page keeps turning while the phone's parts
         // come up. It is laid over the page as the screen is composed, so the
         // page itself is built again only when the stage it names changes,
@@ -2345,7 +2364,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         // is held over from before it lit.
                         last_tap = None;
                         app.touch(t, &fonts, at)
-                    } else {
+                    } else if app.state.double_tap {
                         let second = match (t, last_tap) {
                             (Touch::Down(x, y), Some((was_x, was_y, was_at))) => {
                                 at.saturating_sub(was_at) <= DOUBLE_TAP_MS
@@ -2370,6 +2389,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             // A finger on the dark panel lights nothing.
                             app.touch(t, &fonts, at)
                         }
+                    } else {
+                        last_tap = None;
+                        // A finger on the dark panel lights nothing.
+                        app.touch(t, &fonts, at)
                     }
                 }
                 Incoming::Input(Event::Key(k, true)) => app.key(k, now),
@@ -2377,7 +2400,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 // The touchscreen's own double tap, reported as the wakeup
                 // key: a dark panel is lit the way its power key lights it.
                 Incoming::Input(Event::Wake) => {
-                    if app.panel_lit() {
+                    if app.panel_lit() || !app.state.double_tap {
                         Vec::new()
                     } else {
                         let mut fx = app.key(skyward_ui::app::Key::Power, now);

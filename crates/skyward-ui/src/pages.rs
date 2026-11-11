@@ -363,8 +363,6 @@ pub fn settings(cx: &Ctx) -> Frame {
     if let Some(r) = slider.below {
         out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
-    // No wake section: this panel's controller takes no command that turns
-    // its own double tap on, so the switch would be one that does nothing.
     y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["振动", "震動", "Vibration"]));
     let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
     let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, Some(below));
@@ -372,7 +370,27 @@ pub fn settings(cx: &Ctx) -> Frame {
     if let Some(r) = vibration.below {
         out.push(Hit { rect: r, action: Action::Toggle(Switch::Vibrate) });
     }
-    y = widgets::section(&mut c, t, f, vibration.bottom, l.pick(["通用", "一般", "General"]));
+    // The panel's controller takes no command that turns its own double tap
+    // on, so the page looks for two taps itself, which means keeping the panel
+    // running while dark. That draws power, hence the switch.
+    y = widgets::section(&mut c, t, f, vibration.bottom, l.pick(["唤醒", "喚醒", "Waking"]));
+    let wake = widgets::list(
+        &mut c,
+        t,
+        f,
+        y,
+        &[Row::new(l.pick(["双击亮屏", "雙擊亮屏", "Double tap to wake"]))
+            .icon(BLUE, Icon::Phone)
+            .trail(Trail::Switch(s.double_tap))],
+    );
+    out.extend(hits(&wake.rows, &[Action::Toggle(Switch::DoubleTap)]));
+    let note = l.pick([
+        "开启时熄屏后屏幕保持通电以便接收双击；关闭则熄屏后按原样休息并断电。",
+        "開啟時關閉螢幕後螢幕保持通電以便接收雙擊；關閉則關閉螢幕後按原樣休息並斷電。",
+        "On, the panel keeps drawing power while dark to catch a double tap; off, it rests and turns off as before.",
+    ]);
+    y = widgets::footnote(&mut c, t, f, wake.bottom, note);
+    y = widgets::section(&mut c, t, f, y, l.pick(["通用", "一般", "General"]));
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
