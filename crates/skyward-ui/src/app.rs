@@ -544,6 +544,10 @@ pub enum Slider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Vibrate,
+    /// Open the WLAN as the recovery starts.
+    WlanAuto,
+    /// Keep the password of the network joined last.
+    WlanKeep,
     /// Two taps on the dark panel light it.
     DoubleTap,
     /// Offer internal storage to a computer over USB.
@@ -1733,6 +1737,10 @@ pub struct State {
     /// The WLAN, as the runtime last told it; none on a phone whose WLAN the
     /// recovery does not bring up.
     pub wlan: Option<Wlan>,
+    /// Open the WLAN as the recovery starts.
+    pub wlan_auto: bool,
+    /// Keep the password of the network joined last.
+    pub wlan_keep: bool,
     /// The network the password page is for, and what is typed there.
     pub joining: Option<Network>,
     /// The network the details page is of, as it was found.
@@ -1831,6 +1839,8 @@ impl Default for State {
             part_work: None,
             update: Standing::None,
             wlan: None,
+            wlan_auto: false,
+            wlan_keep: false,
             joining: None,
             details: None,
             adding: None,
@@ -1959,6 +1969,10 @@ pub enum Shot {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Reboot(Target),
+    /// Whether the WLAN comes up with the recovery, kept for the starts to come.
+    WlanAuto(bool),
+    /// Whether the password of the network joined last is kept.
+    WlanKeep(bool),
     /// A short tap of the vibration motor.
     Haptic,
     /// The motor's two quick ticks as the power key turns the screen off,
@@ -5206,6 +5220,8 @@ impl App {
             Action::Toggle(switch) => {
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
+                    Switch::WlanAuto => &mut self.state.wlan_auto,
+                    Switch::WlanKeep => &mut self.state.wlan_keep,
                     Switch::DoubleTap => &mut self.state.double_tap,
                     Switch::FileTransfer => &mut self.state.file_transfer,
                     Switch::Compress => &mut self.state.compress,
@@ -5220,6 +5236,12 @@ impl App {
                 self.refresh();
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
+                }
+                if switch == Switch::WlanAuto {
+                    return vec![Effect::WlanAuto(now_on)];
+                }
+                if switch == Switch::WlanKeep {
+                    return vec![Effect::WlanKeep(now_on)];
                 }
             }
             Action::MountToggle(i) => {

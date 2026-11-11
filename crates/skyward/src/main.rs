@@ -31,6 +31,7 @@ mod relabel;
 mod secure;
 #[cfg(target_os = "android")]
 mod services;
+mod wlanmem;
 #[cfg(target_os = "android")]
 mod settings;
 #[cfg(target_os = "android")]

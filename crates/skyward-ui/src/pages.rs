@@ -2878,6 +2878,15 @@ pub fn wlan(cx: &Ctx) -> Frame {
     let switch = widgets::list(&mut c, t, f, top, &[Row::new(l.pick(WLAN)).trail(Trail::Switch(on))]);
     out.extend(hits(&switch.rows, &[Action::Toggle(Switch::Wlan)]));
     let mut y = switch.bottom;
+    // Two settings of its own: whether the WLAN comes up with the recovery,
+    // and whether the password of the network joined last is kept for the
+    // starts that follow.
+    let kept = widgets::list(&mut c, t, f, y, &[
+        Row::new(l.pick(["启动时开启", "啟動時開啟", "Open at start"])).trail(Trail::Switch(s.wlan_auto)),
+        Row::new(l.pick(["记住密码", "記住密碼", "Keep the password"])).trail(Trail::Switch(s.wlan_keep)),
+    ]);
+    out.extend(hits(&kept.rows, &[Action::Toggle(Switch::WlanAuto), Action::Toggle(Switch::WlanKeep)]));
+    y = kept.bottom;
     match &w.power {
         Power::Off => {
             let note = l.pick([

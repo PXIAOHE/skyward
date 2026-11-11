@@ -1386,9 +1386,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // The WLAN comes up on a thread of its own: loading the driver, starting
     // the supplicant and joining what was joined before takes seconds, and the
     // pages do not need any of it to be drawn or touched.
+    let wlan_kept = wlanmem::read();
     let wlan: Arc<Mutex<Option<wlan::Worker>>> = Arc::new(Mutex::new(None));
     if let Some(w) = cfg.wlan.clone() {
         app.state.wlan = Some(Wlan::default());
+        app.state.wlan_auto = wlan_kept.auto;
+        app.state.wlan_keep = wlan_kept.keep;
         let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
         let libraries = secure::libraries().unwrap_or_else(|e| {
             let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
@@ -1422,6 +1425,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // battery is read at once, and the phone stays awake until it is.
     let uevents = uevent::Listener::open()?;
     let mut asked: Option<Instant> = None;
+    // The network kept is joined as soon as it shows, once the WLAN is up.
+    let mut wlan_joined = false;
+    let mut wlan_opened = false;
+    let mut wlan_retries = 0u32;
+    let mut wlan_failed_at: Option<Instant> = None;
     // The USB drive plugged in, looked for each second.
     let mut plugged: Option<Plugged> = None;
     let mut seen: Option<String> = None;
@@ -1655,6 +1663,38 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             match slept {
                 Slept::Woke => skyward_sys::kmsg("the phone slept and woke")?,
                 Slept::Refused(why) => skyward_sys::kmsg(&format!("the phone did not sleep: {why}"))?,
+            }
+        }
+        // The network kept, joined once the WLAN has it in view.
+        if app.state.wlan_auto && !wlan_joined {
+            if let Some(saved) = wlan_kept.saved.clone() {
+                let power = app.state.wlan.as_ref().map(|w| w.power.clone());
+                if !wlan_opened && matches!(power, Some(WlanPower::Off | WlanPower::Failed(_))) {
+                    wlan_opened = true;
+                    wlan_worker(&wlan, wlan::Command::On)?;
+                    let _ = skyward_sys::kmsg("the WLAN is opened for the network kept");
+                }
+                if matches!(power, Some(WlanPower::On)) {
+                    let found = app.state.wlan.as_ref().and_then(|w| w.networks.iter().find(|n| n.ssid == saved.ssid)).cloned();
+                    if let Some(found) = found {
+                        wlan_joined = true;
+                        let _ = skyward_sys::kmsg(&format!("joining the network kept: {}", found.name));
+                        wlan_worker(
+                            &wlan,
+                            wlan::Command::Join { ssid: found.ssid, name: found.name, security: found.security, password: saved.password },
+                        )?;
+                    }
+                }
+            }
+        }
+        // A WLAN that did not come up is tried again a few times.
+        if app.state.wlan_auto && !wlan_joined && wlan_retries < 3 {
+            let failed = app.state.wlan.as_ref().is_some_and(|w| matches!(w.power, WlanPower::Failed(_)));
+            if failed && wlan_failed_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(5)) {
+                wlan_retries += 1;
+                wlan_failed_at = Some(Instant::now());
+                wlan_worker(&wlan, wlan::Command::On)?;
+                let _ = skyward_sys::kmsg("the WLAN is opened again after it did not come up");
             }
         }
         if uevents.heard()? {
@@ -2553,6 +2593,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         skyward_sys::kmsg("merging the update, as the update page asked")?;
                         merger = Some(merge::Merger::start(slot, true)?);
                     }
+                    Effect::WlanAuto(on) => {
+                        wlanmem::set_auto(on)?;
+                    }
+                    Effect::WlanKeep(on) => {
+                        wlanmem::set_keep(on)?;
+                    }
                     Effect::Wlan(on) => {
                         wlan_worker(&wlan, if on { wlan::Command::On } else { wlan::Command::Off })?;
                     }
@@ -2561,6 +2607,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         wlan_worker(&wlan, wlan::Command::Scan)?;
                     }
                     Effect::JoinWlan { ssid, name, security, password } => {
+                        // Kept before it is tried, so that a password the phone
+                        // has is the one the next start joins with, whether or
+                        // not the access point takes it now.
+                        if app.state.wlan_keep {
+                            wlanmem::save(&ssid, &password.0)?;
+                        }
                         wlan_worker(&wlan, wlan::Command::Join { ssid, name, security, password: password.0 })?;
                     }
                     Effect::LeaveWlan => {
