@@ -4490,8 +4490,43 @@ impl App {
                 }
             }
         }
+        self.paint_preparing(out, &t);
         if self.locked {
             self.paint_lock(out, &t, f, info, clock, now);
+        }
+    }
+
+    /// The ring that turns about the sign while the phone's parts come up,
+    /// and the bar under it that says how far the work has come. Laid over
+    /// the page rather than drawn into it, so that it moves every frame
+    /// without the page being built again each time.
+    fn paint_preparing(&self, out: &mut Canvas, t: &Theme) {
+        if crate::progress::stage() >= crate::progress::READY {
+            return;
+        }
+        if !matches!(self.state.data, Data::Closed | Data::Opening) {
+            return;
+        }
+        let m = t.m;
+        let x = m.w as f32 / 2.0;
+        let cy = m.dp(150.0);
+        let r = m.dp(40.0);
+        let phase = (crate::progress::phase_ms() % 1500) as f32 / 1500.0;
+        let start = -std::f32::consts::FRAC_PI_2 + phase * std::f32::consts::TAU;
+        out.stroke_circle(x, cy, r, m.dp(1.5), t.pal.track);
+        for k in 0..4 {
+            let a = 0.5 + 0.5 * (k as f32 / 4.0);
+            let color = crate::color::mix(t.pal.bg, t.pal.accent, a * 0.55);
+            out.stroke_arc(x, cy, r, start - 0.14 * (4 - k) as f32, 0.15, m.dp(2.5), color);
+        }
+        out.stroke_arc(x, cy, r, start, 0.9, m.dp(2.5), t.pal.accent);
+        let done = crate::progress::done();
+        let (w, h) = (m.dp(200.0), m.dp(4.0));
+        let bar = cy + m.dp(124.0);
+        out.fill_round_rect(x - w / 2.0, bar, w, h, h / 2.0, t.pal.track);
+        if done > 0.0 {
+            out.fill_round_rect(x - w / 2.0, bar, w * done, h, h / 2.0, t.pal.accent);
+            out.fill_circle(x - w / 2.0 + w * done, bar + h / 2.0, m.dp(3.5), t.pal.accent);
         }
     }
 

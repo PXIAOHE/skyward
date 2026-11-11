@@ -1170,6 +1170,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // besides the panel's: made ready now, the first slide finds them so.
     Canvas::keep_ready(w, h, 3);
     let mut shown_clock = String::new();
+    let mut shown_stage = skyward_ui::progress::stage();
     // The readings are taken again on a thread of their own; those taken
     // here as work ends say how it left the phone, and readings started
     // before them are out of date.
@@ -1528,13 +1529,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             app.set_fastboot(running, link);
             port_at = Instant::now();
         }
-        // The ring on the decrypt page keeps turning while the phone's parts
-        // come up. It is drawn into the page's own frame, which is kept as
-        // drawn until something clears it, so the frame is built anew each
-        // frame rather than the screen composed again from the old one.
-        if skyward_ui::progress::stage() < skyward_ui::progress::READY {
-            app.refresh();
-        }
         let panel = app.panel(now);
         let mut shown = false;
         if panel.is_some() {
@@ -1593,11 +1587,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // A resting panel turns off once its rest is over.
         let rest_left = rested_at.map(|at| REST.saturating_sub(at.elapsed()).as_millis() as i32);
         let mut timeout = if ahead { 0 } else { until_due.into_iter().chain(rest_left).min().map_or(1000, |t| t.clamp(floor, 1000)) };
-        // While the phone's parts are still coming up, the page is redrawn
-        // every frame so the ring beside it keeps turning.
-        if skyward_ui::progress::stage() < skyward_ui::progress::READY {
-            timeout = timeout.min(33);
+        // The ring on the decrypt page keeps turning while the phone's parts
+        // come up. It is laid over the page as the screen is composed, so the
+        // page itself is built again only when the stage it names changes,
+        // and the frame is drawn again each frame meanwhile.
+        let stage = skyward_ui::progress::stage();
+        if stage != shown_stage {
+            shown_stage = stage;
+            app.refresh();
         }
+        if stage < skyward_ui::progress::READY {
+            app.redraw();
+            timeout = timeout.min(16);
+        }
+
         // With the display off, the phone sleeps unless something needs it
         // awake: work under way, fastboot or sideload, a restart on its way,
         // a command running in the terminal, a network being joined, the
