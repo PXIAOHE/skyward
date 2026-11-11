@@ -479,6 +479,25 @@ const TAG_BYTES: usize = 16;
 /// none, and a user the phone made one up for needs `owner`, the note the
 /// owner's own secret gave. The owner's files open, their shared storage
 /// shows at /sdcard.
+/// Which of a user's blobs opened, and what it was bound to, written where
+/// the phone's persist partition keeps it: a recovery's own output is not
+/// kept, and which path a phone takes is what tells whether the weaver is
+/// wanted at all.
+fn note_opened(user: u32, protector: &crate::user::Protector) {
+    let bound = match &protector.bound {
+        Bound::Weaver(_) => "weaver",
+        Bound::Secdiscardable(_) => "secdiscardable",
+    };
+    let path = std::path::Path::new("/mnt/vendor/persist/skyward/decrypt.txt");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = write!(file, "user {user}: opened {} ({bound})\n", protector.id);
+    }
+}
+
 fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Note> {
     // A user's secret may sit behind more than one blob, and which of them
     // opens depends on which service chain is running here: try each in
@@ -490,7 +509,10 @@ fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owne
     let mut why = Vec::new();
     for protector in &protectors {
         match open_user_files_behind(service, user, protector, credential, owner) {
-            Ok(note) => return Ok(note),
+            Ok(note) => {
+                note_opened(user, protector);
+                return Ok(note);
+            }
             Err(e) => {
                 why.push(format!("{}: {e:#}", protector.id));
                 last = Some(e);
