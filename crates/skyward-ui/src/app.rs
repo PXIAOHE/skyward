@@ -6330,6 +6330,9 @@ impl App {
                 }
                 Drag::Waking => self.drag = Drag::Waking,
                 Drag::Held => self.drag = Drag::Held,
+                // The lock takes every finger of its own, so a knob dragged
+                // there never reaches the page's own handling.
+                Drag::Lock { .. } => {}
                 Drag::Idle => {}
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {
