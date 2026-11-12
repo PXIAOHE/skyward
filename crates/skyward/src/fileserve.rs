@@ -290,7 +290,7 @@ fn listing(root: &Path, dir: &Path) -> String {
     }
 
     // The way up the tree, as breadcrumbs.
-    let mut crumbs = format!("<a href=\"/\">根目录</a>");
+    let mut crumbs = "<a href=\"/\">根目录</a>".to_string();
     if !shown.is_empty() {
         let mut walked = String::new();
         for part in shown.split('/').filter(|p| !p.is_empty()) {
