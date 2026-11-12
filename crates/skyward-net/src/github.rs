@@ -5,7 +5,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 /// Where GitHub answers which release of Skyward is the newest.
-pub const LATEST: &str = "https://api.github.com/repos/PXIAOHE/skyward/releases/latest";
+pub const LATEST: &str = "https://api.github.com/repos/jumpdang/skyward/releases/latest";
 
 /// The version of GitHub's API the answer is read as.
 const API_VERSION: &str = "2022-11-28";

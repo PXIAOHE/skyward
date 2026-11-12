@@ -53,13 +53,21 @@ pub struct Encryption {
 impl Encryption {
     /// Read what an entry of the phone's own table says.
     pub fn of(entry: &Entry) -> Result<Encryption> {
-        let said = entry.extra("metadata_encryption").context("the phone says its data partition is not encrypted whole")?;
-        let (name, rest) = said.split_once(':').unwrap_or((said, ""));
-        let cipher = CIPHERS
-            .iter()
-            .find_map(|(theirs, kernels)| (*theirs == name).then_some(*kernels))
-            .with_context(|| format!("no cipher here is the {name} the phone names"))?;
-        Ok(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" })
+        if let Some(said) = entry.extra("metadata_encryption") {
+            let (name, rest) = said.split_once(':').unwrap_or((said, ""));
+            let cipher = CIPHERS
+                .iter()
+                .find_map(|(theirs, kernels)| (*theirs == name).then_some(*kernels))
+                .with_context(|| format!("no cipher here is the {name} the phone names"))?;
+            return Ok(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" });
+        }
+        // A table may name only where the key is kept: Android then takes
+        // the cipher it uses where nothing is said, and the key in the form
+        // the key service gives it back.
+        if entry.extra("keydirectory").is_some() {
+            return Ok(Encryption { cipher: "aes-xts-plain64".to_string(), wrapped: false });
+        }
+        anyhow::bail!("the phone says its data partition is not encrypted whole")
     }
 }
 
@@ -121,9 +129,12 @@ fn open(service: &KeyMint) -> Result<Opened> {
     })();
     match mounted {
         Ok((checked, filesystem)) => Ok(Opened { mapped, filesystem, checked }),
-        Err(e) => match dm::remove(MAPPED) {
-            Ok(()) => Err(e),
-            Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+        Err(e) => match dm::status(MAPPED) {
+            Ok(Some(_)) => match dm::remove(MAPPED) {
+                Ok(()) => Err(e),
+                Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+            },
+            _ => Err(e),
         },
     }
 }
@@ -134,8 +145,13 @@ fn open(service: &KeyMint) -> Result<Opened> {
 fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
     let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
-    let encryption = Encryption::of(entry)?;
     let device = skyward_block::fstab::device(entry)?;
+    // A partition whose own filesystem can be read has nothing in front of
+    // it: there is no key to unwrap, and no device to put before it.
+    if skyward_block::probe::filesystem(Path::new(&device))?.is_some() {
+        return Ok((entries, PathBuf::from(device)));
+    }
+    let encryption = Encryption::of(entry)?;
     let key = storage_key(service, entry, &encryption)?;
     let sectors = skyward_block::size_bytes(&device)? / 512;
     let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
@@ -152,7 +168,10 @@ pub fn map_unmounted(service: &KeyMint) -> Result<PathBuf> {
 
 /// Take away the mapping [`map_unmounted`] made.
 pub fn unmap() -> Result<()> {
-    dm::remove(MAPPED)
+    match dm::status(MAPPED)? {
+        Some(_) => dm::remove(MAPPED),
+        None => Ok(()),
+    }
 }
 
 /// Show the owner's shared storage at /sdcard; shown already, it stays.
@@ -209,6 +228,13 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
         true => None,
         false => Some(open(service)?),
     };
+    // A partition that keeps no key for the files readable before anyone
+    // signs in is read as the phone's system reads it: every file is open
+    // already, and no user is left closed.
+    if !Path::new(FILE_MODE).exists() {
+        show_owner_storage()?;
+        return Ok(Opening { mounted, closed: Vec::new() });
+    }
     open_shared(service)?;
     let mut closed = Vec::new();
     let mut owner = Note::default();
