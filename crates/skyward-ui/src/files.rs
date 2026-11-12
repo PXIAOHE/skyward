@@ -33,7 +33,7 @@ pub const SORT_BAR_TOP_DP: f32 = 214.0;
 const ROW_DP: f32 = 72.0;
 /// What a second line of name adds to a row.
 const NAME_LINE_DP: f32 = 22.33;
-const SIDE_DP: f32 = 28.0;
+pub const SIDE_DP: f32 = 28.0;
 const ICON_DP: f32 = 40.0;
 const TEXT_X_DP: f32 = 84.0;
 /// Room the text leaves at the right, for the chevron's column.
