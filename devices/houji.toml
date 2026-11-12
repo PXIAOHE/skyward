@@ -35,6 +35,95 @@ writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
 # down and sets how the memory bus scales. Without it the CPUs stay at
 # their highest clock and voltage even while idle, and the phone slowly
 # heats up.
+# Stage the shared libraries the key services ask for that the recovery's
+# own library folder does not carry, out of the installed system's, and lay
+# the signed rfkill of the running kernel over the flattened copy, whose
+# signature the kernel does not take. The wrapper this writes is how the key
+# and credential services are started: with the linker's config in
+# LD_CONFIG_FILE, as the phone's own system starts them.
+[[service]]
+path = "/system/bin/sh"
+args = ["-c", "mkdir -p /kmlibs && cp /mnt/system/system/lib64/libhardware.so /mnt/system/system/lib64/libvndksupport.so /mnt/system/system/lib64/libnetutils.so /mnt/system/system/lib64/bootstrap/libdl_android.so /kmlibs/ && printf '[recovery]\\nnamespace.default.isolated = false\\n' > /kmlibs/ld.config.txt && printf '#!/system/bin/sh\\nexport LD_CONFIG_FILE=/kmlibs/ld.config.txt\\nexec \"$@\"\\n' > /kmlibs/km.sh && chmod 755 /kmlibs/km.sh && V=$(ls -d /system_dlkm/lib/modules/*/kernel/net/rfkill 2>/dev/null | head -1) && mount --bind $V/rfkill.ko /system_dlkm/flatten/lib/modules/rfkill.ko || true"]
+oneshot = true
+user = "root"
+groups = ["root"]
+
+# The credential service of the AIDL generation is enabled on the phone by
+# the property its init script waits for; a recovery runs no such script.
+[[service]]
+path = "/system/bin/sh"
+args = ["-c", "setprop vendor.gatekeeper.disable_spu true; setprop vendor.gatekeeper.is_security_level_spu 0; true"]
+oneshot = true
+user = "root"
+groups = ["root"]
+
+# The secure world reaches back into Android through the listeners this
+# daemon registers; the key service waits for them before it can use a key.
+# The phone's own init hands it the notify-topology socket, and it accepts
+# on that.
+[[service]]
+path = "/vendor/bin/qseecomd"
+libraries = ["/vendor/lib64", "/vendor/lib64/hw", "/system/lib64", "/odm/lib64"]
+sockets = ["notify-topology"]
+ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
+
+# The secure service gateway: the TEE calls back into the server it
+# registers for system services. Its init script runs it as system, in a
+# group the recovery's account table does not carry; run as root, it serves
+# the same, and its two sockets are the ones that script makes.
+[[service]]
+path = "/vendor/bin/ssgtzd"
+libraries = ["/kmlibs", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64", "/odm/lib64"]
+sockets = ["ssgtzd", "ssgtzd_opener"]
+user = "root"
+groups = ["root", "system", "drmrpc"]
+capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
+
+# The key service, the only thing that can use keys the phone wrapped in
+# hardware. All four names it registers have to be described, or the
+# service directory refuses it. It has no gate of its own: started without
+# one, it has the keymaster applet loaded on its own request, and the calls
+# back out of the secure world on that session are its own. Gated, or
+# started late, a qseecomd listener claims the applet first and its calls
+# back find no objects, and it hangs on them forever.
+[[service]]
+path = "/kmlibs/km.sh"
+args = ["/vendor/bin/hw/android.hardware.security.keymint-service-qti"]
+libraries = ["/kmlibs", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64", "/odm/lib64"]
+registers = [
+    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
+    "android.hardware.security.secureclock.ISecureClock/default",
+    "android.hardware.security.sharedsecret.ISharedSecret/default",
+]
+user = "root"
+groups = ["root", "drmrpc"]
+
+# The credential service: the secure world has it check a screen lock, and
+# it is the only thing that can hand out the note the key service wants
+# before using a key a screen lock guards. This phone describes its
+# gatekeeper in its own SoC's manifest file, which the service directory
+# asks for before it takes the registration.
+[[service]]
+path = "/kmlibs/km.sh"
+args = ["/vendor/bin/hw/android.hardware.gatekeeper-service-qti"]
+libraries = ["/kmlibs", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64", "/odm/lib64"]
+ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
+description = "/vendor/etc/vintf/manifest_pineapple.xml"
+user = "root"
+groups = ["root", "drmrpc"]
+
+# The boot control, which says which slot the bootloader starts next and
+# switches it. It comes before the weaver: the phone is usable without the
+# weaver answering, and the weaver is the one program here that may never.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot-service.qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.boot.IBootControl/default"
+user = "root"
+groups = ["root"]
+
 [[service]]
 path = "/vendor/bin/sh"
 args = ["/vendor/bin/init.kernel.post_boot.sh"]
@@ -64,6 +153,19 @@ supplicant = "/vendor/bin/hw/wpa_supplicant"
 libraries = ["/system/lib64", "/vendor/lib64"]
 service = "android.hardware.wifi.supplicant.ISupplicant/default"
 probe = "http://connect.rom.miui.com/generate_204"
+
+# The secure world keeps its own files, the applets the key service and the
+# credential service ask for, in the modem partition, which qseecomd's
+# listener mounts at /vendor/firmware_mnt and loads them from as they are
+# first asked for; without the mount they are not there.
+[firmware]
+partition = "modem"
+
+# The persist partition, which the phone mounts at /mnt/vendor/persist and
+# its own recovery leaves unmounted. The weaver's own files are there, and
+# the WLAN's MAC address.
+[partitions]
+mounted = ["persist"]
 
 # The update server the stock updater of the Chinese system asks.
 [update]
