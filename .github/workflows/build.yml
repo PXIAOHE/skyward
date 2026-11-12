@@ -167,35 +167,6 @@ jobs:
             --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
             --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
-      # A build serving more than one phone carries a configuration for each;
-      # this says which ones went in, so a missing one is seen here rather
-      # than on the phone.
-      - name: Say which configurations went in
-        working-directory: .
-        run: |
-          python3 - <<'EOF'
-          import lz4.block, struct, sys
-          path = next(p for p in __import__("glob").glob("out/*.img"))
-          with open(path, "rb") as f:
-              head = f.read(4096)
-              ks, rs = struct.unpack("<II", head[8:16])
-              f.seek(4096 + ks)
-              rd = f.read(rs)
-          # lz4 legacy: a 4-byte magic, then blocks of a length and its bytes.
-          i, raw = 4, []
-          while i + 4 <= len(rd):
-              n = struct.unpack("<I", rd[i:i+4])[0]
-              i += 4
-              if n == 0 or i + n > len(rd):
-                  break
-              raw.append(lz4.block.decompress(rd[i:i+n], uncompressed_size=32 << 20))
-              i += n
-          text = b"".join(raw)
-          names = sorted({m for m in text.split(b"\x00") if b"skyward/devices/" in m or b"skyward/device.toml" in m})
-          print("configurations in the ramdisk:")
-          for n in names:
-              print("  ", n.decode(errors="replace"))
-          EOF
       # The image is the whole partition, flashed as it is, and most of it
       # is the room the recovery leaves empty; it is handed out zipped.
       - name: Zip the image
