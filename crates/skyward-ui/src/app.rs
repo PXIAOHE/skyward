@@ -1257,10 +1257,6 @@ pub enum Action {
     FetchFromFile,
     /// Serve the folder the file manager shows, or stop serving it.
     ServeToggle,
-    /// Bring the phone's own access point up, or take it down.
-    PointToggle,
-    /// Whether the access point comes up as the recovery starts.
-    PointAuto,
     /// The next way of sorting the file manager's entries, and the next side.
     CycleSort,
     /// Whether the folders come first.
@@ -1779,12 +1775,9 @@ pub struct State {
     pub sort_key: SortKey,
     pub sort_desc: bool,
     pub sort_folders_first: bool,
-    /// Where serving a folder stands, and where the phone's own access point
-    /// stands; the folder served is the one the file manager shows.
+    /// Where serving a folder stands; the folder served is the one the file
+    /// manager shows.
     pub serving: Serving,
-    pub point: Point,
-    /// Whether the access point is to come up as the recovery starts.
-    pub point_auto: bool,
     /// The address typed on the download page, and where its fetch stands.
     pub fetch_url: String,
     pub fetch: Fetch,
@@ -1936,8 +1929,6 @@ impl Default for State {
             sort_desc: false,
             sort_folders_first: true,
             serving: Serving::Idle,
-            point: Point::Off,
-            point_auto: false,
             fetch_url: String::new(),
             fetch: Fetch::Idle,
             fetch_portal: None,
@@ -2083,23 +2074,6 @@ pub enum Serving {
     Failed(String),
 }
 
-/// Where the phone's own access point stands.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Point {
-    #[default]
-    Off,
-    Starting,
-    Running {
-        ssid: String,
-        password: String,
-        /// The address another device reaches the phone at.
-        at: String,
-        /// How many devices have joined.
-        joined: u32,
-    },
-    Failed(String),
-}
-
 /// Where a file being fetched from an address stands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Fetch {
@@ -2217,8 +2191,6 @@ pub enum Effect {
     Fetch(String),
     /// Serve the files under `root`, or stop serving them.
     Serve(Option<String>),
-    /// Bring the access point up with `ssid` and `password`, or take it down.
-    Point(Option<(String, String)>),
     /// Stop the fetch under way.
     StopFetch,
     /// Open the own files of `user` with what they entered at their screen
@@ -4883,33 +4855,6 @@ impl App {
         self.refresh();
     }
 
-    /// The access point is up.
-    pub fn point_up(&mut self, ssid: String, password: String, at: String) {
-        self.state.point = Point::Running { ssid, password, at, joined: 0 };
-        self.refresh();
-    }
-
-    /// How many devices have joined the access point.
-    pub fn point_joined(&mut self, joined: u32) {
-        if let Point::Running { ssid, password, at, joined: was } = &self.state.point {
-            if *was != joined {
-                self.state.point = Point::Running { ssid: ssid.clone(), password: password.clone(), at: at.clone(), joined };
-                self.dirty = true;
-            }
-        }
-    }
-
-    /// The access point could not be brought up.
-    pub fn point_failed(&mut self, why: String) {
-        self.state.point = Point::Failed(why);
-        self.refresh();
-    }
-
-    /// Whether the access point is asked for as the recovery starts.
-    pub fn wants_point(&self) -> bool {
-        self.state.point_auto
-    }
-
     /// The page another device reaches to hand a link over, once it serves.
     pub fn set_portal(&mut self, at: Option<String>) {
         if self.state.fetch_portal != at {
@@ -6086,24 +6031,6 @@ impl App {
                         vec![Effect::Serve(Some(root))]
                     }
                 };
-            }
-            Action::PointToggle => {
-                return match &self.state.point {
-                    Point::Running { .. } | Point::Starting => {
-                        self.state.point = Point::Off;
-                        self.refresh();
-                        vec![Effect::Point(None)]
-                    }
-                    _ => {
-                        self.state.point = Point::Starting;
-                        self.refresh();
-                        vec![Effect::Point(Some((String::new(), String::new())))]
-                    }
-                };
-            }
-            Action::PointAuto => {
-                self.state.point_auto = !self.state.point_auto;
-                self.refresh();
             }
             Action::CycleSort => {
                 self.state.sort_key = self.state.sort_key.next();

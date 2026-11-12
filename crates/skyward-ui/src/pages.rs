@@ -1,7 +1,7 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
     FileOp, FileTask, Fetch, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
-    Point, Serving, SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
+    Serving, SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
     BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
     USB_DRIVE_WANTED, WIPES, installs, starting,
 };
@@ -960,7 +960,7 @@ pub fn serve(cx: &Ctx) -> Frame {
     let mut y = top;
 
     // The folder served, as the file manager shows it.
-    y = widgets::section_first(&mut c, t, f, y, l.pick(["文件服务", "檔案服務", "Files"]));
+    y = widgets::section_first(&mut c, t, f, y, l.pick(["传输", "傳輸", "Transfer"]));
     let folder = s.files.path.clone();
     y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["文件夹", "資料夾", "Folder"]), folder)]);
 
@@ -990,48 +990,12 @@ pub fn serve(cx: &Ctx) -> Frame {
         _ => {}
     }
 
-    // The phone's own access point.
-    y = widgets::section(&mut c, t, f, y + m.card_gap, l.pick(["热点", "熱點", "Access point"]));
-    let (point_label, point_sub) = match &s.point {
-        Point::Off => (l.pick(["开启热点", "開啟熱點", "Turn on"]), String::new()),
-        Point::Starting => (l.pick(["正在开启…", "正在開啟…", "Starting…"]), String::new()),
-        Point::Running { ssid, password, .. } => {
-            let sub = if password.is_empty() { ssid.clone() } else { format!("{ssid} / {password}") };
-            (l.pick(["关闭热点", "關閉熱點", "Turn off"]), sub)
-        }
-        Point::Failed(_) => (l.pick(["重试", "重試", "Try again"]), String::new()),
-    };
-    let mut prow = Row::new(point_label);
-    if !point_sub.is_empty() {
-        prow = prow.subtitle(&point_sub);
-    }
-    let auto = Row::new(l.pick(["启动时自动开启", "啟動時自動開啟", "On at start"])).trail(Trail::Switch(s.point_auto));
-    let point = widgets::list(&mut c, t, f, y, &[prow, auto]);
-    out.extend(hits(&point.rows, &[Action::PointToggle, Action::PointAuto]));
-    y = point.bottom;
-    match &s.point {
-        Point::Running { at, joined, .. } => {
-            let (at, n) = (at.as_str(), *joined);
-            let said = tr!(l, "手机地址 {at}，已连接 {n} 台设备", "手機位址 {at}，已連線 {n} 台裝置", "{at}, {n} devices joined");
-            y = widgets::footnote(&mut c, t, f, y, &said);
-        }
-        Point::Failed(why) => {
-            y = widgets::info_card(&mut c, t, f, y + m.card_gap, &[(l.pick(["开启失败", "開啟失敗", "Couldn't start"]), why.clone())]);
-        }
-        _ => {}
-    }
-
     // What a device that joins reaches.
     let notes = [
         l.pick([
             "同一局域网内：手机和电脑连同一个路由器，用上面的地址打开。",
             "同一區域網路內：手機和電腦連同一個路由器，用上面的位址開啟。",
             "On the same network: phone and computer on one router, open the address above.",
-        ]),
-        l.pick([
-            "没有路由器时：开启热点，让电脑连上这个热点，再打开手机地址。",
-            "沒有路由器時：開啟熱點，讓電腦連上這個熱點，再開啟手機位址。",
-            "With no router: turn the hotspot on, join it from the computer, then open the phone's address.",
         ]),
         l.pick([
             "服务只读取和写入所选文件夹，不会碰到别处。",
@@ -2860,7 +2824,7 @@ const CHECKING: Text = ["正在检查更新", "正在檢查更新", "Checking fo
 const CHECK_FOR_UPDATES: Text = ["检查更新", "檢查更新", "Check for updates"];
 const FETCH: Text = ["网络下载", "網路下載", "Download from a link"];
 
-const SERVE: Text = ["文件服务", "檔案服務", "File server"];
+const SERVE: Text = ["无线传输", "無線傳輸", "Wireless transfer"];
 
 const DOWNLOADING: Text = ["正在下载", "正在下載", "Downloading"];
 const CHECKING_PART: Text = ["正在校验已下载的部分", "正在驗證已下載的部分", "Verifying what was downloaded"];

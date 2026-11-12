@@ -252,71 +252,163 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-/// The page that lists `dir`, with a way up and a way to put a file there.
+/// The page that lists `dir`: a card for each entry, the way a drive on the
+/// web shows one, with a way up and a way to put files there.
 fn listing(root: &Path, dir: &Path) -> String {
     let shown = dir.strip_prefix(root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut rows = String::new();
+    let mut cards = String::new();
     if !shown.is_empty() {
-        rows.push_str("<tr><td colspan=2><a href=\"../\">..</a></td></tr>\n");
+        cards.push_str(
+            "<a class=card href=\"../\"><div class=icon>&#8593;</div><div class=name>..</div><div class=meta>上级</div></a>\n",
+        );
     }
     let mut entries: Vec<_> = match fs::read_dir(dir) {
         Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
         Err(_) => Vec::new(),
     };
     entries.sort_by_key(|e| {
-        let dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        (!dir, e.file_name().to_string_lossy().to_lowercase())
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        (!is_dir, e.file_name().to_string_lossy().to_lowercase())
     });
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         let href = format!("{}{}", url_encode(&name), if is_dir { "/" } else { "" });
-        let shown_name = if is_dir { format!("{name}/") } else { name.clone() };
-        let size_text = if is_dir { String::new() } else { size_of(size) };
-        rows.push_str(&format!(
-            "<tr><td><a href=\"{href}\">{shown_name}</a></td><td class=size>{size_text}</td></tr>\n"
+        let (icon, meta) = if is_dir {
+            ("&#128193;".to_string(), "文件夹".to_string())
+        } else {
+            (icon_for(&name), size_of(size))
+        };
+        cards.push_str(&format!(
+            "<a class=card href=\"{href}\"><div class=icon>{icon}</div><div class=name title=\"{esc}\">{name}</div><div class=meta>{meta}</div></a>\n",
+            esc = html_escape(&name),
         ));
     }
-    let title = if shown.is_empty() { "Files".to_string() } else { shown.clone() };
+    if cards.is_empty() {
+        cards.push_str("<div class=empty>这个文件夹是空的</div>\n");
+    }
+
+    // The way up the tree, as breadcrumbs.
+    let mut crumbs = format!("<a href=\"/\">根目录</a>");
+    if !shown.is_empty() {
+        let mut walked = String::new();
+        for part in shown.split('/').filter(|p| !p.is_empty()) {
+            if !walked.is_empty() {
+                walked.push('/');
+            }
+            walked.push_str(part);
+            crumbs.push_str(&format!(" <span>/</span> <a href=\"{}/\">{}</a>", url_encode(&walked), html_escape(part)));
+        }
+    }
+
+    let count = cards.matches("class=card").count().saturating_sub(if shown.is_empty() { 0 } else { 1 });
+    let prefix = if shown.is_empty() { String::new() } else { format!("{}/", url_encode(&shown)) };
     format!(
         r#"<!doctype html><html lang=zh><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>{title}</title>
+<title>Skyward 无线传输</title>
 <style>
-body{{font:15px/1.6 system-ui,sans-serif;margin:0;padding:16px;background:#111;color:#eee}}
-h1{{font-size:18px;margin:0 0 12px}}
-table{{width:100%;border-collapse:collapse}}
-td{{padding:8px 4px;border-bottom:1px solid #2a2a2a}}
-.size{{text-align:right;color:#888;white-space:nowrap}}
-a{{color:#4da3ff;text-decoration:none}}
-form{{margin-top:20px;padding-top:16px;border-top:1px solid #2a2a2a}}
-input[type=file]{{color:#eee}}
-button{{margin-top:8px;padding:8px 16px;border:0;border-radius:8px;background:#4da3ff;color:#000;font-weight:600}}
+:root{{--bg:#0f1115;--card:#181b22;--card-hover:#1f2430;--line:#262b36;--text:#e6e9ef;--dim:#8b93a3;--accent:#4d8dff}}
+*{{box-sizing:border-box}}
+body{{margin:0;padding:0;background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}}
+header{{position:sticky;top:0;z-index:10;background:rgba(15,17,21,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}}
+.bar{{max-width:1080px;margin:0 auto;padding:16px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}}
+.logo{{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px;white-space:nowrap}}
+.logo span.dot{{width:9px;height:9px;border-radius:50%;background:#3ddc84;box-shadow:0 0 8px #3ddc84}}
+.crumbs{{flex:1;min-width:200px;font-size:14px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.crumbs a{{color:var(--dim);text-decoration:none}}
+.crumbs a:hover{{color:var(--accent)}}
+.crumbs span{{opacity:.4;margin:0 4px}}
+.actions{{display:flex;gap:8px}}
+button{{padding:9px 18px;border:0;border-radius:9px;background:var(--accent);color:#fff;font-size:14px;font-weight:600;cursor:pointer;transition:.15s}}
+button:hover{{filter:brightness(1.12)}}
+button.ghost{{background:transparent;border:1px solid var(--line);color:var(--text)}}
+button.ghost:hover{{border-color:var(--accent);color:var(--accent)}}
+main{{max-width:1080px;margin:0 auto;padding:20px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px}}
+.card{{display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 12px;background:var(--card);border:1px solid transparent;border-radius:14px;text-decoration:none;color:inherit;transition:.15s;overflow:hidden}}
+.card:hover{{background:var(--card-hover);border-color:var(--line);transform:translateY(-2px)}}
+.card .icon{{font-size:32px;line-height:1;filter:saturate(1.1)}}
+.card .name{{width:100%;font-size:13px;text-align:center;word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
+.card .meta{{font-size:11px;color:var(--dim)}}
+.empty{{grid-column:1/-1;padding:60px 0;text-align:center;color:var(--dim)}}
+#drop{{margin-top:20px;padding:36px;border:2px dashed var(--line);border-radius:16px;text-align:center;color:var(--dim);transition:.15s;cursor:pointer}}
+#drop.over{{border-color:var(--accent);color:var(--accent);background:rgba(77,141,255,.06)}}
+#drop strong{{display:block;font-size:15px;color:var(--text);margin-bottom:6px}}
+#bar{{margin-top:14px;height:6px;border-radius:3px;background:var(--line);overflow:hidden;display:none}}
+#bar>i{{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}}
+footer{{max-width:1080px;margin:0 auto;padding:24px 20px 40px;color:var(--dim);font-size:12px;text-align:center}}
 </style></head><body>
-<h1>{title}</h1>
-<table>
-{rows}
-</table>
-<form method=post enctype=multipart/form-data onsubmit="up(event)">
-<input type=file name=f multiple>
-<button>上传到此处</button>
-</form>
+<header><div class=bar>
+<div class=logo><span class=dot></span>Skyward</div>
+<div class=crumbs>{crumbs}</div>
+<div class=actions>
+<button class=ghost onclick="pick()">上传文件</button>
+</div>
+</div></header>
+<main>
+<div class=grid>
+{cards}
+</div>
+<div id=drop onclick="pick()">
+<strong>拖放文件到这里，或点击选择</strong>
+上传到当前文件夹
+</div>
+<div id=bar><i></i></div>
+</main>
+<footer>共 {count} 项 · 由 Skyward 恢复模式提供</footer>
+<input id=file type=file multiple hidden>
 <script>
-async function up(e){{
-  e.preventDefault();
-  const files = document.querySelector('input[type=file]').files;
-  for (const f of files) {{
-    await fetch('{shown_prefix}' + encodeURIComponent(f.name), {{method:'PUT', body:f}});
+const input=document.getElementById('file'),drop=document.getElementById('drop'),bar=document.getElementById('bar'),fill=bar.querySelector('i');
+function pick(){{input.click()}}
+input.onchange=()=>{{if(input.files.length)up([...input.files]);input.value=''}};
+['dragenter','dragover'].forEach(e=>drop.addEventListener(e,ev=>{{ev.preventDefault();drop.classList.add('over')}}));
+['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{{ev.preventDefault();drop.classList.remove('over')}}));
+drop.addEventListener('drop',ev=>{{if(ev.dataTransfer.files.length)up([...ev.dataTransfer.files])}});
+async function up(files){{
+  bar.style.display='block';
+  for(let i=0;i<files.length;i++){{
+    const f=files[i];
+    await new Promise((done,no)=>{{
+      const x=new XMLHttpRequest();
+      x.open('PUT','{prefix}'+encodeURIComponent(f.name));
+      x.upload.onprogress=e=>{{if(e.lengthComputable){{
+        const pct=((i+e.loaded/e.total)/files.length*100).toFixed(0);
+        fill.style.width=pct+'%';
+      }}}};
+      x.onload=()=>done(); x.onerror=()=>no();
+      x.send(f);
+    }});
   }}
+  fill.style.width='100%';
   location.reload();
 }}
 </script>
 </body></html>"#,
-        title = html_escape(&title),
-        rows = rows,
-        shown_prefix = if shown.is_empty() { String::new() } else { format!("{}/", url_encode(&shown)) },
+        crumbs = crumbs,
+        cards = cards,
+        count = count,
+        prefix = prefix,
     )
+}
+
+/// A picture for a name, by what it ends with.
+fn icon_for(name: &str) -> String {
+    let ext = name.rsplit('.').next().filter(|e| *e != name).unwrap_or("").to_lowercase();
+    let face = match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic" | "svg" => "&#128444;",
+        "mp4" | "mkv" | "mov" | "avi" | "webm" | "3gp" => "&#127909;",
+        "mp3" | "flac" | "wav" | "m4a" | "ogg" | "aac" => "&#127925;",
+        "zip" | "7z" | "tar" | "gz" | "xz" | "zst" | "rar" | "bz2" => "&#128230;",
+        "apk" | "apks" => "&#128241;",
+        "img" | "bin" | "lz4" => "&#128190;",
+        "txt" | "md" | "log" => "&#128196;",
+        "pdf" => "&#128209;",
+        "json" | "xml" | "csv" => "&#128202;",
+        _ => "&#128196;",
+    };
+    face.to_string()
 }
 
 fn size_of(bytes: u64) -> String {
