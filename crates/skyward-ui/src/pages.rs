@@ -980,8 +980,8 @@ pub fn serve(cx: &Ctx) -> Frame {
     y = run.bottom;
     match &s.serving {
         Serving::Running { served, .. } => {
+            let n = served;
             let said = tr!(l, "已应答 {n} 次请求", "已回應 {n} 次請求", "{n} requests answered");
-            let said = said.replace("{n}", &served.to_string());
             y = widgets::footnote(&mut c, t, f, y, &said);
         }
         Serving::Failed(why) => {
@@ -1012,8 +1012,8 @@ pub fn serve(cx: &Ctx) -> Frame {
     y = point.bottom;
     match &s.point {
         Point::Running { at, joined, .. } => {
+            let (at, n) = (at.as_str(), *joined);
             let said = tr!(l, "手机地址 {at}，已连接 {n} 台设备", "手機位址 {at}，已連線 {n} 台裝置", "{at}, {n} devices joined");
-            let said = said.replace("{at}", at).replace("{n}", &joined.to_string());
             y = widgets::footnote(&mut c, t, f, y, &said);
         }
         Point::Failed(why) => {
