@@ -79,7 +79,16 @@ impl Drop for Worker {
 
 fn read(url: &str, servers: &skyward_net::http::Servers, stop: &AtomicBool) -> Result<Page> {
     let agent = skyward_net::http::agent(servers.clone());
-    let mut response = agent.get(url).call().context("ask the server for the page")?;
+    // A plain browser's name, and a wish for the page as it is written: a
+    // server that knows nothing of scripts sends what it has, where one told
+    // of a phone that runs them may send a shell that fills itself in later.
+    let mut response = agent
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36")
+        .header("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .call()
+        .context("ask the server for the page")?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         bail!("the server answered {status}");
@@ -122,7 +131,7 @@ fn parse(html: &str, base: &str) -> Page {
     while i < bytes.len() {
         let rest = &html[i..];
         if let Some(tag) = skip {
-            // Inside <script> or <style>: look only for its end.
+            // Inside <script>, <style> or <title>: look only for its end.
             let close = format!("</{tag}");
             match rest.to_ascii_lowercase().find(&close) {
                 Some(k) => {
@@ -140,26 +149,33 @@ fn parse(html: &str, base: &str) -> Page {
             let Some(end) = rest.find('>') else { break };
             let tag = &rest[1..end];
             i += end + 1;
+            // The tag's name is its first word: attributes may hold slashes,
+            // as `<style data-for="a/b">` does, and those are not its name.
             let name = tag
                 .trim_start_matches('/')
-                .split(|c: char| c.is_whitespace() || c == '/')
+                .split_whitespace()
                 .next()
                 .unwrap_or("")
+                .trim_end_matches('/')
                 .to_ascii_lowercase();
             let closing = tag.starts_with('/');
             match name.as_str() {
                 "script" | "style" | "noscript" => {
                     if !closing {
-                        skip = Some(if name == "script" {
-                            "script"
-                        } else if name == "style" {
-                            "style"
-                        } else {
-                            "noscript"
+                        skip = Some(match name.as_str() {
+                            "script" => "script",
+                            "style" => "style",
+                            _ => "noscript",
                         });
                     }
                 }
-                "title" => {}
+                // The page's name is read apart, below; what it holds is
+                // not also the page's text.
+                "title" => {
+                    if !closing {
+                        skip = Some("title");
+                    }
+                }
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     flush(&mut text, &mut blocks, Block::Heading as fn(String) -> Block);
                 }

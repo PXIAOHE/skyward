@@ -957,7 +957,7 @@ pub fn browser(cx: &Ctx) -> Frame {
     let mut c = long_page(cx);
     let mut out = Vec::new();
     let wide = m.w as f32 - m.margin * 2.0;
-    let top = m.content_top - m.dp(66.0);
+    let top = m.content_top;
     let hint = l.pick(["输入网址，如 example.com", "輸入網址，如 example.com", "Type an address, such as example.com"]);
     let field = widgets::search_field(&mut c, t, f, m.margin, wide, top + m.dp(24.0), &s.browse_url, hint);
     let loading = matches!(s.browse, Browse::Loading);
@@ -1013,6 +1013,14 @@ pub fn browser(cx: &Ctx) -> Frame {
         Browse::Read { title, pieces } => {
             c.text_top(&f.heading, title, m.margin, y, m.dp(22.0), t.pal.text, Some(wide));
             y += m.dp(22.0) * 1.4 + m.dp(12.0);
+            if pieces.is_empty() {
+                let none = l.pick([
+                    "这一页没有可显示的文字，可能是图片、脚本或需要登录。",
+                    "這一頁沒有可顯示的文字，可能是圖片、腳本或需要登入。",
+                    "This page holds no text to show: it may be pictures, scripts, or need a sign-in.",
+                ]);
+                y = widgets::footnote(&mut c, t, f, y, none);
+            }
             for (i, piece) in pieces.iter().enumerate() {
                 match piece {
                     Piece::Heading(text) => {
@@ -1044,15 +1052,16 @@ pub fn browser(cx: &Ctx) -> Frame {
             }
         }
     }
-    // The page is as tall as what was drawn; nothing follows it.
-    let _ = y;
-
+    // The keyboard covers the foot of the screen, so the page is cut where it
+    // starts and the keys are drawn over it.
     let title = l.pick(BROWSER);
-    keyboard_hits(&mut c, t, f, s, label, &mut out);
+    let keys_top = m.h as f32 - widgets::keyboard_height(t);
+    let page = fit(c, t, y.max(keys_top));
+    keyboard_hits(&mut page, t, f, s, label, &mut out);
     if let Some(rect) = field.clear {
         out.push(Hit { rect, action: Action::ClearSearch });
     }
-    Frame { header: false, caret: Some(field.caret), ..Frame::new(t, c, out, title, 0.0) }
+    Frame { header: false, caret: Some(field.caret), ..Frame::new(t, page, out, title, top) }
 }
 
 /// A length of bytes in the units the pages speak.
