@@ -949,48 +949,62 @@ pub fn fetch(cx: &Ctx) -> Frame {
     Frame { header: false, caret: Some(field.caret), ..Frame::new(t, c, out, title, 0.0) }
 }
 
-/// Serving the folder the file manager shows to another device, and the
-/// phone's own access point for one to join when there is no router.
+/// Serving the folder the file manager shows to another device on the same
+/// network: the folder served, the switch that starts it, and the address
+/// another device opens once it answers.
 pub fn serve(cx: &Ctx) -> Frame {
     let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
     let m = &t.m;
     let mut c = long_page(cx);
     let top = m.content_top;
     let mut out = Vec::new();
-    let mut y = top;
 
-    // The folder served, as the file manager shows it.
-    y = widgets::section_first(&mut c, t, f, y, l.pick(["传输", "傳輸", "Transfer"]));
-    let folder = s.files.path.clone();
-    y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["文件夹", "資料夾", "Folder"]), folder)]);
+    // The folder served, as the file manager shows it, and a way to change it.
+    let mut y = widgets::section_first(&mut c, t, f, top, l.pick(["传输", "傳輸", "Transfer"]));
+    let folder = &s.files.path;
+    let row = Row::new(l.pick(["文件夹", "資料夾", "Folder"]))
+        .icon(BLUE, Icon::Folder)
+        .subtitle(folder)
+        .trail(Trail::None);
+    let pick = widgets::list(&mut c, t, f, y, &[row]);
+    out.extend(hits(&pick.rows, &[Action::Open(Screen::Files)]));
+    y = pick.bottom;
 
-    // The server itself.
-    y = widgets::section(&mut c, t, f, y + m.card_gap, l.pick(["服务", "服務", "Server"]));
-    let (label, sub) = match &s.serving {
-        Serving::Idle => (l.pick(["启动服务", "啟動服務", "Start"]), String::new()),
-        Serving::Running { at, .. } => (l.pick(["停止服务", "停止服務", "Stop"]), at.clone()),
-        Serving::Failed(_) => (l.pick(["重试", "重試", "Try again"]), String::new()),
-    };
-    let mut row = Row::new(label);
-    if !sub.is_empty() {
-        row = row.subtitle(&sub);
+    // The server, as a switch: on serves the folder, off stops it.
+    let on = matches!(s.serving, Serving::Running { .. });
+    y = widgets::section(&mut c, t, f, y, l.pick(["服务", "服務", "Server"]));
+    let mut row = Row::new(l.pick(["启动服务", "啟動服務", "Serve"]))
+        .icon(if on { GREEN } else { SLATE }, Icon::Globe)
+        .trail(Trail::Switch(on));
+    if let Serving::Failed(why) = &s.serving {
+        row = row.subtitle(why);
     }
     let run = widgets::list(&mut c, t, f, y, &[row]);
     out.extend(hits(&run.rows, &[Action::ServeToggle]));
     y = run.bottom;
+
+    // Where another device reaches it, once it answers.
     match &s.serving {
-        Serving::Running { served, .. } => {
-            let n = served;
+        Serving::Running { at, served } => {
+            let n = *served;
             let said = tr!(l, "已应答 {n} 次请求", "已回應 {n} 次請求", "{n} requests answered");
-            y = widgets::footnote(&mut c, t, f, y, &said);
+            y = widgets::info_card(&mut c, t, f, y, &[
+                (l.pick(["地址", "位址", "Address"]), at.clone()),
+                (l.pick(["请求", "請求", "Requests"]), said.clone()),
+            ]);
         }
-        Serving::Failed(why) => {
-            y = widgets::info_card(&mut c, t, f, y + m.card_gap, &[(l.pick(["启动失败", "啟動失敗", "Couldn't start"]), why.clone())]);
+        Serving::Failed(_) => {}
+        Serving::Idle => {
+            let note = l.pick([
+                "启动后，同一局域网内的设备用显示的地址打开即可。",
+                "啟動後，同一區域網路內的裝置用顯示的位址開啟即可。",
+                "Once started, a device on the same network opens the address shown.",
+            ]);
+            y = widgets::footnote(&mut c, t, f, y, note);
         }
-        _ => {}
     }
 
-    // What a device that joins reaches.
+    // What the page tells before the server is started.
     let notes = [
         l.pick([
             "同一局域网内：手机和电脑连同一个路由器，用上面的地址打开。",
@@ -1002,12 +1016,17 @@ pub fn serve(cx: &Ctx) -> Frame {
             "服務只讀取和寫入所選資料夾，不會碰到別處。",
             "The server reads and writes only the folder chosen, and nothing else.",
         ]),
+        l.pick([
+            "网页里可以浏览、下载和上传文件。",
+            "網頁裡可以瀏覽、下載和上傳檔案。",
+            "The page lists the folder, takes files from it, and puts files into it.",
+        ]),
     ];
     y = widgets::notes(&mut c, t, f, y + m.card_gap, l.pick(NOTES), &notes);
     Frame::new(t, fit(c, t, y), out, l.pick(SERVE), top)
 }
 
-/// A length of bytes in the units the pages speak.
+/// A length of bytes in the units the pages speak./// A length of bytes in the units the pages speak.
 fn mb(bytes: u64) -> String {
     let mib = bytes as f64 / (1024.0 * 1024.0);
     if mib >= 1.0 {
