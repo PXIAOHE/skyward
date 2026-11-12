@@ -6095,11 +6095,6 @@ impl App {
                         vec![Effect::Point(None)]
                     }
                     _ => {
-                        let (ssid, password) = match &self.state.point {
-                            Point::Failed(_) => (String::new(), String::new()),
-                            _ => (String::new(), String::new()),
-                        };
-                        let _ = (ssid, password);
                         self.state.point = Point::Starting;
                         self.refresh();
                         vec![Effect::Point(Some((String::new(), String::new())))]

@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Where the phone's own AP configuration is kept between starts.
 const KEPT: &str = "/metadata/skyward/hotspot";
@@ -18,7 +18,6 @@ const DNSMASQ: &str = "/system/bin/dnsmasq";
 
 /// The address the phone takes on the hotspot, and the range it hands out.
 pub const ADDRESS: &str = "192.168.43.1";
-const NETMASK: &str = "255.255.255.0";
 const RANGE: (&str, &str) = ("192.168.43.50", "192.168.43.200");
 
 /// What a hotspot is called and how it is protected.
@@ -151,10 +150,6 @@ impl Hotspot {
         leases.lines().filter(|line| !line.trim().is_empty()).count() as u32
     }
 
-    pub fn stop(mut self) {
-        self.shut();
-    }
-
     fn shut(&mut self) {
         if let Some(mut d) = self.dnsmasq.take() {
             let _ = d.kill();
@@ -218,17 +213,4 @@ pub fn write(settings: &Settings) -> Result<()> {
         put?;
     }
     Ok(())
-}
-
-/// Whether the access point came up, waited for a moment.
-pub fn came_up(interface: &str) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
-        let state = std::fs::read_to_string(format!("/sys/class/net/{interface}/operstate")).unwrap_or_default();
-        if state.trim() == "up" {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(150));
-    }
-    false
 }

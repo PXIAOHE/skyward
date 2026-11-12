@@ -101,13 +101,10 @@ fn answer(mut stream: TcpStream, root: &Path) -> Result<()> {
         "GET" | "HEAD" => {
             if wanted.is_dir() {
                 let body = listing(root, &wanted);
-                let mut head = format!(
+                let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
-                if request.method == "HEAD" {
-                    head = head.replace(&format!("Content-Length: {}\r\n", body.len()), &format!("Content-Length: {}\r\n", body.len()));
-                }
                 stream.write_all(head.as_bytes())?;
                 if request.method == "GET" {
                     stream.write_all(body.as_bytes())?;
