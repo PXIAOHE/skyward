@@ -967,13 +967,13 @@ pub fn serve(cx: &Ctx) -> Frame {
     // The server itself.
     y = widgets::section(&mut c, t, f, y + m.card_gap, l.pick(["服务", "服務", "Server"]));
     let (label, sub) = match &s.serving {
-        Serving::Idle => (l.pick(["启动服务", "啟動服務", "Start"]), None),
-        Serving::Running { at, .. } => (l.pick(["停止服务", "停止服務", "Stop"]), Some(at.clone())),
-        Serving::Failed(_) => (l.pick(["重试", "重試", "Try again"]), None),
+        Serving::Idle => (l.pick(["启动服务", "啟動服務", "Start"]), String::new()),
+        Serving::Running { at, .. } => (l.pick(["停止服务", "停止服務", "Stop"]), at.clone()),
+        Serving::Failed(_) => (l.pick(["重试", "重試", "Try again"]), String::new()),
     };
     let mut row = Row::new(label);
-    if let Some(at) = sub {
-        row = row.subtitle(&at);
+    if !sub.is_empty() {
+        row = row.subtitle(&sub);
     }
     let run = widgets::list(&mut c, t, f, y, &[row]);
     out.extend(hits(&run.rows, &[Action::ServeToggle]));
@@ -993,18 +993,17 @@ pub fn serve(cx: &Ctx) -> Frame {
     // The phone's own access point.
     y = widgets::section(&mut c, t, f, y + m.card_gap, l.pick(["热点", "熱點", "Access point"]));
     let (point_label, point_sub) = match &s.point {
-        Point::Off => (l.pick(["开启热点", "開啟熱點", "Turn on"]), None),
-        Point::Starting => (l.pick(["正在开启…", "正在開啟…", "Starting…"]), None),
-        Point::Running { ssid, password, joined, .. } => {
+        Point::Off => (l.pick(["开启热点", "開啟熱點", "Turn on"]), String::new()),
+        Point::Starting => (l.pick(["正在开启…", "正在開啟…", "Starting…"]), String::new()),
+        Point::Running { ssid, password, .. } => {
             let sub = if password.is_empty() { ssid.clone() } else { format!("{ssid} / {password}") };
-            let _ = joined;
-            (l.pick(["关闭热点", "關閉熱點", "Turn off"]), Some(sub))
+            (l.pick(["关闭热点", "關閉熱點", "Turn off"]), sub)
         }
-        Point::Failed(_) => (l.pick(["重试", "重試", "Try again"]), None),
+        Point::Failed(_) => (l.pick(["重试", "重試", "Try again"]), String::new()),
     };
     let mut prow = Row::new(point_label);
-    if let Some(sub) = point_sub {
-        prow = prow.subtitle(&sub);
+    if !point_sub.is_empty() {
+        prow = prow.subtitle(&point_sub);
     }
     let auto = Row::new(l.pick(["启动时自动开启", "啟動時自動開啟", "On at start"])).trail(Trail::Switch(s.point_auto));
     let point = widgets::list(&mut c, t, f, y, &[prow, auto]);
