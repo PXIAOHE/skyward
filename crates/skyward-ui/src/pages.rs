@@ -1056,7 +1056,7 @@ pub fn browser(cx: &Ctx) -> Frame {
     // starts and the keys are drawn over it.
     let title = l.pick(BROWSER);
     let keys_top = m.h as f32 - widgets::keyboard_height(t);
-    let page = fit(c, t, y.max(keys_top));
+    let mut page = fit(c, t, y.max(keys_top));
     keyboard_hits(&mut page, t, f, s, label, &mut out);
     if let Some(rect) = field.clear {
         out.push(Hit { rect, action: Action::ClearSearch });
