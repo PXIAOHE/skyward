@@ -14,7 +14,11 @@ mod decrypt;
 #[cfg(target_os = "android")]
 mod fetch;
 #[cfg(target_os = "android")]
+mod fileserve;
+#[cfg(target_os = "android")]
 mod filework;
+#[cfg(target_os = "android")]
+mod hotspot;
 #[cfg(target_os = "android")]
 mod haptics;
 #[cfg(target_os = "android")]

@@ -1,6 +1,8 @@
 use crate::backup;
 use crate::decrypt::{self, Decryptor};
 use crate::fetch;
+use crate::fileserve;
+use crate::hotspot;
 use crate::filework;
 use crate::haptics::Haptics;
 use crate::relabel;
@@ -1180,6 +1182,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     Canvas::keep_ready(w, h, 3);
     let mut shown_clock = String::new();
     let mut shown_stage = skyward_ui::progress::stage();
+    // The interface the phone's own network is on, as the WLAN names it.
+    let wire = cfg.wlan.as_ref().map(|w| w.interface.clone()).unwrap_or_else(|| "wlan0".to_string());
+    // The server serving a folder, and the phone's own access point.
+    let mut server: Option<fileserve::Server> = None;
+    let mut point: Option<hotspot::Hotspot> = None;
+    // When the access point was last looked at, so that what joined it shows.
+    let mut point_checked = 0u64;
     // The file being fetched from an address typed on the download page.
     // The order the file manager was last put in, kept between starts.
     if let Some((key, desc, folders)) = sortmem::read() {
@@ -1757,6 +1766,22 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         wait(&fds, timeout)?;
         let now = monotonic_ms();
 
+        // What the server and the access point are doing.
+        if let Some(s) = &server {
+            app.serving_count(s.served());
+        }
+        if let Some(p) = &mut point {
+            if now.saturating_sub(point_checked) >= 1000 {
+                point_checked = now;
+                if !p.running() {
+                    let _ = skyward_sys::kmsg("the access point stopped");
+                    app.point_failed("the access point stopped".to_string());
+                    point = None;
+                } else {
+                    app.point_joined(p.joined());
+                }
+            }
+        }
         // The order the file manager was put in, written down once.
         if let Some((key, desc, folders)) = app.sort_to_save() {
             if let Err(e) = sortmem::write(key, desc, folders) {
@@ -1768,7 +1793,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // is open, and what is typed there fills its field.
         if app.screen() == skyward_ui::app::Screen::Fetch {
             if portal.is_none() && portal_retry_at.is_none_or(|at| now >= at) {
-                let wire = cfg.wlan.as_ref().map(|w| w.interface.clone()).unwrap_or_else(|| "wlan0".to_string());
                 if let Some(ip) = skyward_net::iface::address(&wire).ok().flatten() {
                     match crate::portal::Portal::start(&ip.to_string()) {
                         Ok(p) => {
@@ -2673,6 +2697,58 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         attempt_was_remembered = false;
                         let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential };
                         decryptor = Some(Decryptor::start(job)?);
+                    }
+                    Effect::Serve(root) => {
+                        server = None;
+                        match root {
+                            Some(root) => {
+                                let at = match &point {
+                                    Some(p) => format!("http://{}:{}/", p.address(), fileserve::PORT),
+                                    None => match skyward_net::iface::address(&wire).ok().flatten() {
+                                        Some(ip) => format!("http://{ip}:{}/", fileserve::PORT),
+                                        None => format!("http://<phone>:{}/", fileserve::PORT),
+                                    },
+                                };
+                                skyward_sys::kmsg(&format!("serving {root} at {at}"))?;
+                                server = Some(fileserve::Server::start(PathBuf::from(root))?);
+                                app.serving_at(at);
+                            }
+                            None => {
+                                skyward_sys::kmsg("the file server stopped")?;
+                            }
+                        }
+                    }
+                    Effect::Point(on) => {
+                        point = None;
+                        match on {
+                            Some(_) => {
+                                let settings = hotspot::read().unwrap_or_else(|| hotspot::Settings::named(1));
+                                let settings = if settings.password.is_empty() {
+                                    settings.with_password(&cfg.device.codename)
+                                } else {
+                                    settings
+                                };
+                                let _ = hotspot::write(&settings);
+                                let interface = wire.clone();
+                                let libraries = cfg.wlan.as_ref().map(|w| w.libraries.clone()).unwrap_or_default();
+                                skyward_sys::kmsg(&format!("bringing the access point up as {}", settings.ssid))?;
+                                match hotspot::Hotspot::start(&interface, "nl80211", &settings, &libraries) {
+                                    Ok(p) => {
+                                        let at = p.address().to_string();
+                                        let (ssid, password) = (settings.ssid.clone(), settings.password.clone());
+                                        app.point_up(ssid, password, at);
+                                        point = Some(p);
+                                    }
+                                    Err(e) => {
+                                        let _ = skyward_sys::kmsg(&format!("the access point did not come up: {e:#}"));
+                                        app.point_failed(format!("{e:#}"));
+                                    }
+                                }
+                            }
+                            None => {
+                                skyward_sys::kmsg("the access point was taken down")?;
+                            }
+                        }
                     }
                     Effect::Fetch(url) => {
                         ensure!(fetcher.is_none(), "a file is being fetched already");

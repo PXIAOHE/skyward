@@ -1,7 +1,7 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
     FileOp, FileTask, Fetch, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
-    SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
+    Point, Serving, SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
     BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
     USB_DRIVE_WANTED, WIPES, installs, starting,
 };
@@ -82,6 +82,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Advanced => advanced(cx),
         Screen::Files => files(cx),
         Screen::Fetch => fetch(cx),
+        Screen::Serve => serve(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
         Screen::Editor => editor(cx),
@@ -946,6 +947,101 @@ pub fn fetch(cx: &Ctx) -> Frame {
         out.push(Hit { rect, action: Action::ClearSearch });
     }
     Frame { header: false, caret: Some(field.caret), ..Frame::new(t, c, out, title, 0.0) }
+}
+
+/// Serving the folder the file manager shows to another device, and the
+/// phone's own access point for one to join when there is no router.
+pub fn serve(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let m = &t.m;
+    let mut c = long_page(cx);
+    let top = m.content_top;
+    let mut out = Vec::new();
+    let mut y = top;
+
+    // The folder served, as the file manager shows it.
+    y = widgets::section_first(&mut c, t, f, y, l.pick(["文件服务", "檔案服務", "Files"]));
+    let folder = s.files.path.clone();
+    y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["文件夹", "資料夾", "Folder"]), folder)]);
+
+    // The server itself.
+    y = widgets::section(&mut c, t, f, y + m.card_gap, l.pick(["服务", "服務", "Server"]));
+    let (label, sub) = match &s.serving {
+        Serving::Idle => (l.pick(["启动服务", "啟動服務", "Start"]), None),
+        Serving::Running { at, .. } => (l.pick(["停止服务", "停止服務", "Stop"]), Some(at.clone())),
+        Serving::Failed(_) => (l.pick(["重试", "重試", "Try again"]), None),
+    };
+    let mut row = Row::new(label);
+    if let Some(at) = sub {
+        row = row.subtitle(&at);
+    }
+    let run = widgets::list(&mut c, t, f, y, &[row]);
+    out.extend(hits(&run.rows, &[Action::ServeToggle]));
+    y = run.bottom;
+    match &s.serving {
+        Serving::Running { served, .. } => {
+            let said = tr!(l, "已应答 {n} 次请求", "已回應 {n} 次請求", "{n} requests answered");
+            let said = said.replace("{n}", &served.to_string());
+            y = widgets::footnote(&mut c, t, f, y, &said);
+        }
+        Serving::Failed(why) => {
+            y = widgets::info_card(&mut c, t, f, y + m.card_gap, &[(l.pick(["启动失败", "啟動失敗", "Couldn't start"]), why.clone())]);
+        }
+        _ => {}
+    }
+
+    // The phone's own access point.
+    y = widgets::section(&mut c, t, f, y + m.card_gap, l.pick(["热点", "熱點", "Access point"]));
+    let (point_label, point_sub) = match &s.point {
+        Point::Off => (l.pick(["开启热点", "開啟熱點", "Turn on"]), None),
+        Point::Starting => (l.pick(["正在开启…", "正在開啟…", "Starting…"]), None),
+        Point::Running { ssid, password, joined, .. } => {
+            let sub = if password.is_empty() { ssid.clone() } else { format!("{ssid} / {password}") };
+            let _ = joined;
+            (l.pick(["关闭热点", "關閉熱點", "Turn off"]), Some(sub))
+        }
+        Point::Failed(_) => (l.pick(["重试", "重試", "Try again"]), None),
+    };
+    let mut prow = Row::new(point_label);
+    if let Some(sub) = point_sub {
+        prow = prow.subtitle(&sub);
+    }
+    let auto = Row::new(l.pick(["启动时自动开启", "啟動時自動開啟", "On at start"])).trail(Trail::Switch(s.point_auto));
+    let point = widgets::list(&mut c, t, f, y, &[prow, auto]);
+    out.extend(hits(&point.rows, &[Action::PointToggle, Action::PointAuto]));
+    y = point.bottom;
+    match &s.point {
+        Point::Running { at, joined, .. } => {
+            let said = tr!(l, "手机地址 {at}，已连接 {n} 台设备", "手機位址 {at}，已連線 {n} 台裝置", "{at}, {n} devices joined");
+            let said = said.replace("{at}", at).replace("{n}", &joined.to_string());
+            y = widgets::footnote(&mut c, t, f, y, &said);
+        }
+        Point::Failed(why) => {
+            y = widgets::info_card(&mut c, t, f, y + m.card_gap, &[(l.pick(["开启失败", "開啟失敗", "Couldn't start"]), why.clone())]);
+        }
+        _ => {}
+    }
+
+    // What a device that joins reaches.
+    let notes = [
+        l.pick([
+            "同一局域网内：手机和电脑连同一个路由器，用上面的地址打开。",
+            "同一區域網路內：手機和電腦連同一個路由器，用上面的位址開啟。",
+            "On the same network: phone and computer on one router, open the address above.",
+        ]),
+        l.pick([
+            "没有路由器时：开启热点，让电脑连上这个热点，再打开手机地址。",
+            "沒有路由器時：開啟熱點，讓電腦連上這個熱點，再開啟手機位址。",
+            "With no router: turn the hotspot on, join it from the computer, then open the phone's address.",
+        ]),
+        l.pick([
+            "服务只读取和写入所选文件夹，不会碰到别处。",
+            "服務只讀取和寫入所選資料夾，不會碰到別處。",
+            "The server reads and writes only the folder chosen, and nothing else.",
+        ]),
+    ];
+    y = widgets::notes(&mut c, t, f, y + m.card_gap, l.pick(NOTES), &notes);
+    Frame::new(t, fit(c, t, y), out, l.pick(SERVE), top)
 }
 
 /// A length of bytes in the units the pages speak.
@@ -2361,6 +2457,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
         Row::new(l.pick(LOGS)).icon(ORANGE, Icon::Log),
         Row::new(l.pick(FETCH)).icon(BLUE, Icon::Layers),
+        Row::new(l.pick(SERVE)).icon(GREEN, Icon::Globe),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
     ]);
     let out = hits(&tools.rows, &[
@@ -2370,6 +2467,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Fetch),
+        Action::Open(Screen::Serve),
         Action::Open(Screen::Update),
     ]);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
@@ -2762,6 +2860,8 @@ const WLAN_FIRST: Text = ["需先连接 WLAN", "需先連接 Wi-Fi", "Connect to
 const CHECKING: Text = ["正在检查更新", "正在檢查更新", "Checking for updates"];
 const CHECK_FOR_UPDATES: Text = ["检查更新", "檢查更新", "Check for updates"];
 const FETCH: Text = ["网络下载", "網路下載", "Download from a link"];
+
+const SERVE: Text = ["文件服务", "檔案服務", "File server"];
 
 const DOWNLOADING: Text = ["正在下载", "正在下載", "Downloading"];
 const CHECKING_PART: Text = ["正在校验已下载的部分", "正在驗證已下載的部分", "Verifying what was downloaded"];
