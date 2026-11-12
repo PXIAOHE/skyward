@@ -1,7 +1,7 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
     FileOp, FileTask, Fetch, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
-    Browse, Piece, SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
+    SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
     BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
     USB_DRIVE_WANTED, WIPES, installs, starting,
 };
@@ -82,7 +82,6 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Advanced => advanced(cx),
         Screen::Files => files(cx),
         Screen::Fetch => fetch(cx),
-        Screen::Browser => browser(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
         Screen::Editor => editor(cx),
@@ -947,135 +946,6 @@ pub fn fetch(cx: &Ctx) -> Frame {
         out.push(Hit { rect, action: Action::ClearSearch });
     }
     Frame { header: false, caret: Some(field.caret), ..Frame::new(t, c, out, title, 0.0) }
-}
-
-/// A page read from an address typed here: the field, the button under it, and
-/// the page itself, its text broken into pieces with its links to be tapped.
-pub fn browser(cx: &Ctx) -> Frame {
-    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
-    let m = &t.m;
-    let mut c = long_page(cx);
-    let mut out = Vec::new();
-    let wide = m.w as f32 - m.margin * 2.0;
-    let top = m.content_top;
-    let hint = l.pick(["输入网址，如 example.com", "輸入網址，如 example.com", "Type an address, such as example.com"]);
-    let field = widgets::search_field(&mut c, t, f, m.margin, wide, top + m.dp(24.0), &s.browse_url, hint);
-    let loading = matches!(s.browse, Browse::Loading);
-    let label = if loading { l.pick(["停止", "停止", "Stop"]) } else { l.pick(["打开", "開啟", "Open"]) };
-    // A button of its own size, in the middle.
-    let (bh, bw) = (m.dp(44.0), m.dp(160.0).min(wide));
-    let mut y = field.field.y + field.field.h + m.dp(16.0);
-    let (bx, by) = ((m.w as f32 - bw) / 2.0, y);
-    c.fill_round_rect(bx, by, bw, bh, bh / 2.0, t.pal.accent);
-    c.text_center(&f.heading, label, bx + bw / 2.0, by + bh / 2.0, m.row_title_px, Rgba::rgb(255, 255, 255));
-    out.push(Hit {
-        rect: Rect::new(bx, by, bw, bh),
-        action: if loading { Action::BrowseReload } else { Action::BrowseGo },
-    });
-    y = by + bh + m.dp(10.0);
-
-    // The row of what can be done with the page read.
-    let back = l.pick(["后退", "上一頁", "Back"]);
-    let reload = l.pick(["刷新", "重新載入", "Reload"]);
-    let (rh, gap) = (m.dp(34.0), m.dp(8.0));
-    let mut x = m.margin;
-    for (text, action, live) in [
-        (back, Action::BrowseBack, !s.browse_back.is_empty()),
-        (reload, Action::BrowseReload, matches!(s.browse, Browse::Read { .. } | Browse::Failed(_))),
-    ] {
-        let w = c.text_width(&f.value, text, m.sub_px) + m.dp(22.0);
-        let ink = if live { t.pal.text } else { t.pal.subtitle };
-        c.fill_round_rect(x, y, w, rh, rh / 2.0, t.pal.card);
-        c.text_center(&f.value, text, x + w / 2.0, y + rh / 2.0, m.sub_px, ink);
-        if live {
-            out.push(Hit { rect: Rect::new(x, y, w, rh), action });
-        }
-        x += w + gap;
-    }
-    y += rh + m.dp(14.0);
-
-    match &s.browse {
-        Browse::Idle => {
-            let how = l.pick([
-                "只能显示文字和链接；图片、视频和需要脚本的页面看不到。",
-                "只能顯示文字和連結；圖片、影片和需要腳本的頁面看不到。",
-                "Text and links only: pictures, video and pages that need scripts do not show.",
-            ]);
-            y = widgets::footnote(&mut c, t, f, y, how);
-        }
-        Browse::Loading => {
-            let detail = l.pick(["正在读取页面…", "正在讀取頁面…", "Reading the page…"]);
-            y = widgets::progress_card(&mut c, t, f, y, l.pick(["读取中", "讀取中", "Loading"]), detail, None);
-        }
-        Browse::Failed(why) => {
-            y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["打不开", "打不開", "Couldn't open"]), why.clone())]);
-        }
-        Browse::Read { title, pieces } => {
-            let big = m.dp(22.0);
-            for line in widgets::wrap(&c, &f.heading, title, big, wide) {
-                c.text_top(&f.heading, &line, m.margin, y, big, t.pal.text, None);
-                y += big * 1.35;
-            }
-            y += m.dp(10.0);
-            if pieces.is_empty() {
-                let none = l.pick([
-                    "这一页没有可显示的文字，可能是图片、脚本或需要登录。",
-                    "這一頁沒有可顯示的文字，可能是圖片、腳本或需要登入。",
-                    "This page holds no text to show: it may be pictures, scripts, or need a sign-in.",
-                ]);
-                y = widgets::footnote(&mut c, t, f, y, none);
-            }
-            for (i, piece) in pieces.iter().enumerate() {
-                match piece {
-                    Piece::Heading(text) => {
-                        y += m.dp(12.0);
-                        let px = m.dp(18.0);
-                        for line in widgets::wrap(&c, &f.heading, text, px, wide) {
-                            c.text_top(&f.heading, &line, m.margin, y, px, t.pal.text, None);
-                            y += px * 1.35;
-                        }
-                        y += m.dp(6.0);
-                    }
-                    Piece::Text(text) => {
-                        for line in widgets::wrap(&c, &f.body, text, m.sub_px, wide) {
-                            c.text_top(&f.body, &line, m.margin, y, m.sub_px, t.pal.value, None);
-                            y += m.sub_pitch;
-                        }
-                        y += m.dp(8.0);
-                    }
-                    Piece::Link { text, .. } => {
-                        // A link is drawn in the accent colour, and the whole
-                        // of its text is the tap.
-                        let start = y;
-                        let lines = widgets::wrap(&c, &f.body, text, m.sub_px, wide);
-                        for line in &lines {
-                            c.text_top(&f.body, line, m.margin, y, m.sub_px, t.pal.accent, None);
-                            y += m.sub_pitch;
-                        }
-                        out.push(Hit {
-                            rect: Rect::new(m.margin, start, wide, (y - start).max(m.sub_px)),
-                            action: Action::BrowseLink(i),
-                        });
-                        y += m.dp(8.0);
-                    }
-                    Piece::Rule => {
-                        c.fill_rect(m.margin, y, wide, 1.0, t.pal.card);
-                        y += m.dp(14.0);
-                    }
-                }
-            }
-        }
-    }
-    // The keyboard covers the foot of the screen, so the page is cut where it
-    // starts and the keys are drawn over it.
-    let title = l.pick(BROWSER);
-    let keys_top = m.h as f32 - widgets::keyboard_height(t);
-    let mut page = fit(c, t, y.max(keys_top));
-    keyboard_hits(&mut page, t, f, s, label, &mut out);
-    if let Some(rect) = field.clear {
-        out.push(Hit { rect, action: Action::ClearSearch });
-    }
-    Frame { header: false, caret: Some(field.caret), ..Frame::new(t, page, out, title, top) }
 }
 
 /// A length of bytes in the units the pages speak.
@@ -2491,7 +2361,6 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
         Row::new(l.pick(LOGS)).icon(ORANGE, Icon::Log),
         Row::new(l.pick(FETCH)).icon(BLUE, Icon::Layers),
-        Row::new(l.pick(BROWSER)).icon(GREEN, Icon::Globe),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
     ]);
     let out = hits(&tools.rows, &[
@@ -2501,7 +2370,6 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Fetch),
-        Action::Open(Screen::Browser),
         Action::Open(Screen::Update),
     ]);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
@@ -2894,8 +2762,6 @@ const WLAN_FIRST: Text = ["需先连接 WLAN", "需先連接 Wi-Fi", "Connect to
 const CHECKING: Text = ["正在检查更新", "正在檢查更新", "Checking for updates"];
 const CHECK_FOR_UPDATES: Text = ["检查更新", "檢查更新", "Check for updates"];
 const FETCH: Text = ["网络下载", "網路下載", "Download from a link"];
-
-const BROWSER: Text = ["浏览器", "瀏覽器", "Browser"];
 
 const DOWNLOADING: Text = ["正在下载", "正在下載", "Downloading"];
 const CHECKING_PART: Text = ["正在校验已下载的部分", "正在驗證已下載的部分", "Verifying what was downloaded"];
