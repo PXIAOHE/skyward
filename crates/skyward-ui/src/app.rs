@@ -65,6 +65,8 @@ pub enum Screen {
     Advanced,
     /// Downloading a file from an address typed on the screen's keyboard.
     Fetch,
+    /// Reading a page from an address typed on the screen's keyboard.
+    Browser,
     Files,
     /// One file, and what can be done with it.
     FileInfo,
@@ -1252,6 +1254,14 @@ pub enum Action {
     FetchStop,
     /// Take the address from `/sdcard/Download/link.txt`.
     FetchFromFile,
+    /// Read the page the address typed on the page names.
+    BrowseGo,
+    /// Go back to the page before this one.
+    BrowseBack,
+    /// Read the page again.
+    BrowseReload,
+    /// Read the link at `index` of the page's pieces.
+    BrowseLink(usize),
     /// The next way of sorting the file manager's entries, and the next side.
     CycleSort,
     /// Whether the folders come first.
@@ -1773,6 +1783,11 @@ pub struct State {
     /// The address typed on the download page, and where its fetch stands.
     pub fetch_url: String,
     pub fetch: Fetch,
+    /// The address typed on the reading page, where the reading stands, and
+    /// the addresses gone back from.
+    pub browse_url: String,
+    pub browse: Browse,
+    pub browse_back: Vec<String>,
     /// Where another device reaches the page that hands a link over, once the
     /// download page is served.
     pub fetch_portal: Option<String>,
@@ -1922,6 +1937,9 @@ impl Default for State {
             sort_folders_first: true,
             fetch_url: String::new(),
             fetch: Fetch::Idle,
+            browse_url: String::new(),
+            browse: Browse::Idle,
+            browse_back: Vec::new(),
             fetch_portal: None,
             fetch_ended_at: None,
             data_progress: 0.0,
@@ -2051,6 +2069,26 @@ impl State {
     }
 }
 
+/// A page of a book, as the reader shows it: its text broken into pieces, and
+/// the links the text points at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    Text(String),
+    Heading(String),
+    Link { text: String, url: String },
+    Rule,
+}
+
+/// Where reading a page from an address stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Browse {
+    #[default]
+    Idle,
+    Loading,
+    Read { title: String, pieces: Vec<Piece> },
+    Failed(String),
+}
+
 /// Where a file being fetched from an address stands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Fetch {
@@ -2166,6 +2204,8 @@ pub enum Effect {
     Remember(bool),
     /// Fetch the file at `url`, saving it under its own name.
     Fetch(String),
+    /// Read the page at `url`.
+    Browse(String),
     /// Stop the fetch under way.
     StopFetch,
     /// Open the own files of `user` with what they entered at their screen
@@ -4804,6 +4844,60 @@ impl App {
         self.display_on
     }
 
+    /// Begin reading what the address typed on the page names.
+    fn browse_go(&mut self, now: u64, again: bool) -> Vec<Effect> {
+        let l = self.state.lang;
+        if matches!(self.state.browse, Browse::Loading) {
+            return Vec::new();
+        }
+        let url = self.state.browse_url.trim().to_string();
+        if url.is_empty() {
+            self.say(l.pick(["请输入网址", "請輸入網址", "Type an address"]), now);
+            return Vec::new();
+        }
+        let whole = if url.starts_with("http://") || url.starts_with("https://") {
+            url
+        } else if url.contains('.') && !url.contains(' ') {
+            format!("https://{url}")
+        } else {
+            self.say(l.pick(["网址要以 http:// 或 https:// 开头", "網址要以 http:// 或 https:// 開頭", "The address must start with http:// or https://"]), now);
+            return Vec::new();
+        };
+        self.state.browse_url = whole.clone();
+        if !again {
+            let now_url = self.state.browse_url.clone();
+            if !now_url.is_empty() && now_url != whole {
+                self.state.browse_back.push(now_url);
+            }
+        }
+        self.state.browse = Browse::Loading;
+        self.refresh();
+        vec![Effect::Browse(whole)]
+    }
+
+    /// A page read, as the reading thread reports it.
+    pub fn browse_read(&mut self, title: String, pieces: Vec<Piece>) {
+        self.state.browse = Browse::Read { title, pieces };
+        self.refresh();
+    }
+
+    /// A page that could not be read.
+    pub fn browse_failed(&mut self, why: String) {
+        self.state.browse = Browse::Failed(why);
+        self.refresh();
+    }
+
+    /// Reading the page was stopped.
+    pub fn browse_stopped(&mut self) {
+        self.state.browse = Browse::Idle;
+        self.refresh();
+    }
+
+    /// Whether a page is being read.
+    pub fn browsing(&self) -> bool {
+        matches!(self.state.browse, Browse::Loading)
+    }
+
     /// The page another device reaches to hand a link over, once it serves.
     pub fn set_portal(&mut self, at: Option<String>) {
         if self.state.fetch_portal != at {
@@ -5966,6 +6060,32 @@ impl App {
                 return self.arrive_at(s);
             }
             Action::OpenData => return self.open_data(),
+            Action::BrowseGo => return self.browse_go(now, false),
+            Action::BrowseBack => {
+                if let Some(url) = self.state.browse_back.pop() {
+                    self.state.browse_url = url.clone();
+                    self.state.browse = Browse::Loading;
+                    self.refresh();
+                    return vec![Effect::Browse(url)];
+                }
+            }
+            Action::BrowseReload => return self.browse_go(now, true),
+            Action::BrowseLink(index) => {
+                let url = match &self.state.browse {
+                    Browse::Read { pieces, .. } => match pieces.get(index) {
+                        Some(Piece::Link { url, .. }) => Some(url.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(url) = url {
+                    self.state.browse_back.push(self.state.browse_url.clone());
+                    self.state.browse_url = url.clone();
+                    self.state.browse = Browse::Loading;
+                    self.refresh();
+                    return vec![Effect::Browse(url)];
+                }
+            }
             Action::CycleSort => {
                 self.state.sort_key = self.state.sort_key.next();
                 self.resort_files();
@@ -6305,6 +6425,9 @@ impl App {
                 if self.screen() == Screen::Fetch {
                     self.state.fetch_url.clear();
                 }
+                if self.screen() == Screen::Browser {
+                    self.state.browse_url.clear();
+                }
                 self.state.search.clear();
                 self.edits += 1;
                 self.refresh();
@@ -6551,6 +6674,7 @@ impl App {
         match self.screen() {
             Screen::Search => &mut self.state.search,
             Screen::Fetch => &mut self.state.fetch_url,
+            Screen::Browser => &mut self.state.browse_url,
             Screen::Decrypt => &mut self.state.code,
             Screen::Rename => &mut self.state.new_name,
             Screen::WlanPassword => &mut self.state.password,
@@ -6738,6 +6862,7 @@ impl App {
             Cap::Show(layer) => self.state.layer = layer,
             Cap::Enter => match self.screen() {
                 Screen::Fetch => return self.fetch_start(now),
+                Screen::Browser => return self.browse_go(now, false),
                 Screen::Search => {
                     if let Some(first) = search::find_on(&self.state.search, l, |screen| self.state.offers(screen)).first() {
                         return self.act(Action::Open(first.screen), now);

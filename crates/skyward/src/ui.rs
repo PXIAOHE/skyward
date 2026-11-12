@@ -1,4 +1,5 @@
 use crate::backup;
+use crate::browse;
 use crate::decrypt::{self, Decryptor};
 use crate::fetch;
 use crate::filework;
@@ -1186,6 +1187,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         app.take_sort(key, desc, folders);
     }
     let mut fetcher: Option<fetch::Worker> = None;
+    // The page being read from an address typed on the reading page.
+    let mut reader: Option<browse::Worker> = None;
     // The page another device reaches to hand a link over, while the download
     // page is open, and when to try serving it again after a failure.
     let mut portal: Option<crate::portal::Portal> = None;
@@ -2270,6 +2273,32 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if updated {
             skyward_updater = None;
         }
+        if let Some(r) = &reader {
+            if let Some(ended) = r.ended() {
+                match ended {
+                    browse::Ended::Read(page) => {
+                        let pieces = page
+                            .blocks
+                            .into_iter()
+                            .map(|b| match b {
+                                browse::Block::Text(t) => skyward_ui::app::Piece::Text(t),
+                                browse::Block::Heading(t) => skyward_ui::app::Piece::Heading(t),
+                                browse::Block::Link { text, url } => skyward_ui::app::Piece::Link { text, url },
+                                browse::Block::Rule => skyward_ui::app::Piece::Rule,
+                            })
+                            .collect();
+                        let _ = skyward_sys::kmsg(&format!("the page was read: {}", page.title));
+                        app.browse_read(page.title, pieces);
+                    }
+                    browse::Ended::Failed(why) => {
+                        let _ = skyward_sys::kmsg(&format!("the page could not be read: {why}"));
+                        app.browse_failed(why);
+                    }
+                    browse::Ended::Stopped => app.browse_stopped(),
+                }
+                reader = None;
+            }
+        }
         if let Some(f) = &fetcher {
             let (done, total) = f.progress();
             app.fetch_progress(done, total);
@@ -2673,6 +2702,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         attempt_was_remembered = false;
                         let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential };
                         decryptor = Some(Decryptor::start(job)?);
+                    }
+                    Effect::Browse(url) => {
+                        ensure!(reader.is_none(), "a page is being read already");
+                        skyward_sys::kmsg(&format!("reading {url}"))?;
+                        reader = Some(browse::Worker::start(url, servers.clone())?);
                     }
                     Effect::Fetch(url) => {
                         ensure!(fetcher.is_none(), "a file is being fetched already");
