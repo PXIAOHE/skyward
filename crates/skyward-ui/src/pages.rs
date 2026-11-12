@@ -1042,9 +1042,10 @@ pub fn browser(cx: &Ctx) -> Frame {
                     }
                 }
             }
-            y += m.dp(20.0);
         }
     }
+    // The page is as tall as what was drawn; nothing follows it.
+    let _ = y;
 
     let title = l.pick(BROWSER);
     keyboard_hits(&mut c, t, f, s, label, &mut out);
