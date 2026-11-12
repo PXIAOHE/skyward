@@ -192,7 +192,7 @@ fn parse(html: &str, base: &str) -> Page {
         let end = rest.find('<').unwrap_or(rest.len());
         let piece = &rest[..end];
         let decoded = unescape(piece);
-        if let Some(_) = in_link {
+        if in_link.is_some() {
             link_text.push_str(&decoded);
         } else {
             text.push_str(&decoded);

@@ -3434,14 +3434,14 @@ fn listing(
         }
         (None, Ok(entries)) => Some(files::rows(t, f, entries, action)),
     };
-    let pinned = files::strip(t, f, top, &folder.path);
-    // The order the entries are in, as taps under the path, on the pages that
-    // list a folder to work in rather than one to pick a file from.
-    let mut hits = Vec::new();
+    // The order the entries are in, as taps under the path, drawn into the
+    // strip itself so that they scroll and answer where the path does, and
+    // never in place of a row of the list.
+    let mut pinned = files::strip(t, f, top, &folder.path);
     if sortable {
-        sort_bar(&mut c, cx, t.m.dp(files::SORT_BAR_TOP_DP), &mut hits);
+        sort_bar(&mut pinned.canvas, cx, t.m.dp(files::SORT_IN_STRIP_DP), &mut pinned.hits);
     }
-    Frame { bg, rows, pinned: Some(pinned), hits, ..Frame::new(t, c, Vec::new(), title, t.m.dp(files::STRIP_TOP_DP)) }
+    Frame { bg, rows, pinned: Some(pinned), ..Frame::new(t, c, Vec::new(), title, t.m.dp(files::STRIP_TOP_DP)) }
 }
 
 /// The order the file manager shows its entries in, as a row of three taps

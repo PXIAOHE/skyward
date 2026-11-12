@@ -17,7 +17,12 @@ use std::path::{Component, Path};
 /// Where the path strip starts on an unscrolled page; scrolled up to the
 /// bar, it stays right under it.
 pub const STRIP_TOP_DP: f32 = 164.0;
-const STRIP_DP: f32 = 51.0;
+
+/// How much a strip that carries the sort taps under its path grows.
+pub const SORT_ROOM_DP: f32 = 48.0;
+/// Where the sort taps sit inside the strip, below its path.
+pub const SORT_IN_STRIP_DP: f32 = 52.0;
+const STRIP_DP: f32 = 51.0 + SORT_ROOM_DP;
 const PILL_TOP_DP: f32 = 13.0;
 const PILL_DP: f32 = 33.0;
 const PILL_PAD_DP: f32 = 14.0;
@@ -26,7 +31,7 @@ const PILL_TEXT_DP: f32 = 10.9;
 const ARROW_GAP_DP: f32 = 6.0;
 const ARROW_DP: f32 = 14.0;
 /// Where the first row starts on an unscrolled page.
-pub const ROWS_TOP_DP: f32 = 262.0;
+pub const ROWS_TOP_DP: f32 = 223.7 + SORT_ROOM_DP;
 
 /// Where the row of sort taps sits, under the path.
 pub const SORT_BAR_TOP_DP: f32 = 214.0;
