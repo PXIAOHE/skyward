@@ -93,7 +93,7 @@ jobs:
         run: |
           # Only the phone being worked on, unless another is named: a push no
           # longer builds all twenty-odd devices.
-          if [ -z "$DEVICE" ]; then DEVICE=manet; fi
+          if [ -z "$DEVICE" ]; then DEVICE=pandora; fi
           if [ "$DEVICE" = all ]; then
             echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
           else
