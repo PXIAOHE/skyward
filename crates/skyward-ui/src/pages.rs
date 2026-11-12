@@ -988,7 +988,7 @@ pub fn serve(cx: &Ctx) -> Frame {
         Serving::Running { at, served } => {
             let n = *served;
             let said = tr!(l, "已应答 {n} 次请求", "已回應 {n} 次請求", "{n} requests answered");
-            y = widgets::info_card(&mut c, t, f, y, &[
+            y = widgets::info_card(&mut c, t, f, y + m.card_gap, &[
                 (l.pick(["地址", "位址", "Address"]), at.clone()),
                 (l.pick(["请求", "請求", "Requests"]), said.clone()),
             ]);

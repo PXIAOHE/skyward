@@ -97,9 +97,15 @@ fn answer(mut stream: TcpStream, root: &Path) -> Result<()> {
         None => return reply(&mut stream, 403, "text/plain; charset=utf-8", b"forbidden"),
     };
 
+    let _ = skyward_sys::kmsg(&format!("files: {} {}", request.method, request.path));
     match request.method.as_str() {
         "GET" | "HEAD" => {
-            if wanted.is_dir() {
+            // A link is followed to what it points at: /sdcard is one, and a
+            // link's own metadata says neither folder nor file.
+            let meta = fs::metadata(&wanted);
+            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            let is_file = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
+            if is_dir {
                 let body = listing(root, &wanted);
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -109,12 +115,19 @@ fn answer(mut stream: TcpStream, root: &Path) -> Result<()> {
                 if request.method == "GET" {
                     stream.write_all(body.as_bytes())?;
                 }
-            } else if wanted.is_file() {
+            } else if is_file {
                 let mut file = fs::File::open(&wanted).with_context(|| format!("open {}", wanted.display()))?;
                 let len = file.metadata()?.len();
                 let name = wanted.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                // A name with anything but plain ASCII is put in the header's
+                // extended form, so that a browser takes the file rather than
+                // turning it away.
+                let plain: String = name.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').collect();
+                let ascii = if plain == name && !plain.is_empty() { plain } else { "download".to_string() };
+                let encoded: String = name.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
                 let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"{name}\"\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Disposition: attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}\r\nContent-Length: {len}\r\nAccept-Ranges: none\r\nConnection: close\r\n\r\n",
+                    kind = kind_of(&name),
                 );
                 stream.write_all(head.as_bytes())?;
                 if request.method == "GET" {
@@ -393,6 +406,30 @@ async function up(files){{
         count = count,
         prefix = prefix,
     )
+}
+
+/// What a browser is told a file is, by what its name ends with.
+fn kind_of(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().filter(|e| *e != name).unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "txt" | "log" | "md" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "apk" => "application/vnd.android.package-archive",
+        _ => "application/octet-stream",
+    }
 }
 
 /// A picture for a name, by what it ends with.
