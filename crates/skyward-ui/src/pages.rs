@@ -1011,8 +1011,12 @@ pub fn browser(cx: &Ctx) -> Frame {
             y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["打不开", "打不開", "Couldn't open"]), why.clone())]);
         }
         Browse::Read { title, pieces } => {
-            c.text_top(&f.heading, title, m.margin, y, m.dp(22.0), t.pal.text, Some(wide));
-            y += m.dp(22.0) * 1.4 + m.dp(12.0);
+            let big = m.dp(22.0);
+            for line in widgets::wrap(&c, &f.heading, title, big, wide) {
+                c.text_top(&f.heading, &line, m.margin, y, big, t.pal.text, None);
+                y += big * 1.35;
+            }
+            y += m.dp(10.0);
             if pieces.is_empty() {
                 let none = l.pick([
                     "这一页没有可显示的文字，可能是图片、脚本或需要登录。",
@@ -1024,11 +1028,20 @@ pub fn browser(cx: &Ctx) -> Frame {
             for (i, piece) in pieces.iter().enumerate() {
                 match piece {
                     Piece::Heading(text) => {
-                        y += m.dp(10.0);
-                        y = c.text_top(&f.heading, text, m.margin, y, m.dp(18.0), t.pal.text, Some(wide)) + m.dp(8.0);
+                        y += m.dp(12.0);
+                        let px = m.dp(18.0);
+                        for line in widgets::wrap(&c, &f.heading, text, px, wide) {
+                            c.text_top(&f.heading, &line, m.margin, y, px, t.pal.text, None);
+                            y += px * 1.35;
+                        }
+                        y += m.dp(6.0);
                     }
                     Piece::Text(text) => {
-                        y = c.text_top(&f.body, text, m.margin, y, m.sub_px, t.pal.value, Some(wide)) + m.dp(10.0);
+                        for line in widgets::wrap(&c, &f.body, text, m.sub_px, wide) {
+                            c.text_top(&f.body, &line, m.margin, y, m.sub_px, t.pal.value, None);
+                            y += m.sub_pitch;
+                        }
+                        y += m.dp(8.0);
                     }
                     Piece::Link { text, .. } => {
                         // A link is drawn in the accent colour, and the whole
@@ -1036,13 +1049,14 @@ pub fn browser(cx: &Ctx) -> Frame {
                         let start = y;
                         let lines = widgets::wrap(&c, &f.body, text, m.sub_px, wide);
                         for line in &lines {
-                            y = c.text_top(&f.body, line, m.margin, y, m.sub_px, t.pal.accent, None);
+                            c.text_top(&f.body, line, m.margin, y, m.sub_px, t.pal.accent, None);
+                            y += m.sub_pitch;
                         }
                         out.push(Hit {
                             rect: Rect::new(m.margin, start, wide, (y - start).max(m.sub_px)),
                             action: Action::BrowseLink(i),
                         });
-                        y += m.dp(10.0);
+                        y += m.dp(8.0);
                     }
                     Piece::Rule => {
                         c.fill_rect(m.margin, y, wide, 1.0, t.pal.card);
