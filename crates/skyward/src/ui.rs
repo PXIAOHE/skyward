@@ -4,6 +4,7 @@ use crate::fetch;
 use crate::filework;
 use crate::haptics::Haptics;
 use crate::relabel;
+use crate::sortmem;
 use crate::remember;
 use crate::input::{monotonic_ms, Event, Inputs};
 use crate::merge;
@@ -1180,6 +1181,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut shown_clock = String::new();
     let mut shown_stage = skyward_ui::progress::stage();
     // The file being fetched from an address typed on the download page.
+    // The order the file manager was last put in, kept between starts.
+    if let Some((key, desc, folders)) = sortmem::read() {
+        app.take_sort(key, desc, folders);
+    }
     let mut fetcher: Option<fetch::Worker> = None;
     // The page another device reaches to hand a link over, while the download
     // page is open, and when to try serving it again after a failure.
@@ -1752,6 +1757,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         wait(&fds, timeout)?;
         let now = monotonic_ms();
 
+        // The order the file manager was put in, written down once.
+        if let Some((key, desc, folders)) = app.sort_to_save() {
+            if let Err(e) = sortmem::write(key, desc, folders) {
+                let _ = skyward_sys::kmsg(&format!("the file manager's order was not kept: {e:#}"));
+            }
+        }
         // The download page offers a page another device can reach, where a
         // long address is typed and handed over: it is served while that page
         // is open, and what is typed there fills its field.

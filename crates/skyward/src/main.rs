@@ -26,6 +26,8 @@ mod partwork;
 #[cfg(target_os = "android")]
 mod portal;
 #[cfg(target_os = "android")]
+mod sortmem;
+#[cfg(target_os = "android")]
 mod pty;
 #[cfg(target_os = "android")]
 mod readings;
