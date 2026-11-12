@@ -685,6 +685,72 @@ pub struct FileRow {
     pub gid: u32,
 }
 
+/// What the file manager puts one entry before another by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortKey {
+    #[default]
+    Name,
+    Size,
+    Modified,
+    Type,
+}
+
+impl SortKey {
+    /// The key the sort button goes to next.
+    pub fn next(self) -> SortKey {
+        match self {
+            SortKey::Name => SortKey::Size,
+            SortKey::Size => SortKey::Modified,
+            SortKey::Modified => SortKey::Type,
+            SortKey::Type => SortKey::Name,
+        }
+    }
+
+    /// What the page calls it.
+    pub fn name(self, l: crate::lang::Lang) -> &'static str {
+        match self {
+            SortKey::Name => l.pick(["名称", "名稱", "Name"]),
+            SortKey::Size => l.pick(["大小", "大小", "Size"]),
+            SortKey::Modified => l.pick(["修改时间", "修改時間", "Modified"]),
+            SortKey::Type => l.pick(["类型", "類型", "Type"]),
+        }
+    }
+}
+
+/// Which kind of file a name is, for sorting by type: the extension's group.
+fn type_group(name: &str) -> u8 {
+    let ext = name.rsplit('.').next().filter(|e| *e != name).unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic" | "svg" => 1,
+        "mp4" | "mkv" | "mov" | "avi" | "webm" | "3gp" => 2,
+        "mp3" | "flac" | "wav" | "m4a" | "ogg" | "aac" => 3,
+        "zip" | "7z" | "tar" | "gz" | "xz" | "zst" | "rar" | "bz2" => 4,
+        "apk" | "apks" | "img" | "bin" | "lz4" => 5,
+        "txt" | "md" | "json" | "xml" | "log" | "csv" => 6,
+        _ => 7,
+    }
+}
+
+/// Put the entries in the order the file manager shows them: the folders
+/// first when asked, then by the key and the side chosen.
+pub fn sort_entries(rows: &mut [FileRow], key: SortKey, desc: bool, folders_first: bool) {
+    use std::cmp::Ordering;
+    let folder = |r: &FileRow| matches!(r.kind, FileKind::Folder { .. } | FileKind::Link { folder: true, .. });
+    rows.sort_by(|a, b| {
+        if folders_first && folder(a) != folder(b) {
+            return if folder(a) { Ordering::Less } else { Ordering::Greater };
+        }
+        let name = || a.name.to_lowercase().cmp(&b.name.to_lowercase());
+        let by = match key {
+            SortKey::Name => name(),
+            SortKey::Size => a.size.cmp(&b.size).then_with(name),
+            SortKey::Modified => a.modified.cmp(&b.modified).then_with(name),
+            SortKey::Type => type_group(&a.name).cmp(&type_group(&b.name)).then_with(name),
+        };
+        if desc { by.reverse() } else { by }
+    });
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileKind {
     /// A folder, and how many entries it holds when it can be read.
@@ -1186,6 +1252,12 @@ pub enum Action {
     FetchStop,
     /// Take the address from `/sdcard/Download/link.txt`.
     FetchFromFile,
+    /// The next way of sorting the file manager's entries, and the next side.
+    CycleSort,
+    /// Whether the folders come first.
+    ToggleFoldersFirst,
+    /// Which side the entries are put in.
+    ToggleSortOrder,
     Back,
     Theme { dark: bool },
     Toggle(Switch),
@@ -1694,6 +1766,10 @@ pub struct State {
     pub code: String,
     /// How far along the bar under the sign is, and where the ring's turn is,
     /// while the data partition is being opened.
+    /// How the file manager orders its entries, and which side.
+    pub sort_key: SortKey,
+    pub sort_desc: bool,
+    pub sort_folders_first: bool,
     /// The address typed on the download page, and where its fetch stands.
     pub fetch_url: String,
     pub fetch: Fetch,
@@ -1841,6 +1917,9 @@ impl Default for State {
             system_notice: None,
             data: Data::Closed,
             code: String::new(),
+            sort_key: SortKey::Name,
+            sort_desc: false,
+            sort_folders_first: true,
             fetch_url: String::new(),
             fetch: Fetch::Idle,
             fetch_portal: None,
@@ -2814,6 +2893,8 @@ pub struct App {
     /// carry on from.
     shade_last: Option<(u64, f32)>,
     shade_speed: f32,
+    /// The order the file manager was put in, to be written down once.
+    sort_save: Option<(SortKey, bool, bool)>,
     /// When the decrypt page was first shown, for the bar that runs on the
     /// clock while the data partition is being opened.
     data_started: Option<u64>,
@@ -2944,6 +3025,7 @@ impl App {
             shade_settle: None,
             shade_last: None,
             shade_speed: 0.0,
+            sort_save: None,
             data_started: None,
             shade_press: None,
             shade_hits: Vec::new(),
@@ -4742,6 +4824,33 @@ impl App {
         self.refresh();
     }
 
+    /// Put the file manager's entries in the order asked for, and keep that
+    /// order for the starts that follow.
+    fn resort_files(&mut self) {
+        if let Ok(entries) = &mut self.state.files.entries {
+            sort_entries(entries, self.state.sort_key, self.state.sort_desc, self.state.sort_folders_first);
+        }
+        self.refresh();
+        self.sort_save = Some((self.state.sort_key, self.state.sort_desc, self.state.sort_folders_first));
+    }
+
+    /// The order the file manager shows entries in, as the runtime last read
+    /// it from the file it is kept in.
+    pub fn take_sort(&mut self, key: SortKey, desc: bool, folders_first: bool) {
+        self.state.sort_key = key;
+        self.state.sort_desc = desc;
+        self.state.sort_folders_first = folders_first;
+        if let Ok(entries) = &mut self.state.files.entries {
+            sort_entries(entries, key, desc, folders_first);
+        }
+        self.refresh();
+    }
+
+    /// The order to write down, once, after a change.
+    pub fn sort_to_save(&mut self) -> Option<(SortKey, bool, bool)> {
+        self.sort_save.take()
+    }
+
     /// Begin fetching what the address typed on the page names.
     fn fetch_start(&mut self, now: u64) -> Vec<Effect> {
         let l = self.state.lang;
@@ -5857,6 +5966,18 @@ impl App {
                 return self.arrive_at(s);
             }
             Action::OpenData => return self.open_data(),
+            Action::CycleSort => {
+                self.state.sort_key = self.state.sort_key.next();
+                self.resort_files();
+            }
+            Action::ToggleFoldersFirst => {
+                self.state.sort_folders_first = !self.state.sort_folders_first;
+                self.resort_files();
+            }
+            Action::ToggleSortOrder => {
+                self.state.sort_desc = !self.state.sort_desc;
+                self.resort_files();
+            }
             Action::FetchStart => return self.fetch_start(now),
             Action::FetchStop => {
                 if self.fetching() {

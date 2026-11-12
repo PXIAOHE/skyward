@@ -3263,7 +3263,7 @@ pub fn files(cx: &Ctx) -> Frame {
     });
     let button = Some((widgets::Glyph::Terminal, Action::TerminalHere));
     let root = l.pick(["根目录", "根目錄", "Root"]);
-    Frame { dock, button, ..listing(cx, &s.files, root, None, l.pick(["暂无文件", "沒有檔案", "No files"]), Action::OpenEntry, l.pick(FILES)) }
+    Frame { dock, button, ..listing(cx, &s.files, root, None, l.pick(["暂无文件", "沒有檔案", "No files"]), Action::OpenEntry, l.pick(FILES), true) }
 }
 
 const CANCEL: Text = ["取消", "取消", "Cancel"];
@@ -3286,7 +3286,7 @@ pub fn choose(cx: &Ctx, place: Place) -> Frame {
         _ => None,
     };
     let empty = l.pick(["暂无可安装的文件", "沒有可安裝的檔案", "Nothing here to install"]);
-    listing(cx, s.folder(Screen::Choose(place)), place_name(l, place), absent, empty, Action::ChooseEntry, l.pick(["选择文件", "選擇檔案", "Choose a file"]))
+    listing(cx, s.folder(Screen::Choose(place)), place_name(l, place), absent, empty, Action::ChooseEntry, l.pick(["选择文件", "選擇檔案", "Choose a file"]), false)
 }
 
 /// A folder laid out as the stock file manager lays one out: the path as
@@ -3294,6 +3294,7 @@ pub fn choose(cx: &Ctx, place: Place) -> Frame {
 /// entries in one list on the plain page, each row drawn as it scrolls into
 /// view and touched for `action`. In place of the list, `absent` says why
 /// nothing of the folder can be shown, and `empty` that it holds nothing.
+#[allow(clippy::too_many_arguments)]
 fn listing(
     cx: &Ctx,
     folder: &Folder,
@@ -3302,6 +3303,7 @@ fn listing(
     empty: &str,
     action: fn(usize) -> Action,
     title: &'static str,
+    sortable: bool,
 ) -> Frame {
     let (t, f) = (cx.t, cx.f);
     let bg = files::page(t);
@@ -3321,8 +3323,38 @@ fn listing(
         }
         (None, Ok(entries)) => Some(files::rows(t, f, entries, action)),
     };
-    let pinned = Some(files::strip(t, f, top, &folder.path));
-    Frame { bg, rows, pinned, ..Frame::new(t, c, Vec::new(), title, t.m.dp(files::STRIP_TOP_DP)) }
+    let pinned = files::strip(t, f, top, &folder.path);
+    // The order the entries are in, as taps under the path, on the pages that
+    // list a folder to work in rather than one to pick a file from.
+    let mut hits = Vec::new();
+    if sortable {
+        sort_bar(&mut c, cx, t.m.dp(files::SORT_BAR_TOP_DP), &mut hits);
+    }
+    Frame { bg, rows, pinned: Some(pinned), hits, ..Frame::new(t, c, Vec::new(), title, t.m.dp(files::STRIP_TOP_DP)) }
+}
+
+/// The order the file manager shows its entries in, as a row of three taps
+/// under the path: the key, which side, and whether folders come first.
+fn sort_bar(c: &mut Canvas, cx: &Ctx, top: f32, out: &mut Vec<Hit>) {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let m = &t.m;
+    let key = s.sort_key.name(l);
+    let side = if s.sort_desc { l.pick(["降序", "降序", "Down"]) } else { l.pick(["升序", "升序", "Up"]) };
+    let folders = if s.sort_folders_first { l.pick(["文件夹在前", "資料夾在前", "Folders first"]) } else { l.pick(["混合排列", "混合排列", "Mixed"]) };
+    let items = [(key, Action::CycleSort), (side, Action::ToggleSortOrder), (folders, Action::ToggleFoldersFirst)];
+    let (h, gap) = (m.dp(34.0), m.dp(8.0));
+    let px = m.sub_px;
+    let mut x = m.dp(files::SIDE_DP);
+    for (text, action) in items {
+        let w = c.text_width(&f.value, text, px) + m.dp(20.0);
+        if x + w > m.w as f32 - m.dp(files::SIDE_DP) {
+            break;
+        }
+        c.fill_round_rect(x, top, w, h, h / 2.0, t.pal.card);
+        c.text_center(&f.value, text, x + w / 2.0, top + h / 2.0, px, t.pal.text);
+        out.push(Hit { rect: Rect::new(x, top, w, h), action });
+        x += w + gap;
+    }
 }
 
 /// Row `i` of the page's long list over the whole of `c`, sized for it,
