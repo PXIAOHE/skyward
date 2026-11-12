@@ -274,7 +274,7 @@ fn listing(root: &Path, dir: &Path) -> String {
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        let href = format!("{}{}", url_encode(&name), if is_dir { "/" } else { "" });
+        let href = format!("/{}{}", url_encode(&name), if is_dir { "/" } else { "" });
         let (icon, meta) = if is_dir {
             ("&#128193;".to_string(), "文件夹".to_string())
         } else {
@@ -303,7 +303,9 @@ fn listing(root: &Path, dir: &Path) -> String {
     }
 
     let count = cards.matches("class=card").count().saturating_sub(if shown.is_empty() { 0 } else { 1 });
-    let prefix = if shown.is_empty() { String::new() } else { format!("{}/", url_encode(&shown)) };
+    // The address a file goes to, made whole from the top: a path the browser
+    // resolves against the page's own would put the folder in twice.
+    let prefix = if shown.is_empty() { "/".to_string() } else { format!("/{}/", url_encode(&shown)) };
     format!(
         r#"<!doctype html><html lang=zh><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
