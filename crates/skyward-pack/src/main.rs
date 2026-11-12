@@ -58,6 +58,11 @@ enum Cmd {
         /// The device configuration, devices/<codename>.toml.
         #[arg(long)]
         config: PathBuf,
+        /// More device configurations, for a build that serves several phones
+        /// sharing one kernel: the recovery reads the one the phone it runs on
+        /// names.
+        #[arg(long = "also", value_name = "CONFIG")]
+        also: Vec<PathBuf>,
         /// The UI typeface.
         #[arg(long)]
         font: PathBuf,
@@ -105,7 +110,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, also, font, mono, mono_license, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
@@ -125,7 +130,17 @@ fn main() -> Result<()> {
                 rd.link(command, recovery)?;
             }
             rd.add(paths::SYSTEM_INIT, 0o755, read(&system_init)?)?;
-            rd.add(paths::CONFIG, 0o644, read(&config)?)?;
+            // One phone's configuration, or one for each phone the build
+            // serves: the recovery picks by the codename the device tree gives.
+            if also.is_empty() {
+                rd.add(paths::CONFIG, 0o644, read(&config)?)?;
+            } else {
+                for one in std::iter::once(&config).chain(&also) {
+                    let body = read(one)?;
+                    let name = skyward_config::codename(&String::from_utf8_lossy(&body))?;
+                    rd.add(&format!("{}/{name}.toml", paths::CONFIGS), 0o644, body)?;
+                }
+            }
             rd.add(paths::FONT, 0o644, read(&font)?)?;
             rd.add(paths::MONO, 0o644, read(&mono)?)?;
             rd.add(paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;

@@ -723,7 +723,7 @@ fn recovery() -> Result<()> {
         if !request.work.lasts() {
             bcb::clear(&misc)?;
         }
-        let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
+        let cfg = DeviceConfig::load_for_this_phone()?;
         skyward_sys::kmsg(&format!(
             "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,

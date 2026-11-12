@@ -8,6 +8,10 @@ use std::path::Path;
 pub mod ramdisk {
     /// The device configuration, copied from `devices/<codename>.toml`.
     pub const CONFIG: &str = "skyward/device.toml";
+    /// The folder a build that serves more than one phone keeps a
+    /// configuration in for each, named for its codename: the recovery picks
+    /// the one the phone it runs on names.
+    pub const CONFIGS: &str = "skyward/devices";
     /// The UI typeface.
     pub const FONT: &str = "skyward/MiSansVF.ttf";
     /// The terminal's monospaced typeface.
@@ -35,9 +39,12 @@ pub mod ramdisk {
     /// The init rules that set up file transfer's USB function.
     pub const MTP_RC: &str = "system/etc/init/skyward-mtp.rc";
 
-    /// Whether the running root is Skyward's recovery ramdisk.
+    /// Whether the running root is Skyward's recovery ramdisk: the single
+    /// configuration is there, or the folder a build serving several phones
+    /// keeps theirs in.
     pub fn in_recovery() -> bool {
-        std::path::Path::new("/").join(CONFIG).exists()
+        let single = std::path::Path::new("/").join(CONFIG).exists();
+        single || std::path::Path::new("/").join(CONFIGS).is_dir()
     }
 }
 
@@ -548,7 +555,37 @@ pub fn codename(text: &str) -> Result<String> {
     Ok(named.device.codename)
 }
 
+/// The codename the phone running this names itself by, read from the tree
+/// the kernel was given: its model says, as `... Manet based on SM8650` does.
+pub fn codename_of_running() -> Option<String> {
+    let text = std::fs::read("/proc/device-tree/model").ok()?;
+    codename_from_model(&String::from_utf8_lossy(&text))
+}
+
+/// The codename a device tree's model names, as `... Manet based on SM8650`
+/// does.
+fn codename_from_model(model: &str) -> Option<String> {
+    let lower = model.to_lowercase();
+    let at = lower.find(" based on ")?;
+    let name = lower[..at].split_whitespace().last()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 impl DeviceConfig {
+    /// Read the configuration for the phone this runs on: the one kept for its
+    /// codename under [`ramdisk::CONFIGS`] where the build holds several, or
+    /// the single one at [`ramdisk::CONFIG`].
+    pub fn load_for_this_phone() -> Result<Self> {
+        let folder = Path::new("/").join(ramdisk::CONFIGS);
+        if folder.is_dir() {
+            let codename = codename_of_running()
+                .with_context(|| format!("no codename in the device tree, though {} holds several", folder.display()))?;
+            let path = folder.join(format!("{codename}.toml"));
+            return Self::load(&path).with_context(|| format!("this phone is a {codename}"));
+        }
+        Self::load(Path::new("/").join(ramdisk::CONFIG))
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let p = path.as_ref();
         let text = std::fs::read_to_string(p)
@@ -688,6 +725,15 @@ impl DeviceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_names_the_phone_the_tree_was_built_for() {
+        assert_eq!(codename_from_model("Qualcomm Technologies, Inc. Manet based on SM8650").as_deref(), Some("manet"));
+        assert_eq!(codename_from_model("Qualcomm Technologies, Inc. Houji based on SM8650").as_deref(), Some("houji"));
+        // Nothing to name, or nothing in the shape the maker writes.
+        assert_eq!(codename_from_model(""), None);
+        assert_eq!(codename_from_model("Qualcomm Technologies, Inc."), None);
+    }
 
     #[test]
     fn the_commands_sit_beside_the_recovery_service_binary() {

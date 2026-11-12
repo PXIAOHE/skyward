@@ -153,8 +153,18 @@ jobs:
           fi
           name="skyward-$version-$DEVICE-$STOCK"
           mkdir out
+          # A branch that serves more than one phone lists the others in
+          # devices/also.txt, one codename to a line.
+          ALSO=""
+          if [ -f devices/also.txt ]; then
+            while read -r one; do
+              [ -z "$one" ] && continue
+              ALSO="$ALSO --also devices/$one.toml"
+            done < devices/also.txt
+          fi
           tools/skyward-pack recovery --stock stock/recovery.img --binary tools/skyward --system-init tools/system-init \
-            --config "devices/$DEVICE.toml" --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
+            --config "devices/$DEVICE.toml" $ALSO \
+            --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
             --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
       # The image is the whole partition, flashed as it is, and most of it
