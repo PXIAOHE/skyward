@@ -255,8 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn the_paths_that_are_files_are_told_apart_from_the_libraries() {
-        assert!(PIECES.iter().any(|p| p.ends_with(".so")));
-        assert!(PIECES.iter().any(|p| p.starts_with('/')));
+    fn a_gpu_that_names_a_renderer_says_so() {
+        let gpu = Gpu { renderer: Some("Adreno (TM) 750".into()), gles: Some("OpenGL ES 3.2".into()), ..Gpu::default() };
+        assert_eq!(summary(&gpu), "Adreno (TM) 750 · OpenGL ES 3.2");
     }
 }
