@@ -618,7 +618,7 @@ pub fn gpu(cx: &Ctx) -> Frame {
     let (t, f, i, l) = (cx.t, cx.f, cx.info, cx.state.lang);
     let m = &t.m;
     let mut c = long_page(cx);
-    let mut out = Vec::new();
+    let out = Vec::new();
     let top = m.content_top;
     let g = &i.gpu;
 

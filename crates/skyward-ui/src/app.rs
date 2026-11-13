@@ -8098,6 +8098,7 @@ mod tests {
             slot: None,
             snapshot: SnapshotState::None,
             boot: Boot { unlocked: None, verified: None },
+            gpu: Default::default(),
         }
     }
 
