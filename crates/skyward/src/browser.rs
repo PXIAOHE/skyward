@@ -107,6 +107,8 @@ pub fn start(width: u32, height: u32) -> Result<()> {
         // The face the renderer draws text with is the one the recovery
         // carries, and the frame file is the one already mapped below.
         .env("SKYWARD_FONT", "/skyward/MiSansVF.ttf")
+        .env("SKYWARD_WIDTH", width.to_string())
+        .env("SKYWARD_HEIGHT", height.to_string())
         .env("SKYWARD_FRAME", FRAME)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -135,10 +137,9 @@ pub fn start(width: u32, height: u32) -> Result<()> {
         length,
         seen: 0,
     };
-    say(
-        &mut page,
-        &format!("WINDOW NEW WIN 0 X 0 Y 0 W {width} H {height}"),
-    )?;
+    // The window is made at the size the environment named; the command
+    // itself takes only an address, and anything more is refused.
+    say(&mut page, "WINDOW NEW")?;
     *held = Some(page);
     Ok(())
 }

@@ -139,6 +139,14 @@ static void fill_span(int y, int x0, int x1, uint32_t colour)
 nserror skyward_plot_clip(const struct redraw_context *ctx,
 		const struct rect *clip)
 {
+	{
+		FILE *log = fopen("/tmp/skyplot.log", "a");
+		if (log != NULL) {
+			fprintf(log, "clip %d,%d %d,%d ready=%d\n", clip->x0, clip->y0,
+					clip->x1, clip->y1, surface_ready);
+			fclose(log);
+		}
+	}
 	if (!surface_ready && clip->x1 > 0 && clip->y1 > 0) {
 		skyward_surface_open(clip->x1, clip->y1);
 	}
@@ -158,6 +166,15 @@ nserror skyward_plot_clip(const struct redraw_context *ctx,
 nserror skyward_plot_rectangle(const struct redraw_context *ctx,
 		const plot_style_t *style, const struct rect *r)
 {
+	{
+		FILE *log = fopen("/tmp/skyplot.log", "a");
+		if (log != NULL) {
+			fprintf(log, "rect %d,%d %d,%d fill=%u\n", (int)r->x0,
+					(int)r->y0, (int)r->x1, (int)r->y1,
+					(unsigned)style->fill_colour);
+			fclose(log);
+		}
+	}
 	int y0 = r->y0 < (float)surface.clip_y0 ? surface.clip_y0 : (int)r->y0;
 	int y1 = r->y1 > (float)surface.clip_y1 ? surface.clip_y1 : (int)r->y1;
 	if (style->fill_type != PLOT_OP_TYPE_NONE &&
@@ -312,7 +329,8 @@ static void draw_glyph(const plot_font_style_t *fstyle, uint32_t codepoint,
 		int x, int y, int size)
 {
 	if (!stbtt_IsGlyphEmpty(&face, stbtt_FindGlyphIndex(&face, (int)codepoint))) {
-		float scale = size / face_scale;
+		/* Scale for this size, in pixels, not the face's own unit scale. */
+		float scale = stbtt_ScaleForPixelHeight(&face, (float)size);
 		int advance = 0, left = 0;
 		stbtt_GetCodepointHMetrics(&face, (int)codepoint, &advance, &left);
 		int x0, y0, x1, y1;
@@ -338,10 +356,21 @@ static void draw_glyph(const plot_font_style_t *fstyle, uint32_t codepoint,
 	}
 }
 
+static int texts_drawn;
+
 nserror skyward_plot_text(const struct redraw_context *ctx,
 		const plot_font_style_t *fstyle, int x, int y,
 		const char *text, size_t length)
 {
+	if (texts_drawn < 4) {
+		FILE *log = fopen("/tmp/skyplot.log", "a");
+		if (log != NULL) {
+			fprintf(log, "text len=%zu size=%d face=%p x=%d y=%d\n",
+					length, (int)fstyle->size, (void *)face_data, x, y);
+			fclose(log);
+		}
+	}
+	texts_drawn++;
 	if (text == NULL) {
 		return NSERROR_OK;
 	}
@@ -381,7 +410,7 @@ nserror skyward_plot_text(const struct redraw_context *ctx,
 		draw_glyph(fstyle, cp, px, y, size);
 
 		if (face_data != NULL) {
-			float scale = size / face_scale;
+			float scale = stbtt_ScaleForPixelHeight(&face, (float)size);
 			int advance = 0, bearing = 0;
 			stbtt_GetCodepointHMetrics(&face, (int)cp, &advance, &bearing);
 			px += (int)(advance * scale);

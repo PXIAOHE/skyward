@@ -54,6 +54,10 @@ if 'skyward_frame_publish' not in text:
         '\tbrowser_window_redraw(gw->bw, gw->scrollx, gw->scrolly, &clip, &ctx);',
         '\tbrowser_window_redraw(gw->bw, gw->scrollx, gw->scrolly, &clip, &ctx);\n'
         '\tskyward_frame_publish();')
+    text = text.replace(
+        '\tret->width = 800;\n\tret->height = 600;',
+        '\tret->width = getenv("SKYWARD_WIDTH") ? atoi(getenv("SKYWARD_WIDTH")) : 800;\n'
+        '\tret->height = getenv("SKYWARD_HEIGHT") ? atoi(getenv("SKYWARD_HEIGHT")) : 600;')
     text = text.replace('#include "monkey/browser.h"',
         '#include "monkey/browser.h"\n\nvoid skyward_frame_publish(void);')
     open(path, 'w').write(text)
