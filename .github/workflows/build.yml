@@ -80,7 +80,7 @@ jobs:
           NDK="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
           CLANG=$(find "$NDK/toolchains/llvm/prebuilt" -name 'aarch64-linux-android30-clang' | head -1)
           echo "using $CLANG"
-          "$CLANG" -O2 -static -o eglprobe/eglprobe eglprobe/probe.c -ldl
+          "$CLANG" -O2 -o eglprobe/eglprobe eglprobe/probe.c -ldl
       - uses: actions/upload-artifact@v7
         with:
           name: eglprobe
