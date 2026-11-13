@@ -232,6 +232,26 @@ void skyward_publish(nsfb_t *nsfb)
     open(path, 'w').write(text)
 PATCH
 
+# Nothing waits for a key that never comes: with no display server there is
+# no input to wake the loop, so it is woken on a timer instead and gives the
+# scheduler the chance to run what a page loading has queued.
+python3 - "$SRC/frontends/framebuffer/gui.c" <<'PATCH'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+if 'SKYWARD_TICK' not in text:
+    text = text.replace(
+        '\t\ttimeout = schedule_run();',
+        '\t\ttimeout = schedule_run();\n'
+        '\t\t/* Wake often enough that a page finishing loading is seen. */\n'
+        '\t\tif (timeout < 0 || timeout > SKYWARD_TICK) {\n'
+        '\t\t\ttimeout = SKYWARD_TICK;\n'
+        '\t\t}', 1)
+    text = text.replace('static void framebuffer_run(void)',
+        '#define SKYWARD_TICK 200\n\nstatic void framebuffer_run(void)', 1)
+    open(path, 'w').write(text)
+PATCH
+
 # One archive for the whole stack: the libraries call each other in both
 # directions, and a single archive takes the order out of the link line.
 if [ ! -f "$LIBS/libnsdeps.a" ]; then
