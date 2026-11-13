@@ -4423,8 +4423,11 @@ mod tests {
     }
 }
 
+/// A page and the size it was drawn at.
+type DrawnPage = (usize, usize, Vec<u8>);
+
 /// The page NetSurf last drew, and the size it drew it at.
-static PAGE_FRAME: std::sync::OnceLock<std::sync::Mutex<Option<(usize, usize, Vec<u8>)>>> =
+static PAGE_FRAME: std::sync::OnceLock<std::sync::Mutex<Option<DrawnPage>>> =
     std::sync::OnceLock::new();
 
 /// Take a page that NetSurf has finished drawing.
@@ -4438,7 +4441,7 @@ pub fn set_page_frame(width: usize, height: usize, pixels: Vec<u8>) {
 /// A page as NetSurf drew it, as much of it as the screen has room for.
 pub fn browser(cx: &Ctx) -> Frame {
     let t = cx.t;
-    let (w, h) = (t.m.w as u32, t.m.h as u32);
+    let (w, h) = (t.m.w, t.m.h);
     let mut c = Canvas::filled(w, h, t.pal.bg);
 
     let held = PAGE_FRAME.get_or_init(|| std::sync::Mutex::new(None));
