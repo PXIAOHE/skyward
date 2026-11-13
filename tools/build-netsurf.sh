@@ -79,7 +79,9 @@ sed -i \
 INCS="-I$LIBS/include"
 
 cat > "$SRC/Makefile.config" <<EOF
-NETSURF_FRONTEND := monkey
+NETSURF_FRONTEND := framebuffer
+NETSURF_FB_FRONTEND := ram
+NETSURF_FB_FONTLIB := internal
 NETSURF_USE_CURL := NO
 NETSURF_USE_OPENSSL := NO
 NETSURF_USE_JPEG := NO
@@ -117,6 +119,46 @@ Cflags: -I$LIBS/include
 EOF
 done
 
+# libnsfb draws and hands back a buffer: the surface the page is put on. Only
+# what a recovery uses is built — the memory surface and the 32-bit plotting —
+# with the backends that talk to a display server left out.
+echo "fetching libnsfb"
+curl -sSL -o "$WORK/nsfb.tar.gz" \
+    "https://download.netsurf-browser.org/libs/releases/libnsfb-0.2.2-src.tar.gz"
+tar xzf "$WORK/nsfb.tar.gz" -C "$WORK"
+NSFB="$WORK/libnsfb-0.2.2"
+mkdir -p "$WORK/nsfbobj"
+
+nsfb_build() {
+    src=$1
+    o="$WORK/nsfbobj/$(echo "$src" | sed "s|$NSFB/||; s|/|_|g; s|\.c$|.o|")"
+    $CC -O2 -fPIC -fcommon -DNDEBUG -std=c99 -D_POSIX_C_SOURCE=200809L \
+        -D_DEFAULT_SOURCE -I"$NSFB/include" -I"$NSFB/src" -I"$SRC" \
+        -I"$SRC/include" -I"$SRC/frontends" -I"$LIBS/include" \
+        -I"$HERE/netsurf/stub" -c "$src" -o "$o"
+}
+
+for src in "$NSFB"/src/*.c \
+           "$NSFB"/src/plot/api.c "$NSFB"/src/plot/util.c \
+           "$NSFB"/src/plot/generic.c "$NSFB"/src/plot/32bpp-xrgb8888.c \
+           "$NSFB"/src/plot/32bpp-xbgr8888.c "$NSFB"/src/plot/16bpp.c \
+           "$NSFB"/src/plot/8bpp.c \
+           "$NSFB"/src/surface/surface.c "$NSFB"/src/surface/ram.c; do
+    nsfb_build "$src"
+done
+$AR rcs "$LIBS/libnsfb.a" "$WORK"/nsfbobj/*.o
+echo "  -> $LIBS/libnsfb.a ($(wc -c < "$LIBS/libnsfb.a") bytes)"
+
+# The frontend finds libnsfb through pkg-config.
+mkdir -p "$LIBS/pkgconfig"
+cat > "$LIBS/pkgconfig/libnsfb.pc" <<PC
+Name: libnsfb
+Description: libnsfb
+Version: 0.2.2
+Libs: -L$LIBS -lnsfb
+Cflags: -I$NSFB/include
+PC
+
 # One archive for the whole stack: the libraries call each other in both
 # directions, and a single archive takes the order out of the link line.
 if [ ! -f "$LIBS/libnsdeps.a" ]; then
@@ -124,13 +166,14 @@ if [ ! -f "$LIBS/libnsdeps.a" ]; then
         "$LIBS/libwapcaplet.a" "$LIBS/libparserutils.a" \
         "$LIBS/libhubbub.a" "$LIBS/libcss.a" "$LIBS/libdom.a" \
         "$LIBS/libnsutils.a" "$LIBS/libnsgif.a" "$LIBS/libnsbmp.a" \
+        "$LIBS/libnsfb.a" \
         -Wl,--no-whole-archive
     $AR rcs "$LIBS/libnsdeps.a" "$WORK/all.o"
 fi
 
 echo "building netsurf $VERSION"
-( cd "$SRC" && PKG_CONFIG_PATH="$WORK/pc" make TARGET=monkey -j"$(nproc)" )
+( cd "$SRC" && PKG_CONFIG_PATH="$WORK/pc:$LIBS/pkgconfig" make TARGET=framebuffer -j"$(nproc)" )
 
 mkdir -p "$OUT"
-cp "$SRC/nsmonkey" "$OUT/"
-echo "-> $OUT/nsmonkey ($(wc -c < "$OUT/nsmonkey") bytes)"
+cp "$SRC/nsfb" "$OUT/"
+echo "-> $OUT/nsfb ($(wc -c < "$OUT/nsfb") bytes)"
