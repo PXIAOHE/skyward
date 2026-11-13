@@ -71,6 +71,10 @@ if 'skyward_frame_publish' not in text:
     open(path, 'w').write(text)
 PATCH
 
+# Input from the program around NetSurf reaches the same place the
+# surface's own events reach.
+cat "$HERE/netsurf/skyward-input.c" >> "$SRC/frontends/framebuffer/gui.c"
+
 sed -i \
     -e 's|#include "content/fetchers/curl.h"|#include "content/fetchers/skyward.h"|' \
     -e 's|ret = fetch_curl_register();|ret = fetch_skyward_register();|' \
@@ -252,7 +256,9 @@ if 'SKYWARD_TICK' not in text:
         '\t\t/* Wake often enough that a page finishing loading is seen. */\n'
         '\t\tif (timeout < 0 || timeout > SKYWARD_TICK) {\n'
         '\t\t\ttimeout = SKYWARD_TICK;\n'
-        '\t\t}', 1)
+        '\t\t}\n'
+        '\t\tvoid skyward_input_poll(fbtk_widget_t *fbtk);\n'
+        '\t\tskyward_input_poll(fbtk);', 1)
     text = text.replace('\tnsfb_plot_line(nsfb, &line, &pen);\n\t}',
         '\tnsfb_plot_line(nsfb, &line, &pen);\n\t}\n\n\tskyward_publish(nsfb);', 1)
     text = text.replace('static void framebuffer_run(void)',
