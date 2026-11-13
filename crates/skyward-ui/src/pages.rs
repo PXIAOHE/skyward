@@ -6,8 +6,6 @@ use crate::app::{
     USB_DRIVE_WANTED, WIPES, installs, starting,
 };
 use crate::canvas::Canvas;
-use crate::color::Rgba;
-use crate::color::Rgba;
 use crate::editor;
 use crate::files;
 use crate::fmt::{self, Verb};
