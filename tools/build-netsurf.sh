@@ -42,8 +42,22 @@ SRC="$WORK/netsurf-$VERSION"
 cp "$HERE/netsurf/skyward-fetch.c" "$SRC/content/fetchers/skyward.c"
 cp "$HERE/netsurf/skyward-fetch.h" "$SRC/content/fetchers/skyward.h"
 
-# Drawing lands in our own buffer instead of being logged.
+# Drawing lands in our own buffer instead of being logged, and the finished
+# frame is handed over once the window has been redrawn.
 cp "$HERE/netsurf/skyward-plot.c" "$SRC/frontends/monkey/plot.c"
+python3 - "$SRC/frontends/monkey/browser.c" <<'PATCH'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+if 'skyward_frame_publish' not in text:
+    text = text.replace(
+        '\tbrowser_window_redraw(gw->bw, gw->scrollx, gw->scrolly, &clip, &ctx);',
+        '\tbrowser_window_redraw(gw->bw, gw->scrollx, gw->scrolly, &clip, &ctx);\n'
+        '\tskyward_frame_publish();')
+    text = text.replace('#include "monkey/browser.h"',
+        '#include "monkey/browser.h"\n\nvoid skyward_frame_publish(void);')
+    open(path, 'w').write(text)
+PATCH
 
 sed -i \
     -e 's|#include "content/fetchers/curl.h"|#include "content/fetchers/skyward.h"|' \

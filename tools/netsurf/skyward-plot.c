@@ -14,6 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "utils/errors.h"
 #include "utils/log.h"
@@ -25,6 +28,8 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
+bool skyward_surface_open(int width, int height);
+
 struct skyward_surface {
 	int width;
 	int height;
@@ -35,6 +40,65 @@ struct skyward_surface {
 
 static struct skyward_surface surface;
 static bool surface_ready;
+
+/* The buffer is handed to the program around NetSurf through one file:
+ * a small header, then the pixels, then a counter that changes whenever
+ * the pixels do. */
+#define FRAME_MAGIC 0x534b5946u /* "SKYF" */
+struct frame_header {
+	uint32_t magic;
+	uint32_t width;
+	uint32_t height;
+	uint32_t stride;
+	uint64_t seq;
+};
+
+static struct frame_header *frame;
+static uint8_t *frame_pixels;
+static size_t frame_size;
+static const char *frame_path;
+static uint64_t frame_seq;
+
+static void frame_publish(void)
+{
+	if (!surface_ready || surface.pixels == NULL) {
+		return;
+	}
+	if (frame == NULL) {
+		frame_path = getenv("SKYWARD_FRAME");
+		if (frame_path == NULL) {
+			frame_path = "/tmp/skyward-frame";
+		}
+		frame_size = sizeof(struct frame_header) +
+				(size_t)surface.width * surface.height * 4;
+		int fd = open(frame_path, O_RDWR | O_CREAT, 0666);
+		if (fd < 0) {
+			return;
+		}
+		if (ftruncate(fd, (off_t)frame_size) != 0) {
+			close(fd);
+			return;
+		}
+		void *at = mmap(NULL, frame_size, PROT_READ | PROT_WRITE,
+				MAP_SHARED, fd, 0);
+		close(fd);
+		if (at == MAP_FAILED) {
+			return;
+		}
+		frame = at;
+		frame_pixels = (uint8_t *)at + sizeof(struct frame_header);
+		frame->magic = FRAME_MAGIC;
+		frame->width = (uint32_t)surface.width;
+		frame->height = (uint32_t)surface.height;
+		frame->stride = (uint32_t)surface.stride;
+	}
+
+	size_t bytes = (size_t)surface.stride * surface.height;
+	memcpy(frame_pixels, surface.pixels, bytes);
+	__atomic_store_n(&frame->seq, ++frame_seq, __ATOMIC_RELEASE);
+}
+
+void skyward_frame_publish(void);
 
 static stbtt_fontinfo face;
 static unsigned char *face_data;
@@ -75,6 +139,9 @@ static void fill_span(int y, int x0, int x1, uint32_t colour)
 nserror skyward_plot_clip(const struct redraw_context *ctx,
 		const struct rect *clip)
 {
+	if (!surface_ready && clip->x1 > 0 && clip->y1 > 0) {
+		skyward_surface_open(clip->x1, clip->y1);
+	}
 	surface.clip_x0 = clip->x0 < 0 ? 0 : clip->x0;
 	surface.clip_y0 = clip->y0 < 0 ? 0 : clip->y0;
 	surface.clip_x1 = clip->x1 > surface.width ? surface.width : clip->x1;
@@ -339,7 +406,13 @@ nserror skyward_plot_group_end(const struct redraw_context *ctx)
 
 nserror skyward_plot_flush(const struct redraw_context *ctx)
 {
+	frame_publish();
 	return NSERROR_OK;
+}
+
+void skyward_frame_publish(void)
+{
+	frame_publish();
 }
 
 static const struct plotter_table plotters = {
