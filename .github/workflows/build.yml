@@ -70,7 +70,7 @@ jobs:
         run: cargo build --locked --release -p skyward-pack
       - name: Gather them
         run: |
-          mkdir tools
+          mkdir -p tools
           cp target/aarch64-linux-android/release/skyward target/release/skyward-pack tools/
           cp target/system-init/aarch64-linux-android/release/system-init tools/
       # Says whether the GPU's EGL can be had from the phone: run it in the
@@ -81,6 +81,24 @@ jobs:
           CLANG=$(find "$NDK/toolchains/llvm/prebuilt" -name 'aarch64-linux-android30-clang' | head -1)
           echo "using $CLANG"
           "$CLANG" -O2 -o eglprobe/eglprobe eglprobe/probe.c -ldl
+      # NetSurf's own libraries, for the browser the recovery may grow. They
+      # are built here to see whether they take the phone's compiler at all;
+      # the archives are what a frontend would link against.
+      - name: Build NetSurf's libraries for the phone
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gperf
+          NDK="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
+          CLANG=$(find "$NDK/toolchains/llvm/prebuilt" -name 'aarch64-linux-android30-clang' | head -1)
+          BIN=$(dirname "$CLANG")
+          echo "using $CLANG"
+          HOSTCC=cc sh tools/build-netsurf-libs.sh \
+              "$CLANG" "$BIN/llvm-ar" netsurflibs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: netsurflibs
+          path: netsurflibs/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
           name: eglprobe
