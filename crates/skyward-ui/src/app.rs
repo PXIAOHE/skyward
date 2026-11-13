@@ -90,6 +90,8 @@ pub enum Screen {
     /// filesystem page's, or what the system asked for before the recovery
     /// started.
     PartWork,
+    /// What the phone's GPU can be made to do, read inside the recovery.
+    Gpu,
     Language,
     TimeZone,
     /// Saving the logs, as a bug report asks for them.
@@ -8114,6 +8116,7 @@ mod tests {
             Screen::Install,
             Screen::Choose(Place::Storage),
             Screen::Specs,
+            Screen::Gpu,
             Screen::ScreenOff,
             Screen::Search,
             Screen::Backup,

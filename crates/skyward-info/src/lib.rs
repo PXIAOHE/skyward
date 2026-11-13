@@ -10,6 +10,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::str::FromStr;
 
+pub mod gpu;
+
+
 /// Version of this build, shown on the About page.
 /// The build's version, as the build itself was named: `0.2.1-abc1234` where
 /// the workflow that made it said so, and the crate's own version otherwise.
@@ -52,6 +55,8 @@ pub struct DeviceInfo {
     pub slot: Option<Slot>,
     pub snapshot: SnapshotState,
     pub boot: Boot,
+    /// What the phone's GPU can be made to do, asked of its own libraries.
+    pub gpu: gpu::Gpu,
 }
 
 /// `ro.build.version.security_patch`, a calendar date.
@@ -169,6 +174,7 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         slot: skyward_vab::current_slot()?,
         snapshot: skyward_vab::snapshot_state()?,
         boot: Boot { unlocked, verified: skyward_block::boot_param("androidboot.verifiedbootstate")? },
+            gpu: gpu::probe(),
     })
 }
 

@@ -73,6 +73,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Installing => installing(cx),
         Screen::About => about(cx),
         Screen::Specs => specs(cx),
+        Screen::Gpu => gpu(cx),
         Screen::ScreenOff => screen_off(cx),
         Screen::Search => search(cx),
         Screen::Backup => backup(cx),
@@ -607,6 +608,73 @@ fn about_cards(cx: &Ctx, c: &mut Canvas) -> (Vec<Hit>, f32, f32) {
     let links = widgets::list_toned(c, t, f, y + m.card_gap, &[Row::new(l.pick(SPECS)), Row::new(l.pick(LOGS))], &tone);
     out.extend(hits(&links.rows, &[Action::Open(Screen::Specs), Action::Open(Screen::Logs)]));
     (out, summary.rows[0].y, links.bottom)
+}
+
+/// What the phone's GPU can be made to do: whether EGL comes up where the
+/// recovery runs, what the driver calls the chip, and whether the pieces a
+/// browser's own backend leans on are there. Read when the page is opened,
+/// which is the only moment the libraries are asked.
+pub fn gpu(cx: &Ctx) -> Frame {
+    let (t, f, i, l) = (cx.t, cx.f, cx.info, cx.state.lang);
+    let m = &t.m;
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = m.content_top;
+    let g = &i.gpu;
+
+    // Whether there is a GPU at all, and what it says it is.
+    let state = if g.present() { l.pick(["可用", "可用", "Available"]) } else { l.pick(["不可用", "不可用", "Unavailable"]) };
+    let mut y = widgets::section_first(&mut c, t, f, top, l.pick(["图形", "圖形", "Graphics"]));
+    y = widgets::info_card(&mut c, t, f, y, &[
+        (l.pick(["状态", "狀態", "State"]), state.to_string()),
+        (l.pick(["库", "庫", "Library"]), g.library.clone().unwrap_or_else(|| "—".into())),
+        (l.pick(["版本", "版本", "Version"]), g.version.clone().unwrap_or_else(|| "—".into())),
+        (l.pick(["厂商", "廠商", "Vendor"]), g.vendor.clone().unwrap_or_else(|| "—".into())),
+        (l.pick(["渲染器", "渲染器", "Renderer"]), g.renderer.clone().unwrap_or_else(|| "—".into())),
+        (l.pick(["GLES", "GLES", "GLES"]), g.gles.clone().unwrap_or_else(|| "—".into())),
+        (l.pick(["无窗上下文", "無窗上下文", "Surfaceless"]), if g.surfaceless { "✓".into() } else { "✗".into() }),
+    ]);
+    if let Some(why) = &g.unavailable {
+        y = widgets::footnote(&mut c, t, f, y + m.card_gap, why);
+    }
+
+    // The extensions a browser's own backend would have to lean on.
+    if !g.extensions.is_empty() {
+        y = widgets::section(&mut c, t, f, y + m.card_gap, l.pick(["扩展", "擴充", "Extensions"]));
+        let items: Vec<(&str, String)> = g
+            .extensions
+            .iter()
+            .map(|(name, there)| (name.as_str(), if *there { "✓".to_string() } else { "✗".to_string() }))
+            .collect();
+        y = widgets::info_card(&mut c, t, f, y, &items);
+    }
+
+    // The nodes and libraries a browser's backend needs.
+    if !g.pieces.is_empty() {
+        y = widgets::section(&mut c, t, f, y + m.card_gap, l.pick(["依赖", "依賴", "Needs"]));
+        let items: Vec<(&str, String)> = g
+            .pieces
+            .iter()
+            .map(|(name, there)| (name.as_str(), if *there { "✓".to_string() } else { "✗".to_string() }))
+            .collect();
+        y = widgets::info_card(&mut c, t, f, y, &items);
+    }
+
+    // What it means, in a line.
+    let notes = [
+        l.pick([
+            "这一页在恢复模式里读，答案就是浏览器插件能不能用 GPU 的依据。",
+            "這一頁在復原模式裡讀，答案就是瀏覽器外掛能不能用 GPU 的依據。",
+            "This page is read inside the recovery, and its answer says whether a browser plugin could use the GPU there.",
+        ]),
+        l.pick([
+            "「无窗上下文」不可用时，浏览器只能用软件渲染，页面会很慢。",
+            "「無窗上下文」不可用時，瀏覽器只能用軟體渲染，頁面會很慢。",
+            "Without a surfaceless context a browser can only draw in software, which is slow.",
+        ]),
+    ];
+    y = widgets::notes(&mut c, t, f, y + m.card_gap, l.pick(NOTES), &notes);
+    Frame::new(t, fit(c, t, y), out, l.pick(["图形", "圖形", "Graphics"]), top)
 }
 
 /// Every reading the recovery has, modelled on the stock「全部参数与信息」.
@@ -2441,6 +2509,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(FETCH)).icon(BLUE, Icon::Layers),
         Row::new(l.pick(SERVE)).icon(GREEN, Icon::Globe),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
+        Row::new(l.pick(["图形诊断", "圖形診斷", "Graphics check"])).icon(PURPLE, Icon::Phone),
     ]);
     let out = hits(&tools.rows, &[
         Action::Open(Screen::Files),
@@ -2449,6 +2518,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Fetch),
+        Action::Open(Screen::Gpu),
         Action::Open(Screen::Serve),
         Action::Open(Screen::Update),
     ]);
