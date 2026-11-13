@@ -4354,6 +4354,18 @@ static PAGE_FRAME: std::sync::OnceLock<std::sync::Mutex<Option<DrawnPage>>> =
 /// Take a page that NetSurf has finished drawing.
 pub fn set_page_frame(width: usize, height: usize, pixels: Vec<u8>) {
     let held = PAGE_FRAME.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut slot) = held.lock() {
+        *slot = Some((width, height, pixels));
+    }
+}
+
+/// A page as NetSurf drew it, as much of it as the screen has room for.
+pub fn browser(cx: &Ctx) -> Frame {
+    let t = cx.t;
+    let (w, h) = (t.m.w, t.m.h);
+    let mut c = Canvas::filled(w, h, t.pal.bg);
+
+    let held = PAGE_FRAME.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(slot) = held.lock() {
         if let Some((pw, ph, pixels)) = slot.as_ref() {
             c.blit_bgra(w.min(*pw as u32), h.min(*ph as u32), pixels, pw * 4);
