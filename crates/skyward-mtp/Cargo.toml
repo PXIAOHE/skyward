@@ -10,6 +10,8 @@ anyhow = { workspace = true }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 libc = { workspace = true }
 skyward-files = { path = "../skyward-files" }
+
+[target.'cfg(target_os = "android")'.dependencies]
 skyward-sys = { path = "../skyward-sys" }
 
 # Folders are followed with inotify, on a computer running Linux as on the
