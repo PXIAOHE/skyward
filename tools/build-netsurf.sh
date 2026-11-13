@@ -267,7 +267,6 @@ if [ ! -f "$LIBS/libnsdeps.a" ]; then
         "$LIBS/libwapcaplet.a" "$LIBS/libparserutils.a" \
         "$LIBS/libhubbub.a" "$LIBS/libcss.a" "$LIBS/libdom.a" \
         "$LIBS/libnsutils.a" "$LIBS/libnsgif.a" "$LIBS/libnsbmp.a" \
-        "$LIBS/libnsfb.a" \
         -Wl,--no-whole-archive
     $AR rcs "$LIBS/libnsdeps.a" "$WORK/all.o"
 fi
