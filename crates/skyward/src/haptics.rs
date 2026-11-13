@@ -1,7 +1,7 @@
+use crate::waveform::{made, share, ticks, RATE, TICKS_RATE};
 use anyhow::{anyhow, ensure, Context, Result};
 use evdev::raw_stream::RawDevice;
 use skyward_config::Strength;
-use std::f32::consts::{FRAC_PI_2, TAU};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
@@ -42,7 +42,6 @@ const TICK: [(f32, f32, f32, f32, f32, f32); 6] = [
 ];
 const TICKS: [(f32, f32); 2] = [(0.0, 1.0), (55.125, 0.79)];
 const TICKS_RATE: u32 = 24000;
-/// The ticks play at this share of the drive the driver gives samples at in
 /// full, whatever the slider says: the 17 Ultra's own system plays them at
 /// 3527 mV of the 8500 mV its device tree gives.
 const TICKS_STRENGTH: f32 = 0.415;
@@ -185,11 +184,6 @@ fn takes_periodic(dev: &RawDevice) -> bool {
     dev.supported_ff().is_some_and(|ff| ff.contains(evdev::FFEffectCode::FF_PERIODIC))
 }
 
-/// The share of the click's full strength at the slider's `position`.
-fn share(strength: &Strength, position: f32) -> f32 {
-    strength.lightest * (strength.strongest / strength.lightest).powf(position.clamp(0.0, 1.0))
-}
-
 /// The motor's resonant frequency in hertz, from the file the driver says
 /// it in, in tenths of a hertz.
 fn resonance(file: &str) -> Result<f32> {
@@ -235,7 +229,6 @@ fn ticks(hz: f32) -> Vec<i8> {
     samples
 }
 
-/// A click as the driver loaded it: the slot the kernel keeps it in, and
 /// how long it plays.
 struct Loaded {
     slot: i16,
