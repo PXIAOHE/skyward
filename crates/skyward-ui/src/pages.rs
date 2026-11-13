@@ -2518,9 +2518,9 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Fetch),
-        Action::Open(Screen::Gpu),
         Action::Open(Screen::Serve),
         Action::Open(Screen::Update),
+        Action::Open(Screen::Gpu),
     ]);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
 }

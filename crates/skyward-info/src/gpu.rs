@@ -215,6 +215,27 @@ mod imp {
 
 pub use imp::probe;
 
+/// Ask the GPU and say what it answered in the kernel log, so that a phone
+/// with no computer still leaves a record of it.
+pub fn probe_and_log() -> Gpu {
+    let gpu = probe();
+    let _ = skyward_sys::kmsg(&format!(
+        "gpu: {} | library {:?} | version {:?} | renderer {:?} | gles {:?} | surfaceless {} | gbm {}",
+        summary(&gpu),
+        gpu.library,
+        gpu.version,
+        gpu.renderer,
+        gpu.gles,
+        gpu.surfaceless,
+        gpu.pieces.iter().find(|(n, _)| n.contains("libgbm")).map(|(_, t)| *t).unwrap_or(false),
+    ));
+    let _ = skyward_sys::kmsg(&format!(
+        "gpu: extensions {}",
+        gpu.extensions.iter().map(|(n, t)| format!("{}={}", n, if *t { "yes" } else { "no" })).collect::<Vec<_>>().join(" ")
+    ));
+    gpu
+}
+
 /// Whether the GPU answered at all.
 impl Gpu {
     pub fn present(&self) -> bool {

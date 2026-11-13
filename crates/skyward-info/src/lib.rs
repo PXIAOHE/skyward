@@ -174,7 +174,7 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         slot: skyward_vab::current_slot()?,
         snapshot: skyward_vab::snapshot_state()?,
         boot: Boot { unlocked, verified: skyward_block::boot_param("androidboot.verifiedbootstate")? },
-            gpu: gpu::probe(),
+            gpu: gpu::probe_and_log(),
     })
 }
 
