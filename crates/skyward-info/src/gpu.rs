@@ -6,8 +6,6 @@
 //! recovery can draw with the GPU at all, which is what a browser plugin would
 //! have to do.
 
-use std::ffi::{c_char, c_void, CString};
-use std::path::Path;
 
 /// What the GPU answered.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,6 +29,11 @@ pub struct Gpu {
     /// whether each is there.
     pub pieces: Vec<(String, bool)>,
 }
+
+#[cfg(target_os = "android")]
+mod imp {
+    use super::*;
+    use std::ffi::{c_char, c_void, CString};
 
 /// The extensions a browser's backend leans on, in the order the page shows
 /// them.
@@ -66,9 +69,6 @@ const EGL_VERSION: i32 = 0x3054;
 const EGL_EXTENSIONS: i32 = 0x3055;
 const EGL_NONE: i32 = 0x3038;
 
-#[cfg(target_os = "android")]
-mod imp {
-    use super::*;
 
     type PfnGetDisplay = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
     type PfnInitialize = unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> u32;
@@ -258,6 +258,5 @@ mod tests {
     fn the_paths_that_are_files_are_told_apart_from_the_libraries() {
         assert!(PIECES.iter().any(|p| p.ends_with(".so")));
         assert!(PIECES.iter().any(|p| p.starts_with('/')));
-        let _ = Path::new("/dev/dri/card0");
     }
 }
