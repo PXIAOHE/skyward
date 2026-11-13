@@ -1221,6 +1221,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut last_tap: Option<(f32, f32, u64)> = None;
     // Where the last finger on a page was, to tell a tap from a scroll.
     let mut page_finger: Option<(f32, f32)> = None;
+    // A page is a large thing to copy, so a new one is taken a few times a
+    // second and no more.
+    let mut page_taken = Instant::now();
     // Started for fastboot, the port goes to the phone's own fastbootd. The
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
@@ -1579,9 +1582,16 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         "the renderer did not start: {e:#}"))?,
                 }
             }
-            if let Some(page) = crate::browser::frame() {
-                skyward_ui::pages::set_page_frame(page.width, page.height, page.pixels.to_vec());
-                app.refresh();
+            if page_taken.elapsed() >= std::time::Duration::from_millis(200) {
+                if let Some(page) = crate::browser::frame() {
+                    skyward_ui::pages::set_page_frame(
+                        page.width,
+                        page.height,
+                        page.pixels.to_vec(),
+                    );
+                    app.refresh();
+                }
+                page_taken = Instant::now();
             }
         }
 
