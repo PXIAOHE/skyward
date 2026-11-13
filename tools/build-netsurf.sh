@@ -33,7 +33,12 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 echo "fetching netsurf $VERSION"
-curl -sSL -o "$WORK/netsurf.tar.gz" "$BASE/netsurf-$VERSION-src.tar.gz"
+if [ -n "${SKYWARD_NETSURF_TARBALL:-}" ] && [ -f "$SKYWARD_NETSURF_TARBALL" ]; then
+    cp "$SKYWARD_NETSURF_TARBALL" "$WORK/netsurf.tar.gz"
+else
+    curl -sSL --retry 3 --max-time 300 -o "$WORK/netsurf.tar.gz" \
+        "$BASE/netsurf-$VERSION-src.tar.gz"
+fi
 tar xzf "$WORK/netsurf.tar.gz" -C "$WORK"
 SRC="$WORK/netsurf-$VERSION"
 
@@ -82,6 +87,7 @@ cat > "$SRC/Makefile.config" <<EOF
 NETSURF_FRONTEND := framebuffer
 NETSURF_FB_FRONTEND := ram
 NETSURF_FB_FONTLIB := internal
+NETSURF_FRAMEBUFFER_RESOURCES := /skyward/netsurf
 NETSURF_USE_CURL := NO
 NETSURF_USE_OPENSSL := NO
 NETSURF_USE_JPEG := NO
@@ -169,7 +175,7 @@ if 'skyward_publish' not in text:
     text = text.replace(
         '\tbrowser_window_redraw(bw,',
         '\tvoid skyward_publish(nsfb_t *nsfb);\n'
-        '\tskyward_publish(nsfb);\n\tbrowser_window_redraw(bw,', 1)
+        '\tbrowser_window_redraw(bw,', 1)
     text += r"""
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -247,6 +253,8 @@ if 'SKYWARD_TICK' not in text:
         '\t\tif (timeout < 0 || timeout > SKYWARD_TICK) {\n'
         '\t\t\ttimeout = SKYWARD_TICK;\n'
         '\t\t}', 1)
+    text = text.replace('\tnsfb_plot_line(nsfb, &line, &pen);\n\t}',
+        '\tnsfb_plot_line(nsfb, &line, &pen);\n\t}\n\n\tskyward_publish(nsfb);', 1)
     text = text.replace('static void framebuffer_run(void)',
         '#define SKYWARD_TICK 200\n\nstatic void framebuffer_run(void)', 1)
     open(path, 'w').write(text)
@@ -269,4 +277,8 @@ echo "building netsurf $VERSION"
 
 mkdir -p "$OUT"
 cp "$SRC/nsfb" "$OUT/"
+# What the frontend reads at run time: its messages, stylesheets and icons.
+mkdir -p "$OUT/res"
+cp "$SRC"/frontends/framebuffer/res/Messages "$OUT/res/"
+cp "$SRC"/frontends/framebuffer/res/*.css "$OUT/res/" 2>/dev/null || true
 echo "-> $OUT/nsfb ($(wc -c < "$OUT/nsfb") bytes)"

@@ -1571,10 +1571,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if app.screen() == Screen::Browser {
             if !crate::browser::running() {
                 let _ = crate::browser::prepare(w, h);
-                match crate::browser::start(w, h) {
-                    Ok(()) => {
-                        let _ = crate::browser::open("about:welcome");
-                    }
+                match crate::browser::start(w, h, "about:welcome") {
+                    Ok(()) => {}
                     Err(e) => skyward_sys::kmsg(&format!(
                         "the renderer did not start: {e:#}"))?,
                 }

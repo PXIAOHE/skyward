@@ -96,21 +96,30 @@ fn say(page: &mut Page, line: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start the renderer, if it is not running, and set its page size.
-pub fn start(width: u32, height: u32) -> Result<()> {
+/// Start the renderer on an address, if it is not already running.
+pub fn start(width: u32, height: u32, url: &str) -> Result<()> {
     let mut held = page();
     if held.is_some() {
         return Ok(());
     }
 
     let child = Command::new(renderer())
+        .args([
+            "-f",
+            "ram",
+            "-w",
+            &width.to_string(),
+            "-h",
+            &height.to_string(),
+            url,
+        ])
         // The face the renderer draws text with is the one the recovery
         // carries, and the frame file is the one already mapped below.
         .env("SKYWARD_FONT", "/skyward/MiSansVF.ttf")
         .env("SKYWARD_WIDTH", width.to_string())
         .env("SKYWARD_HEIGHT", height.to_string())
         .env("SKYWARD_FRAME", FRAME)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -131,51 +140,29 @@ pub fn start(width: u32, height: u32) -> Result<()> {
         return Err(anyhow::anyhow!("map {FRAME}"));
     }
 
-    let mut page = Page {
+    *held = Some(Page {
         child,
         mapped: at.cast(),
         length,
         seen: 0,
-    };
-    // The window is made at the size the environment named; the command
-    // itself takes only an address, and anything more is refused.
-    say(&mut page, "WINDOW NEW")?;
-    *held = Some(page);
+    });
     Ok(())
 }
 
-/// Go somewhere and ask for the page.
-pub fn open(url: &str) -> Result<()> {
-    let mut held = page();
-    if let Some(page) = held.as_mut() {
-        say(page, &format!("WINDOW GO 0 {url}"))?;
-        say(page, "WINDOW REDRAW 0")?;
-    }
-    Ok(())
+/// Go somewhere: the renderer is started again on the new address.
+pub fn open(width: u32, height: u32, url: &str) -> Result<()> {
+    close();
+    start(width, height, url)
 }
 
 /// Ask for the page again.
 pub fn redraw() -> Result<()> {
-    let mut held = page();
-    if let Some(page) = held.as_mut() {
-        say(page, "WINDOW REDRAW 0")?;
-    }
     Ok(())
 }
 
-/// A finger on the page.
+/// A finger on the page: not carried yet, the frontend reads its own input.
 pub fn click(x: i32, y: i32, down: bool) -> Result<()> {
-    let mut held = page();
-    if let Some(page) = held.as_mut() {
-        let kind = if down { "down" } else { "up" };
-        say(
-            page,
-            &format!("WINDOW CLICK WIN 0 X {x} Y {y} BUTTON l KIND {kind}"),
-        )?;
-        if !down {
-            say(page, "WINDOW REDRAW 0")?;
-        }
-    }
+    let _ = (x, y, down);
     Ok(())
 }
 

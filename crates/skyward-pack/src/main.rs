@@ -58,6 +58,9 @@ enum Cmd {
         /// The renderer the browser page runs, when this build carries one.
         #[arg(long)]
         browser: Option<PathBuf>,
+        /// What that renderer reads at run time: its messages and stylesheets.
+        #[arg(long)]
+        browser_res: Option<PathBuf>,
         /// The device configuration, devices/<codename>.toml.
         #[arg(long)]
         config: PathBuf,
@@ -108,7 +111,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, config, browser, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, browser, browser_res, font, mono, mono_license, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
@@ -131,7 +134,23 @@ fn main() -> Result<()> {
             rd.add(paths::CONFIG, 0o644, read(&config)?)?;
             // A page needs a renderer; without one the page says so.
             if let Some(browser) = &browser {
-                rd.add("system/bin/nsmonkey", 0o755, read(browser)?)?;
+                rd.add("system/bin/nsfb", 0o755, read(browser)?)?;
+            }
+            // A browser without its messages starts halfway and never draws a
+            // page, so they travel with it.
+            if let Some(res) = &browser_res {
+                for entry in std::fs::read_dir(res)? {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_file() {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    rd.add(
+                        &format!("skyward/netsurf/{name}"),
+                        0o644,
+                        std::fs::read(entry.path())?,
+                    )?;
+                }
             }
             rd.add(paths::FONT, 0o644, read(&font)?)?;
             rd.add(paths::MONO, 0o644, read(&mono)?)?;

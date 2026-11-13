@@ -104,7 +104,8 @@ jobs:
           HOSTCC=cc sh tools/build-netsurf.sh \
               "$CLANG" "$BIN/llvm-ar" netsurflibs netsurf
           # The packer takes it from here, next to the other programs.
-          cp netsurf/nsmonkey tools/
+          cp netsurf/nsfb tools/
+          cp -R netsurf/res tools/res
       - uses: actions/upload-artifact@v7
         with:
           name: netsurf
@@ -201,7 +202,7 @@ jobs:
           name="skyward-$version-$DEVICE-$STOCK"
           mkdir out
           tools/skyward-pack recovery --stock stock/recovery.img --binary tools/skyward --system-init tools/system-init \
-            --config "devices/$DEVICE.toml" --browser tools/nsmonkey --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
+            --config "devices/$DEVICE.toml" --browser tools/nsfb --browser-res tools/res --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
             --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
       # The image is the whole partition, flashed as it is, and most of it
