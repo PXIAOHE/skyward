@@ -1562,6 +1562,7 @@ fn nezha(cfg: &DeviceConfig) -> DeviceInfo {
         slot: Some(Slot::B),
         snapshot: SnapshotState::None,
         boot: Boot { unlocked: Some(true), verified: Some("orange".into()) },
+        gpu: Default::default(),
     }
 }
 
