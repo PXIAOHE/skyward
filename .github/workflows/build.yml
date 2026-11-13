@@ -94,6 +94,20 @@ jobs:
           echo "using $CLANG"
           HOSTCC=cc sh tools/build-netsurf-libs.sh \
               "$CLANG" "$BIN/llvm-ar" netsurflibs
+      # NetSurf itself, over those libraries, with its HTTP fetcher replaced
+      # by one that asks the program around it for the bytes.
+      - name: Build NetSurf for the phone
+        run: |
+          NDK="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
+          CLANG=$(find "$NDK/toolchains/llvm/prebuilt" -name 'aarch64-linux-android30-clang' | head -1)
+          BIN=$(dirname "$CLANG")
+          HOSTCC=cc sh tools/build-netsurf.sh \
+              "$CLANG" "$BIN/llvm-ar" netsurflibs netsurf
+      - uses: actions/upload-artifact@v7
+        with:
+          name: netsurf
+          path: netsurf/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
           name: netsurflibs
