@@ -20,6 +20,7 @@ shift 3
 HOSTCC=${HOSTCC:-cc}
 
 BASE=https://download.netsurf-browser.org/libs/releases
+HERE=$(cd "$(dirname "$0")" && pwd)
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -53,6 +54,11 @@ build() {
 
     root="$WORK/$name-$version"
     incs="-I$root/src -I$root/include $(incs_all)"
+    # libnsfb asks for libnslog's logging header; a recovery has nowhere to
+    # send a browser's logging, so a stub stands in for it.
+    if [ "$name" = "libnsfb" ]; then
+        incs="-I$HERE/netsurf/stub $incs"
+    fi
 
     # The generator libcss runs to make its property parsers has a main of
     # its own, so it is not part of the library.
