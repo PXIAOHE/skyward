@@ -325,6 +325,46 @@ nserror skyward_plot_bitmap(const struct redraw_context *ctx,
 	return NSERROR_OK;
 }
 
+/* How wide a run of text comes out, for the layout that places it. */
+int skyward_text_width(const char *text, size_t length, int px)
+{
+	int run = 0;
+	size_t at = 0;
+	while (at < length) {
+		unsigned char c = (unsigned char)text[at];
+		size_t used = 1;
+		uint32_t cp = c;
+		if (c >= 0x80) {
+			if ((c & 0xe0) == 0xc0 && at + 1 < length) {
+				cp = (uint32_t)(c & 0x1f) << 6 |
+						((unsigned char)text[at + 1] & 0x3f);
+				used = 2;
+			} else if ((c & 0xf0) == 0xe0 && at + 2 < length) {
+				cp = (uint32_t)(c & 0x0f) << 12 |
+						((unsigned char)text[at + 1] & 0x3f) << 6 |
+						((unsigned char)text[at + 2] & 0x3f);
+				used = 3;
+			} else if ((c & 0xf8) == 0xf0 && at + 3 < length) {
+				cp = (uint32_t)(c & 0x07) << 18 |
+						((unsigned char)text[at + 1] & 0x3f) << 12 |
+						((unsigned char)text[at + 2] & 0x3f) << 6 |
+						((unsigned char)text[at + 3] & 0x3f);
+				used = 4;
+			}
+		}
+		if (face_data != NULL) {
+			int advance = 0, bearing = 0;
+			float scale = stbtt_ScaleForPixelHeight(&face, (float)px);
+			stbtt_GetCodepointHMetrics(&face, (int)cp, &advance, &bearing);
+			run += (int)(advance * scale);
+		} else {
+			run += px / 2;
+		}
+		at += used;
+	}
+	return run;
+}
+
 static void draw_glyph(const plot_font_style_t *fstyle, uint32_t codepoint,
 		int x, int y, int size)
 {

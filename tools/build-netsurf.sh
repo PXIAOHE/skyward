@@ -45,6 +45,8 @@ cp "$HERE/netsurf/skyward-fetch.h" "$SRC/content/fetchers/skyward.h"
 # Drawing lands in our own buffer instead of being logged, and the finished
 # frame is handed over once the window has been redrawn.
 cp "$HERE/netsurf/skyward-plot.c" "$SRC/frontends/monkey/plot.c"
+# Text is measured with the same face it is drawn with.
+cp "$HERE/netsurf/skyward-layout.c" "$SRC/frontends/monkey/layout.c"
 python3 - "$SRC/frontends/monkey/browser.c" <<'PATCH'
 import sys
 path = sys.argv[1]
@@ -52,6 +54,7 @@ text = open(path).read()
 if 'skyward_frame_publish' not in text:
     text = text.replace(
         '\tbrowser_window_redraw(gw->bw, gw->scrollx, gw->scrolly, &clip, &ctx);',
+        '\t{ FILE *d = fopen("/tmp/skyplot.log","a"); if (d) { fprintf(d, "redraw has_content=%d x=%d y=%d w=%d h=%d\\n", (int)browser_window_has_content(gw->bw), gw->scrollx, gw->scrolly, (int)gw->width, (int)gw->height); fclose(d); } }\n'
         '\tbrowser_window_redraw(gw->bw, gw->scrollx, gw->scrolly, &clip, &ctx);\n'
         '\tskyward_frame_publish();')
     text = text.replace(
