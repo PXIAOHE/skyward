@@ -42,6 +42,9 @@ SRC="$WORK/netsurf-$VERSION"
 cp "$HERE/netsurf/skyward-fetch.c" "$SRC/content/fetchers/skyward.c"
 cp "$HERE/netsurf/skyward-fetch.h" "$SRC/content/fetchers/skyward.h"
 
+# Drawing lands in our own buffer instead of being logged.
+cp "$HERE/netsurf/skyward-plot.c" "$SRC/frontends/monkey/plot.c"
+
 sed -i \
     -e 's|#include "content/fetchers/curl.h"|#include "content/fetchers/skyward.h"|' \
     -e 's|ret = fetch_curl_register();|ret = fetch_skyward_register();|' \
@@ -74,8 +77,8 @@ NETSURF_USE_LIBICONV_PLUG := YES
 NETSURF_STRIP_BINARY := NO
 CC := $CC
 AR := $AR
-CFLAGS += $INCS -I$LIBS/include -Wno-error $*
-LDFLAGS += -L$LIBS -lnsdeps
+CFLAGS += $INCS -I$LIBS/include -I$HERE/netsurf -Wno-error $*
+LDFLAGS += -L$LIBS -lnsdeps -lm
 EOF
 
 # pkg-config is how the makefiles look for the libraries; tell it where the
