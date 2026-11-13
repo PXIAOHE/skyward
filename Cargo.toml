@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/skyward",
     "crates/skyward-config",
@@ -27,7 +27,7 @@ members = [
 
 [workspace.package]
 version = "0.2.1"
-edition = "2021"
+edition = "2024"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]

@@ -171,22 +171,22 @@ fn ready(s: &Service) -> Result<()> {
     };
     let until = Instant::now() + READY_TIMEOUT;
     loop {
-        if let Some(name) = &s.ready_property {
-            if skyward_sys::prop(name).is_some_and(|v| !v.is_empty()) {
-                return Ok(());
-            }
+        if let Some(name) = &s.ready_property
+            && skyward_sys::prop(name).is_some_and(|v| !v.is_empty())
+        {
+            return Ok(());
         }
         // Either directory may itself be starting again, and until it
         // answers nothing can be looked up in it.
-        if let Some(name) = &s.ready_service {
-            if registered(name) {
-                return Ok(());
-            }
+        if let Some(name) = &s.ready_service
+            && registered(name)
+        {
+            return Ok(());
         }
-        if let Some(name) = &s.ready_hardware_service {
-            if registered_hardware(name) {
-                return Ok(());
-            }
+        if let Some(name) = &s.ready_hardware_service
+            && registered_hardware(name)
+        {
+            return Ok(());
         }
         if Instant::now() >= until {
             bail!("{} {waited_on} in {} seconds", s.path, READY_TIMEOUT.as_secs());

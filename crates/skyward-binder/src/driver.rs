@@ -249,7 +249,7 @@ impl Drop for Binder {
 unsafe fn call(file: &File, request: u32, arg: *mut libc::c_void) -> Result<()> {
     // The driver answers a signal with EINTR and expects the call again.
     loop {
-        if libc::ioctl(file.as_raw_fd(), request as libc::Ioctl, arg) >= 0 {
+        if unsafe { libc::ioctl(file.as_raw_fd(), request as libc::Ioctl, arg) } >= 0 {
             return Ok(());
         }
         let err = std::io::Error::last_os_error();

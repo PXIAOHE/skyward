@@ -387,10 +387,10 @@ fn protectors(user: u32) -> Result<Vec<crate::user::Protector>> {
     let mut ids = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
         let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
-        if path.extension().is_some_and(|e| e == "spblob") {
-            if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
-                ids.push(id.to_string());
-            }
+        if path.extension().is_some_and(|e| e == "spblob")
+            && let Some(id) = path.file_stem().and_then(|s| s.to_str())
+        {
+            ids.push(id.to_string());
         }
     }
     anyhow::ensure!(!ids.is_empty(), "{} holds none of user {user}'s blobs", dir.display());
