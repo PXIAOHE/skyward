@@ -1,0 +1,15 @@
+[package]
+name = "skyward-eglprobe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Run on the phone to see whether the GPU's EGL can be had from a recovery:
+# nothing links against EGL at build time, the library is opened by name.
+[[bin]]
+name = "eglprobe"
+path = "src/main.rs"
+
+[dependencies]
+libc = { workspace = true }

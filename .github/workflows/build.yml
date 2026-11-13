@@ -73,6 +73,19 @@ jobs:
           mkdir tools
           cp target/aarch64-linux-android/release/skyward target/release/skyward-pack tools/
           cp target/system-init/aarch64-linux-android/release/system-init tools/
+      # Says whether the GPU's EGL can be had from the phone: run it in the
+      # recovery, or in the system, to see what the driver answers.
+      - name: Build the probe for the phone's GPU
+        run: |
+          NDK="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
+          CLANG=$(find "$NDK/toolchains/llvm/prebuilt" -name 'aarch64-linux-android30-clang' | head -1)
+          echo "using $CLANG"
+          "$CLANG" -O2 -static -o eglprobe/eglprobe eglprobe/probe.c -ldl
+      - uses: actions/upload-artifact@v7
+        with:
+          name: eglprobe
+          path: eglprobe/eglprobe
+          if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
           name: tools
