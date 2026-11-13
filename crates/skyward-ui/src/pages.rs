@@ -7,6 +7,7 @@ use crate::app::{
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
+use crate::color::Rgba;
 use crate::editor;
 use crate::files;
 use crate::fmt::{self, Verb};
@@ -83,6 +84,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Advanced => advanced(cx),
         Screen::Files => files(cx),
         Screen::Fetch => fetch(cx),
+        Screen::Browser => browser(cx),
         Screen::Serve => serve(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
@@ -2510,6 +2512,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(SERVE)).icon(GREEN, Icon::Globe),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
         Row::new(l.pick(["图形诊断", "圖形診斷", "Graphics check"])).icon(PURPLE, Icon::Phone),
+        Row::new(l.pick(["浏览器", "瀏覽器", "Browser"])).icon(BLUE, Icon::Globe),
     ]);
     let out = hits(&tools.rows, &[
         Action::Open(Screen::Files),
@@ -2521,6 +2524,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Serve),
         Action::Open(Screen::Update),
         Action::Open(Screen::Gpu),
+        Action::Open(Screen::Browser),
     ]);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
 }
@@ -4418,4 +4422,44 @@ mod tests {
         assert_eq!(capitalized(Lang::En, "empties the data partition"), "Empties the data partition");
         assert_eq!(capitalized(Lang::Hans, "清空 data 分区"), "清空 data 分区");
     }
+}
+
+/// The page NetSurf last drew, and the size it drew it at.
+static PAGE_FRAME: std::sync::OnceLock<std::sync::Mutex<Option<(usize, usize, Vec<u8>)>>> =
+    std::sync::OnceLock::new();
+
+/// Take a page that NetSurf has finished drawing.
+pub fn set_page_frame(width: usize, height: usize, pixels: Vec<u8>) {
+    let held = PAGE_FRAME.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut slot) = held.lock() {
+        *slot = Some((width, height, pixels));
+    }
+}
+
+/// A page as NetSurf drew it, as much of it as the screen has room for.
+pub fn browser(cx: &Ctx) -> Frame {
+    let t = cx.t;
+    let (w, h) = (t.m.w as u32, t.m.h as u32);
+    let mut c = Canvas::filled(w, h, t.pal.bg);
+
+    let held = PAGE_FRAME.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(slot) = held.lock() {
+        if let Some((pw, ph, pixels)) = slot.as_ref() {
+            let rows = h.min(*ph as u32);
+            let cols = w.min(*pw as u32);
+            for y in 0..rows {
+                let row = y as usize * *pw;
+                c.paint_row(y, |x| {
+                    if (x as u32) >= cols {
+                        return t.pal.bg;
+                    }
+                    let at = (row + x) * 4;
+                    Rgba::rgb(pixels[at], pixels[at + 1], pixels[at + 2])
+                });
+            }
+        }
+    }
+
+    let out = Vec::new();
+    Frame::new(t, c, out, "Browser", t.m.content_top)
 }

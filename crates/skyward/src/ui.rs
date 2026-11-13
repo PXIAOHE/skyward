@@ -1566,6 +1566,25 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             app.set_fastboot(running, link);
             port_at = Instant::now();
         }
+        // A page from the renderer: started when the page is first shown, and
+        // taken as it is drawn.
+        if app.screen() == Screen::Browser {
+            if !crate::browser::running() {
+                let _ = crate::browser::prepare(w, h);
+                match crate::browser::start(w, h) {
+                    Ok(()) => {
+                        let _ = crate::browser::open("about:welcome");
+                    }
+                    Err(e) => skyward_sys::kmsg(&format!(
+                        "the renderer did not start: {e:#}"))?,
+                }
+            }
+            if let Some(page) = crate::browser::frame() {
+                skyward_ui::pages::set_page_frame(page.width, page.height, page.pixels.to_vec());
+                app.refresh();
+            }
+        }
+
         let panel = app.panel(now);
         let mut shown = false;
         if panel.is_some() {

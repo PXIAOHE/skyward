@@ -68,6 +68,8 @@ pub enum Screen {
     /// Serving the files in a folder to another device on the network, and the
     /// phone's own access point for one to join.
     Serve,
+    /// A page drawn by NetSurf, running as a child of the recovery.
+    Browser,
     Files,
     /// One file, and what can be done with it.
     FileInfo,
