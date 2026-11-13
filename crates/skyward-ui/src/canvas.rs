@@ -265,6 +265,25 @@ impl Canvas {
         }
     }
 
+    /// Copy a page of pixels in, row by row, from the layout the frontend
+    /// draws in: four bytes a pixel, blue first.
+    pub fn blit_bgra(&mut self, width: u32, height: u32, src: &[u8], src_stride: usize) {
+        let cols = width.min(self.span);
+        let rows = height.min(self.bottom - self.top);
+        for y in 0..rows {
+            let start = self.at(self.left as i32, (self.top + y) as i32);
+            let row = &mut self.data[start..start + (cols * 4) as usize];
+            let from = &src[y as usize * src_stride..];
+            for x in 0..cols as usize {
+                let p = &from[x * 4..x * 4 + 4];
+                row[x * 4] = p[2];
+                row[x * 4 + 1] = p[1];
+                row[x * 4 + 2] = p[0];
+                row[x * 4 + 3] = 255;
+            }
+        }
+    }
+
     pub fn blend(&mut self, x: i32, y: i32, color: Rgba, cov: f32) {
         if let Some(p) = self.px(x, y) {
             blend_over(p, color, cov);

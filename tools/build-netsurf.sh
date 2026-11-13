@@ -258,7 +258,9 @@ if 'SKYWARD_TICK' not in text:
         '\t\t\ttimeout = SKYWARD_TICK;\n'
         '\t\t}\n'
         '\t\tvoid skyward_input_poll(fbtk_widget_t *fbtk);\n'
-        '\t\tskyward_input_poll(fbtk);', 1)
+        '\t\tvoid skyward_idle(void);\n'
+        '\t\tskyward_input_poll(fbtk);\n'
+        '\t\tskyward_idle();', 1)
     text = text.replace('\tnsfb_plot_line(nsfb, &line, &pen);\n\t}',
         '\tnsfb_plot_line(nsfb, &line, &pen);\n\t}\n\n\tskyward_publish(nsfb);', 1)
     text = text.replace('static void framebuffer_run(void)',

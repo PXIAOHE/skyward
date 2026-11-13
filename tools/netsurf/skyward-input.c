@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 
@@ -147,4 +148,12 @@ void skyward_input_poll(fbtk_widget_t *fbtk)
 		connected = -1;
 		used = 0;
 	}
+}
+
+/* The loop has nothing to wait on with a memory surface, so it would spin;
+ * a short sleep leaves the processor to the recovery beside it. */
+void skyward_idle(void)
+{
+	struct timespec pause = { 0, 20 * 1000 * 1000 };
+	nanosleep(&pause, NULL);
 }
