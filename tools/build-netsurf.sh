@@ -18,6 +18,12 @@ OUT=${4:?output directory}
 shift 4
 HOSTCC=${HOSTCC:-cc}
 
+# The build runs inside the extracted tree, so every path it is given has to
+# hold from there.
+LIBS=$(cd "$LIBS" && pwd)
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+
 VERSION=3.11
 BASE=https://download.netsurf-browser.org/netsurf/releases/source
 
