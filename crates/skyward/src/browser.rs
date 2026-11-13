@@ -23,6 +23,7 @@ use anyhow::{Context, Result};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -160,10 +161,43 @@ pub fn redraw() -> Result<()> {
     Ok(())
 }
 
-/// A finger on the page: not carried yet, the frontend reads its own input.
-pub fn click(x: i32, y: i32, down: bool) -> Result<()> {
-    let _ = (x, y, down);
+/// Where the frontend listens for a finger.
+fn input_path() -> String {
+    std::env::var("SKYWARD_INPUT").unwrap_or_else(|_| "/tmp/skyward-input".to_string())
+}
+
+fn say_to_renderer(line: &str) -> Result<()> {
+    static STREAM: OnceLock<Mutex<Option<UnixStream>>> = OnceLock::new();
+    let held = STREAM.get_or_init(|| Mutex::new(None));
+    let mut slot = held.lock().unwrap_or_else(|poison| poison.into_inner());
+
+    if slot.is_none() {
+        match UnixStream::connect(input_path()) {
+            Ok(stream) => *slot = Some(stream),
+            Err(_) => return Ok(()), // the renderer is not listening yet
+        }
+    }
+    if let Some(stream) = slot.as_mut() {
+        if stream.write_all(line.as_bytes()).is_err() {
+            *slot = None;
+        }
+    }
     Ok(())
+}
+
+/// A finger on the page.
+pub fn press(x: i32, y: i32) -> Result<()> {
+    say_to_renderer(&format!("m {x} {y}\nd {x} {y}\n"))
+}
+
+/// The finger lifted.
+pub fn release(x: i32, y: i32) -> Result<()> {
+    say_to_renderer(&format!("u {x} {y}\n"))
+}
+
+/// The wheel, one notch.
+pub fn scroll(down: bool) -> Result<()> {
+    say_to_renderer(if down { "w down\n" } else { "w up\n" })
 }
 
 /// The page as it stands, or nothing when it has not moved since last look.

@@ -1219,6 +1219,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // The last tap taken on a dark panel: where it landed and when, for the
     // double tap that lights the page.
     let mut last_tap: Option<(f32, f32, u64)> = None;
+    // Where the last finger on a page was, to tell a tap from a scroll.
+    let mut page_finger: Option<(f32, f32)> = None;
     // Started for fastboot, the port goes to the phone's own fastbootd. The
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
@@ -2460,7 +2462,37 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     answer(asked, fastboot)
                 }
                 Incoming::Input(Event::Touch(t, at)) => {
-                    if app.panel_lit() {
+                    // The top band stays the recovery's own, so the way back
+                    // is still there; below it the page takes the finger.
+                    let on_page = match t {
+                        Touch::Down(_, y) => y >= 200.0,
+                        Touch::Move(_, y) => y >= 200.0,
+                        Touch::Up => page_finger.is_some(),
+                    };
+                    if app.screen() == Screen::Browser && app.panel_lit() && on_page {
+                        // The frontend is what knows where its links are.
+                        match t {
+                            Touch::Down(x, y) => {
+                                page_finger = Some((x, y));
+                                let _ = crate::browser::press(x as i32, y as i32);
+                            }
+                            Touch::Move(x, y) => {
+                                if let Some((_, was)) = page_finger {
+                                    if (y - was).abs() >= 60.0 {
+                                        let _ = crate::browser::scroll(y < was);
+                                        page_finger = Some((x, y));
+                                    }
+                                }
+                            }
+                            Touch::Up => {
+                                if let Some((x, y)) = page_finger {
+                                    let _ = crate::browser::release(x as i32, y as i32);
+                                }
+                                page_finger = None;
+                            }
+                        }
+                        Vec::new()
+                    } else if app.panel_lit() {
                         // A lit panel is worked by touch as usual, and no tap
                         // is held over from before it lit.
                         last_tap = None;
