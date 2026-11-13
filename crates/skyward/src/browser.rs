@@ -104,6 +104,10 @@ pub fn start(width: u32, height: u32) -> Result<()> {
     }
 
     let child = Command::new(renderer())
+        // The face the renderer draws text with is the one the recovery
+        // carries, and the frame file is the one already mapped below.
+        .env("SKYWARD_FONT", "/skyward/MiSansVF.ttf")
+        .env("SKYWARD_FRAME", FRAME)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
