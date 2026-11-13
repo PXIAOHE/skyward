@@ -159,6 +159,79 @@ Libs: -L$LIBS -lnsfb
 Cflags: -I$NSFB/include
 PC
 
+# The page as libnsfb drew it is handed over after each redraw: the frontend
+# keeps its pixels in the memory surface, and one file carries them out.
+python3 - "$SRC/frontends/framebuffer/gui.c" <<'PATCH'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+if 'skyward_publish' not in text:
+    text = text.replace(
+        '\tbrowser_window_redraw(bw,',
+        '\tvoid skyward_publish(nsfb_t *nsfb);\n'
+        '\tskyward_publish(nsfb);\n\tbrowser_window_redraw(bw,', 1)
+    text += r"""
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <libnsfb.h>
+#include <libnsfb_plot.h>
+
+/* One page of pixels, handed to the program around NetSurf through a file
+ * whose last word changes whenever the pixels do. */
+void skyward_publish(nsfb_t *nsfb)
+{
+	static uint8_t *at;
+	static size_t length;
+	static uint64_t seq;
+
+	uint8_t *pixels = NULL;
+	int stride = 0, width = 0, height = 0;
+	nsfb_get_geometry(nsfb, &width, &height, NULL);
+	nsfb_get_buffer(nsfb, &pixels, &stride);
+	if (pixels == NULL || width <= 0 || height <= 0) {
+		return;
+	}
+
+	if (at == NULL) {
+		const char *path = getenv("SKYWARD_FRAME");
+		if (path == NULL) {
+			path = "/tmp/skyward-frame";
+		}
+		length = 32 + (size_t)width * height * 4;
+		int fd = open(path, O_RDWR | O_CREAT, 0666);
+		if (fd < 0) {
+			return;
+		}
+		ftruncate(fd, (off_t)length);
+		void *mapped = mmap(NULL, length, PROT_READ | PROT_WRITE,
+				MAP_SHARED, fd, 0);
+		close(fd);
+		if (mapped == MAP_FAILED) {
+			return;
+		}
+		at = mapped;
+		uint32_t *header = (uint32_t *)at;
+		header[0] = 0x534b5946u;   /* "SKYF" */
+		header[1] = (uint32_t)width;
+		header[2] = (uint32_t)height;
+		header[3] = (uint32_t)stride;
+	}
+
+	uint8_t *to = at + 32;
+	for (int y = 0; y < height; y++) {
+		memcpy(to + (size_t)y * width * 4,
+			pixels + (size_t)y * stride, (size_t)width * 4);
+	}
+	__atomic_store_n((uint64_t *)(at + 16), ++seq, __ATOMIC_RELEASE);
+}
+"""
+    open(path, 'w').write(text)
+PATCH
+
 # One archive for the whole stack: the libraries call each other in both
 # directions, and a single archive takes the order out of the link line.
 if [ ! -f "$LIBS/libnsdeps.a" ]; then
