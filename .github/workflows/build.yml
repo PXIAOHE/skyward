@@ -59,6 +59,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
+      # This branch carries crates upstream has not, so the lock file it was
+      # handed is short of them.
+      - name: Bring the lock file up to date
+        run: cargo ndk -t arm64-v8a --platform 30 metadata --format-version 1 > /dev/null
       - name: Build the recovery service for the phone
         run: |
           # The build is named the way the release is, so that a build can
