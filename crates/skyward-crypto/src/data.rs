@@ -518,9 +518,19 @@ fn note_opened(user: u32, protector: &crate::user::Protector) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    // The file is kept across starts, so it is cut down rather than left to
+    // grow: what tells which path a phone took is the last few lines.
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > 8192
+    {
+        let _ = std::fs::remove_file(path);
+    }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
-        let _ = writeln!(file, "user {user}: opened {} ({bound})", protector.id);
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = writeln!(file, "{secs} user {user}: opened {} ({bound})", protector.id);
     }
 }
 
