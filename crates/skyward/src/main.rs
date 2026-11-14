@@ -596,7 +596,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     // phone keeps its description of nowhere the recovery can read. It goes
     // where the recovery keeps its own descriptions, which the directory is
     // read from whole.
-    for (n, manifest) in services.iter().filter_map(|s| s.manifest.as_ref()).enumerate() {
+    for (n, manifest) in services.iter().filter_map(|s| s.service.manifest.as_ref()).enumerate() {
         let path = format!("/system/etc/vintf/manifest/skyward-manifest-{n}.xml");
         std::fs::write(&path, manifest).with_context(|| format!("write {path}"))?;
     }
@@ -841,15 +841,13 @@ fn recovery() -> Result<()> {
             let mut programs = cfg.services.clone();
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
                 let cfg = cfg.clone();
-                let started = programs.clone();
-                let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::Builder::new().name("prepare".into()).spawn(move || {
                     let done = booted_slot()
                         .map_err(|e| anyhow::anyhow!("{e:#}"))
                         .and_then(|slot| prepare(&cfg, slot));
                     match done {
                         Ok(more) => {
-                            let _ = tx.send(more);
+                            let _ = skyward_sys::kmsg(&format!("{} of the phone's programs are started", more.len()));
                         }
                         Err(e) => {
                             let _ = skyward_sys::kmsg(&format!("devices not brought up: {e:#}"));
@@ -857,9 +855,6 @@ fn recovery() -> Result<()> {
                     }
                     mark_prepared();
                 })?;
-                // The programs the partitions describe are known once the
-                // devices are up; the page waits for them where it needs to.
-                let _ = (started, rx);
             } else {
                 mark_prepared();
             }
@@ -926,7 +921,7 @@ pub(crate) fn wait_prepared() {
 }
 
 #[cfg(target_os = "android")]
-fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_config::Service>> {
+fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_programs::secure::Started>> {
     match skyward_vab::mount_partitions(slot) {
         Ok(mounts) => {
             for d in &mounts.damaged {
@@ -950,8 +945,6 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_co
             Ok(Vec::new())
         }
     }
-    skyward_ui::progress::reached(skyward_ui::progress::READY);
-    Ok(programs)
 }
 
 fn info(config: &str) -> Result<()> {
