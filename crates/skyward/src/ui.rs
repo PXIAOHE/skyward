@@ -1,4 +1,6 @@
 use crate::backup;
+use crate::fetch;
+use crate::wlanmem;
 use crate::decrypt::{self, Decryptor};
 use crate::filework;
 use crate::haptics::Haptics;
@@ -1219,8 +1221,11 @@ struct Pages<'a> {
     portal_retry_at: Option<u64>,
     /// What another device typed there, waiting to be read.
     fetch_portal: Option<String>,
-    /// The page a browser frontend draws, and the process drawing it.
-    browser: Option<crate::browser::Renderer>,
+    /// The file server, while a folder is served.
+    server: Option<fileserve::Server>,
+    /// The screen lock kept from an earlier start, to open the data partition
+    /// with as the recovery starts.
+    remembered: Option<Vec<u8>>,
     /// Asking the update server, and downloading the full package.
     checker: Option<updates::Worker>,
     downloader: Option<updates::Worker>,
@@ -1436,7 +1441,8 @@ impl<'a> Pages<'a> {
             portal: None,
             portal_retry_at: None,
             fetch_portal: None,
-            browser: None,
+            server: None,
+            remembered: None,
             checker: None,
             downloader: None,
             skyward_checker: None,
@@ -2688,6 +2694,51 @@ impl Pages<'_> {
                 let slot = self.info.slot.context("only an A/B phone merges an update")?;
                 skyward_sys::kmsg("merging the update, as the update page asked")?;
                 self.merger = Some(merge::Merger::start(slot, true)?);
+            }
+            Effect::Serve(root) => {
+                self.server = None;
+                match root {
+                    Some(root) => {
+                        let at = match skyward_net::iface::address(self.wire()).ok().flatten() {
+                            Some(ip) => format!("http://{ip}:{}/", fileserve::PORT),
+                            None => format!("http://<phone>:{}/", fileserve::PORT),
+                        };
+                        skyward_sys::kmsg(&format!("serving {root} at {at}"))?;
+                        self.server = Some(fileserve::Server::start(PathBuf::from(root))?);
+                        self.app.serving_at(at);
+                    }
+                    None => {
+                        skyward_sys::kmsg("the file server stopped")?;
+                    }
+                }
+            }
+            Effect::Fetch(url) => {
+                ensure!(self.fetcher.is_none(), "a file is being fetched already");
+                let name = fetch::name_of(&url);
+                let path = Path::new(skyward_crypto::data::SDCARD).join(DOWNLOADS).join(name);
+                skyward_sys::kmsg(&format!("fetching {url} into {}", path.display()))?;
+                self.fetcher = Some(fetch::Worker::start(url, path, self.servers.clone())?);
+            }
+            Effect::StopFetch => {
+                if let Some(f) = &self.fetcher {
+                    f.stop();
+                }
+            }
+            Effect::Remember(on) => {
+                // Turned off: what was kept goes at once, so the next start
+                // asks again.
+                if !on {
+                    self.remembered = None;
+                    if let Err(e) = remember::forget() {
+                        skyward_sys::kmsg(&format!("the kept screen lock was not forgotten: {e:#}"))?;
+                    }
+                }
+            }
+            Effect::WlanAuto(on) => {
+                wlanmem::set_auto(on)?;
+            }
+            Effect::WlanKeep(on) => {
+                wlanmem::set_keep(on)?;
             }
             Effect::Wlan(on) => wlan_worker(&self.wlan)?.send(if on { wlan::Command::On } else { wlan::Command::Off }),
             Effect::ScanWlan => {
