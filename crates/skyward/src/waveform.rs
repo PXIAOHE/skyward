@@ -23,7 +23,7 @@ const BRAKE_SWINGS: f32 = 1.5;
 /// setting off and dying away more gently. Each of the ticks is when it
 /// starts, in milliseconds, and its share of the tick in full. For another
 /// motor the times go in proportion. They are made at [`TICKS_RATE`].
-const TICKS_HZ: f32 = 172.7;
+pub(crate) const TICKS_HZ: f32 = 172.7;
 const TICK: [(f32, f32, f32, f32, f32, f32); 6] = [
     (0.125, 1.717, 2.375, 0.531, 2.6, 1.0),
     (2.375, 3.45, 4.5, -1.0, 1.1, 1.0),

@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn a_made_click_drives_whole_swings_then_turns_over() {
-        let samples = made(172.4, DRIVE_SWINGS);
+        let samples = made(172.4);
         let drive = (DRIVE_SWINGS * RATE as f32 / 172.4).round() as usize;
         assert_eq!(samples.len(), (3.5 * RATE as f32 / 172.4).round() as usize);
         assert_eq!(samples[0], 0);
@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn a_shorter_drive_swings_the_motor_less_far() {
-        let full = made(172.4, DRIVE_SWINGS);
-        let short = made(172.4, 1.0);
+        let full = made(172.4);
+        let short = made(172.4);
         let short_drive = (1.0 * RATE as f32 / 172.4).round() as usize;
         assert!(short.len() < full.len(), "fewer swings in all");
         assert_eq!(*short.iter().max().unwrap(), i8::MAX);
@@ -294,19 +294,19 @@ mod tests {
     #[test]
     fn the_screen_going_off_ticks_twice_crisply_the_second_lighter() {
         let at = |ms: f32| (ms * TICKS_RATE as f32 / 1000.0).round() as usize;
-        let samples = ticks(TICKS_HZ);
+        let samples = ticks(crate::waveform::TICKS_HZ);
         let (first, second) = (&samples[..at(12.167)], &samples[at(55.125)..]);
         assert_eq!(samples.len(), at(55.125 + 12.167));
         assert!(samples[at(12.167)..at(55.125)].iter().all(|&s| s == 0), "still between");
         let halves = |s: &[i8]| 1 + s.iter().filter(|&&s| s != 0).map(|&s| s > 0).collect::<Vec<_>>().windows(2).filter(|w| w[0] != w[1]).count();
         assert_eq!((halves(first), halves(second)), (6, 6), "six half-swings each");
-        let motor = TICKS_RATE as f32 / TICKS_HZ / 2.0;
+        let motor = crate::waveform::TICKS_RATE as f32 / crate::waveform::TICKS_HZ / 2.0;
         assert!((at(12.167 - 0.125) as f32 / 6.0) < motor, "each quicker than the motor's own");
         assert_eq!(first.iter().min(), Some(&-i8::MAX), "the first swings to the full");
         for (i, (&a, &b)) in first.iter().zip(second).enumerate() {
             assert!((f32::from(a) * 0.79 - f32::from(b)).abs() <= 1.0, "the second is the first at 0.79: {a} and {b} at {i}");
         }
-        assert_eq!(ticks(TICKS_HZ * 2.0).len(), samples.len().div_ceil(2), "a motor twice as quick ticks in half the time");
+        assert_eq!(ticks(crate::waveform::TICKS_HZ * 2.0).len(), samples.len().div_ceil(2), "a motor twice as quick ticks in half the time");
     }
 
     #[test]
