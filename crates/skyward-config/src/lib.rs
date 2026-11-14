@@ -790,7 +790,6 @@ mod tests {
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
         assert!(cfg.backup.data_skipped.contains(&"vendor/goodix".to_string()));
         assert!(cfg.wipe.logs.contains(&"/data/vendor/bsplog".to_string()));
->>>>>>> 21c5451 (feat: start the programs the phone's keys need as its own partitions say)
     }
 
     #[test]
@@ -884,7 +883,6 @@ mod tests {
             assert_eq!(stock.version, version);
             assert!(stock.package.ends_with(".zip") && stock.package.contains(&format!("/{version}/")), "{}", stock.package);
         }
->>>>>>> 21c5451 (feat: start the programs the phone's keys need as its own partitions say)
     }
 
     #[test]
@@ -943,7 +941,6 @@ mod tests {
     }
 
     #[test]
->>>>>>> 21c5451 (feat: start the programs the phone's keys need as its own partitions say)
     fn the_phone_is_read_from_a_configuration_this_build_cannot_read_whole() {
         assert_eq!(codename(include_str!("../../../devices/shennong.toml")).unwrap(), "shennong");
         let later = "[device]\ncodename = \"x\"\nab = \"no longer a switch\"\n[display]\nwidth = \"wide\"\n[aurora]\nnew = 1\n";
@@ -1009,6 +1006,5 @@ mod tests {
         assert!(!report.uses(Path::new("/vendor")));
         let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
         assert!(nezha.services[0].uses(Path::new("/vendor")), "its shell and its libraries are the vendor partition's");
->>>>>>> 21c5451 (feat: start the programs the phone's keys need as its own partitions say)
     }
 }
