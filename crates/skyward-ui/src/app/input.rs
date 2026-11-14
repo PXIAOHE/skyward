@@ -10,6 +10,11 @@ impl App {
         if !self.display_on {
             return Vec::new();
         }
+        // The lock that the panel woke to takes every finger: only its knob
+        // moves, and the page is uncovered when the knob reaches the end.
+        if self.locked {
+            return self.lock_touch(ev, now);
+        }
         // A finger on the charging screen sends it away for the page, and
         // does nothing else until it lifts.
         if self.charge_shown() {
@@ -315,6 +320,51 @@ impl App {
 
     /// No touchscreen answers: the keys work the pages, their light shown
     /// from now on.
+    /// A finger on the lock: dragging the knob moves it, letting go past
+    /// `UNLOCKED` uncovers the page, and anything else springs back.
+    fn lock_touch(&mut self, ev: Touch, now: u64) -> Vec<Effect> {
+        match ev {
+            Touch::Down(x, y) => {
+                if let Some(track) = self.lock_track {
+                    let knob = track.x + (track.w - track.h) * self.unlock;
+                    let reach = track.h * 0.6;
+                    let on = x >= track.x - reach
+                        && x <= track.x + track.w + reach
+                        && y >= track.y - reach
+                        && y <= track.y + track.h + reach;
+                    if on {
+                        self.drag = Drag::Lock { track, grab: x - knob };
+                    }
+                }
+            }
+            Touch::Move(x, _) => {
+                if let Drag::Lock { track, grab } = self.drag {
+                    let travel = (track.w - track.h).max(1.0);
+                    let along = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
+                    if (along - self.unlock).abs() > f32::EPSILON {
+                        self.unlock = along;
+                        self.dirty = true;
+                    }
+                }
+            }
+            Touch::Up => {
+                if matches!(self.drag, Drag::Lock { .. }) {
+                    self.drag = Drag::Idle;
+                    if self.unlock >= UNLOCKED {
+                        self.locked = false;
+                        self.unlock = 0.0;
+                    } else if self.unlock > 0.0 {
+                        // Short of the end: the knob eases back from where the
+                        // hand left it, so that it is seen to move.
+                        self.unlock_back = Some((now, self.unlock));
+                    }
+                    self.dirty = true;
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub fn touchscreen_missing(&mut self) {
         self.keys = true;
         self.dirty = true;

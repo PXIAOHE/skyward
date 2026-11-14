@@ -627,6 +627,12 @@ pub enum Effect {
     Merge,
 }
 
+/// How far the lock's knob has to be dragged for the page behind it to show.
+const UNLOCKED: f32 = 0.96;
+/// How long the lock's knob takes to ease back when a hand lets it go short.
+const UNLOCK_BACK_MS: u64 = 220;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum Drag {
     Idle,
     /// Finger down and not yet past the touch slop. `edge` is set when the
@@ -644,6 +650,9 @@ enum Drag {
     Edge { start: f32, from_left: bool, armed: bool, x: f32, cy: f32 },
     Slider(Slider, Rect),
     Confirm { which: Confirm, track: Rect, grab: f32 },
+    /// Dragging the lock's knob: where its track is, and how far from the
+    /// knob the finger came down.
+    Lock { track: Rect, grab: f32 },
     /// Scrolling a terminal's screen back through what the shell wrote, or
     /// the editor's text, `carry` being the part of a row not yet scrolled.
     History { last: f32, carry: f32, pitch: f32 },

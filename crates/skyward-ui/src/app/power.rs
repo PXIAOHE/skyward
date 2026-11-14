@@ -34,6 +34,11 @@ impl App {
             self.dirty = true;
             self.darkening = None;
             self.curtain.set(true, now);
+            // The panel wakes to a lock, as the phone's own system does: the
+            // page behind it shows again once the knob is dragged across.
+            self.locked = true;
+            self.unlock = 0.0;
+            self.lock_track = None;
         }
         self.woke_at = Some(now);
         self.stir(now);

@@ -173,6 +173,39 @@ impl App {
             self.compose_charging(out, f, info, charge, now);
         }
         out.dim(self.curtain.level(now));
+        if self.locked {
+            self.compose_lock(out, f, info, clock, now);
+        }
+    }
+
+    /// The lock the panel woke to: the date over the time, what is left in
+    /// the battery under it, and the knob at the foot.
+    fn compose_lock(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+        let t = self.theme();
+        let m = t.m;
+        let (w, h) = (m.w as f32, m.h as f32);
+        let ink = Rgba::rgb(255, 255, 255);
+        out.fill_rect(0.0, 0.0, w, h, Rgba::rgb(6, 6, 8).with_alpha(226));
+        let x = w / 2.0;
+        if !self.date.is_empty() {
+            out.text_center(&f.body, &self.date, x, m.dp(190.0), m.dp(22.0), ink.with_alpha(224));
+        }
+        out.text_center(&f.heading, clock, x, m.dp(256.0), m.dp(88.0), ink);
+        if let Some((level, _)) = self.bar(clock, info).battery {
+            out.text_center(&f.body, &format!("{level}%"), x, m.dp(322.0), m.sub_px, ink.with_alpha(214));
+        }
+        // The knob at the foot, in the style every other swipe-to-confirm in
+        // the recovery uses, easing back when a hand lets it go short.
+        let along = match self.unlock_back {
+            Some((at, from)) => {
+                let gone = (now.saturating_sub(at) as f32 / UNLOCK_BACK_MS as f32).clamp(0.0, 1.0);
+                from * (1.0 - gone) * (1.0 - gone)
+            }
+            None => self.unlock,
+        };
+        let label = self.state.lang.pick(["滑动解锁", "滑動解鎖", "Swipe to unlock"]);
+        let track = widgets::confirm(out, &t, f, h - m.dp(150.0), label, false, along);
+        self.lock_track = Some(track);
     }
 
     /// The charging screen, `level` of the way over the page drawn on `out`.
