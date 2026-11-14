@@ -218,6 +218,7 @@ mod client {
                 MessageType::Offer => "OFFER",
                 MessageType::Ack => "ACK",
                 MessageType::Nak => "NAK",
+                _ => "other",
             });
         for wait in WAITS {
             let sent = s.send_to(question, to).context("send a DHCP question")?;
