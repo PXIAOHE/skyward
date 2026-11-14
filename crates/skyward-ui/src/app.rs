@@ -4842,11 +4842,11 @@ impl App {
 
     /// How many requests the server has answered.
     pub fn serving_count(&mut self, served: u64) {
-        if let Serving::Running { at, served: was } = &self.state.serving {
-            if *was != served {
-                self.state.serving = Serving::Running { at: at.clone(), served };
-                self.dirty = true;
-            }
+        if let Serving::Running { at, served: was } = &self.state.serving
+            && *was != served
+        {
+            self.state.serving = Serving::Running { at: at.clone(), served };
+            self.dirty = true;
         }
     }
 
@@ -5143,8 +5143,9 @@ impl App {
         let t = self.theme();
         match ev {
             Touch::Down(x, y) => {
-                if self.shade > 0.0 {
-                    if let Some((rect, hit)) = self.shade_hits.iter().find(|(r, _)| r.contains(x, y)).copied() {
+                if self.shade > 0.0
+                    && let Some((rect, hit)) = self.shade_hits.iter().find(|(r, _)| r.contains(x, y)).copied()
+                {
                         match hit {
                             ShadeHit::Brightness | ShadeHit::Vibration => {
                                 let which = if hit == ShadeHit::Brightness { Slider::Brightness } else { Slider::Vibration };
@@ -5166,11 +5167,11 @@ impl App {
                 }
                 // A finger that came down on a tile and then moved was pulling
                 // the sheet: the tile is not pressed after all.
-                if let Some((_, down)) = self.shade_press {
-                    if (y - down).abs() > t.m.dp(14.0) {
-                        self.shade_press = None;
-                        self.drag = Drag::Shade { start: down, from: self.shade };
-                    }
+                if let Some((_, down)) = self.shade_press
+                    && (y - down).abs() > t.m.dp(14.0)
+                {
+                    self.shade_press = None;
+                    self.drag = Drag::Shade { start: down, from: self.shade };
                 }
                 if let Drag::Shade { start, from } = self.drag {
                     let pulled = from * SHADE_PULL_DP + (y - start);
@@ -6965,19 +6966,20 @@ impl App {
         // system, where the power key lights it -- except that two taps close
         // together in time and place are that system's double tap, which does.
         if !self.display_on {
-            if let Touch::Down(x, y) = ev {
-                if self.state.double_tap && self.state.double_tap_supported {
-                    let tap = Tap { x, y };
-                    let doubled = self
-                        .tapped
-                        .filter(|(first, at)| now.saturating_sub(*at) <= Tap::WINDOW_MS && first.doubles(&tap));
-                    if doubled.is_some() {
-                        self.tapped = None;
-                        self.wake(now);
-                        return Vec::new();
-                    }
-                    self.tapped = Some((tap, now));
+            if let Touch::Down(x, y) = ev
+                && self.state.double_tap
+                && self.state.double_tap_supported
+            {
+                let tap = Tap { x, y };
+                let doubled = self
+                    .tapped
+                    .filter(|(first, at)| now.saturating_sub(*at) <= Tap::WINDOW_MS && first.doubles(&tap));
+                if doubled.is_some() {
+                    self.tapped = None;
+                    self.wake(now);
+                    return Vec::new();
                 }
+                self.tapped = Some((tap, now));
             }
             return Vec::new();
         }
