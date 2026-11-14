@@ -28,13 +28,21 @@ pub struct Encryption {
 impl Encryption {
     /// Read what an entry of the phone's own table says.
     pub fn of(entry: &Entry) -> Result<Encryption> {
-        let said = entry.extra("metadata_encryption").context("the phone says its data partition is not encrypted whole")?;
-        let (name, rest) = said.split_once(':').unwrap_or((said, ""));
-        let cipher = CIPHERS
-            .iter()
-            .find_map(|(theirs, kernels)| (*theirs == name).then_some(*kernels))
-            .with_context(|| format!("no cipher here is the {name} the phone names"))?;
-        Ok(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" })
+        if let Some(said) = entry.extra("metadata_encryption") {
+            let (name, rest) = said.split_once(':').unwrap_or((said, ""));
+            let cipher = CIPHERS
+                .iter()
+                .find_map(|(theirs, kernels)| (*theirs == name).then_some(*kernels))
+                .with_context(|| format!("no cipher here is the {name} the phone names"))?;
+            return Ok(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" });
+        }
+        // A table may name only where the key is kept: Android then takes the
+        // cipher it uses where nothing is said, and the key in the form the
+        // key service gives it back.
+        if entry.extra("keydirectory").is_some() {
+            return Ok(Encryption { cipher: "aes-256-xts".to_string(), wrapped: false });
+        }
+        anyhow::bail!("the phone says its data partition is not encrypted whole")
     }
 }
 

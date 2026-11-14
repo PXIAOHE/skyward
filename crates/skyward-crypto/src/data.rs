@@ -32,50 +32,9 @@ pub const SDCARD: &str = "/sdcard";
 /// The phone's owner, the first of its users.
 const OWNER: u32 = 0;
 
-/// The key is in a directory of this name under the one the phone names.
-const KEY_DIR: &str = "key";
-
-/// How the kernel knows the cipher a phone names.
-const CIPHERS: [(&str, &str); 2] = [("aes-256-xts", "aes-xts-plain64"), ("adiantum", "xchacha12,aes-adiantum-plain64")];
-
 /// The hardware reads and writes in 4096-byte units, so the partition is
 /// mapped in whole multiples of eight 512-byte sectors.
 const SECTORS_PER_UNIT: u64 = 8;
-
-/// How a phone says its data partition is encrypted: the cipher, and
-/// whether the key is one only the storage hardware can unwrap.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Encryption {
-    pub cipher: String,
-    pub wrapped: bool,
-}
-
-impl Encryption {
-    /// Read what an entry of the phone's own table says.
-    pub fn of(entry: &Entry) -> Result<Encryption> {
-        if let Some(said) = entry.extra("metadata_encryption") {
-            let (name, rest) = said.split_once(':').unwrap_or((said, ""));
-            let cipher = CIPHERS
-                .iter()
-                .find_map(|(theirs, kernels)| (*theirs == name).then_some(*kernels))
-                .with_context(|| format!("no cipher here is the {name} the phone names"))?;
-            return Ok(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" });
-        }
-        // A table may name only where the key is kept: Android then takes
-        // the cipher it uses where nothing is said, and the key in the form
-        // the key service gives it back.
-        if entry.extra("keydirectory").is_some() {
-            return Ok(Encryption { cipher: "aes-xts-plain64".to_string(), wrapped: false });
-        }
-        anyhow::bail!("the phone says its data partition is not encrypted whole")
-    }
-}
-
-/// Where the phone keeps the key for the filesystem an entry describes.
-pub fn key_dir(entry: &Entry) -> Result<PathBuf> {
-    let dir = entry.extra("keydirectory").context("the phone says where the key for its data partition is not")?;
-    Ok(Path::new(dir).join(KEY_DIR))
-}
 
 /// Unwrap the key the phone keeps for its data partition and give the
 /// storage hardware the form of it that lasts until the phone is started
