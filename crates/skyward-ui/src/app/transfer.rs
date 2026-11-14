@@ -218,6 +218,7 @@ impl App {
 
     /// How long a card left by a finished fetch stays before the page is as it
     /// was: a failure is left up longer, so that it can be read.
+    #[allow(dead_code)]
     fn fetch_card_left(&self, now: u64) -> bool {
         let Some(at) = self.state.fetch_ended_at else { return false };
         let stay = match self.state.fetch {
@@ -228,6 +229,7 @@ impl App {
     }
 
     /// Take away the card a finished fetch left, and the address with it.
+    #[allow(dead_code)]
     fn clear_fetch_card(&mut self) {
         if matches!(self.state.fetch, Fetch::Running { .. } | Fetch::Idle) {
             return;
