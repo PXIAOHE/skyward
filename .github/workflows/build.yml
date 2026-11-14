@@ -48,6 +48,8 @@ jobs:
       - name: Test
         continue-on-error: true
         run: cargo test --locked --workspace
+      - name: Bring the lock file up to date for the phone
+        run: cargo ndk -t arm64-v8a --platform 30 metadata --format-version 1 > /dev/null
       - name: Lint what runs on the phone
         run: cargo ndk -t arm64-v8a --platform 30 clippy --locked -p skyward -p skyward-install -p skyward-systems -p skyward-system-init -- -D warnings
 
