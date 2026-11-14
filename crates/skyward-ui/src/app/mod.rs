@@ -1175,12 +1175,17 @@ pub struct App {
     /// Whether the panel woke to a lock over the page, how far its knob has
     /// been dragged, and where that knob was last drawn.
     locked: bool,
+    // The lock is drawn by the page code the split has not brought over yet;
+    // these are what it will read.
+    #[allow(dead_code)]
     unlock: f32,
+    #[allow(dead_code)]
     lock_track: Option<Rect>,
     /// The date the lock shows, as the system keeps it.
     date: String,
     /// When a hand let the lock's knob go short of the end, and where it was
     /// then: the knob eases back from there over [`UNLOCK_BACK_MS`].
+    #[allow(dead_code)]
     unlock_back: Option<(u64, f32)>,
     display_on: bool,
     /// When the screen was last touched or a key pressed; set on the first
