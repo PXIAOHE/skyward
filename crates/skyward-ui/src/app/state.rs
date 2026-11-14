@@ -106,6 +106,9 @@ pub struct State {
     /// lock its users' own files wait on.
     pub data: Data,
     pub code: String,
+    /// How far along the bar under the sign is while the data partition is
+    /// being opened, 0 to 1.
+    pub data_progress: f32,
     /// Whether the screen lock is kept, so that the data partition opens as
     /// the recovery starts next time.
     pub remember: bool,
@@ -257,6 +260,7 @@ impl Default for State {
             systems_work: None,
             system_notice: None,
             data: Data::Closed,
+            data_progress: 0.0,
             remember: false,
             sort_key: SortKey::Name,
             sort_desc: false,
