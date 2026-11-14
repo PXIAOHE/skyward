@@ -55,6 +55,10 @@ pub struct Settings {
     /// turns off as it did before.
     #[serde(default = "yes")]
     pub double_tap: bool,
+    /// Whether the screen lock is kept, so that the data partition opens as
+    /// the recovery starts next time.
+    #[serde(default)]
+    pub remember: bool,
     /// The vibration slider's place, from 0 at its left end to 1.
     pub vibration: f32,
     /// A computer connected over USB is offered internal storage.
@@ -135,6 +139,7 @@ impl Settings {
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
             vibrate: state.vibrate,
             double_tap: state.double_tap,
+            remember: state.remember,
             vibration: state.vibration,
             file_transfer: state.file_transfer,
             install: Install { check_signature: state.check_signature, keep_recovery: state.keep_recovery },
@@ -192,6 +197,7 @@ impl Settings {
         }
         state.vibrate = self.vibrate;
         state.double_tap = self.double_tap;
+        state.remember = self.remember;
         if (0.0..=1.0).contains(&self.vibration) {
             state.vibration = self.vibration;
         }

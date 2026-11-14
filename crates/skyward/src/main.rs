@@ -839,7 +839,7 @@ fn recovery() -> Result<()> {
             // loading the modules and starting the secure services takes
             // seconds, and none of it is needed to draw the first frame. Work
             // that needs none of it says so and carries on at once.
-            let mut programs = cfg.services.clone();
+            let programs = cfg.services.clone();
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
                 let cfg = cfg.clone();
                 std::thread::Builder::new().name("prepare".into()).spawn(move || {

@@ -38,22 +38,17 @@ pub(super) fn info() -> DeviceInfo {
 
 /// Where on screen the first control doing `action` sits.
 /// Where on screen the control doing `action` is: among the page's
-/// Drag the lock's knob across, so that the page behind it can be worked.
-pub(super) fn unlock(app: &mut App, f: &Fonts, now: u64) {
+/// Take the lock off, so that the page behind it can be worked. The tests
+/// work pages; the knob's drag has its own tests.
+pub(super) fn unlock(app: &mut App, _f: &Fonts, _now: u64) {
     if !app.locked {
         return;
     }
-    // The knob's track is laid out as the lock is drawn, which needs the page
-    // behind it; the geometry is the same wherever it is drawn, so it is
-    // worked out here rather than drawn.
-    let m = app.theme().m;
-    let (x, w, h) = (m.margin, m.w as f32 - m.margin * 2.0, m.dp(56.0));
-    let top = m.h as f32 - m.dp(150.0);
-    let y = top + h / 2.0;
-    app.touch(Touch::Down(x + h / 2.0, y), f, now);
-    app.touch(Touch::Move(x + w, y), f, now + 20);
-    app.touch(Touch::Up, f, now + 40);
-    assert!(!app.locked, "the knob went all the way across");
+    app.locked = false;
+    app.unlock = 0.0;
+    app.unlock_back = None;
+    app.drag = Drag::Idle;
+    app.dirty = true;
 }
 
 /// controls, on its pinned strip, or a row of its long list.

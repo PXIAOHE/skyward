@@ -343,14 +343,12 @@ impl App {
                     if on {
                         self.drag = Drag::Lock { track, grab: x - knob };
                     }
-                    eprintln!("LOCK down x={x} y={y} track={track:?} knob={knob} on={on}");
                 }
             }
             Touch::Move(x, _) => {
                 if let Drag::Lock { track, grab } = self.drag {
                     let travel = (track.w - track.h).max(1.0);
                     let along = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
-                    eprintln!("LOCK move x={x} along={along}");
                     if (along - self.unlock).abs() > f32::EPSILON {
                         self.unlock = along;
                         self.dirty = true;
