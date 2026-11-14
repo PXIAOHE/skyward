@@ -118,6 +118,22 @@ ready_service = "android.hardware.boot.IBootControl/default"
 user = "root"
 groups = ["root"]
 
+# The weaver: the secure world's own gate on a screen lock, which the key
+# service asks before it uses a key that a screen lock guards. It comes after
+# the credential service, whose note it hands over, and it is the one program
+# here that may never answer: the phone is usable without it, but the user's
+# files stay shut, because their key is the one it guards. Its description
+# is the phone's own, in the vendor's file for it.
+[[service]]
+path = "/odm/bin/hw/android.hardware.weaver-service.nxp-qti"
+# It loads the VNDK's libbase and libc++ where the phone keeps them, which
+# the system partition has as well as the apex.
+libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64"]
+ready_service = "android.hardware.weaver.IWeaver/default"
+description = "/odm/etc/vintf/manifest/android.hardware.weaver-service.nxp.xml"
+user = "vendor_nxp_weaver"
+groups = ["system", "drmrpc"]
+
 # WLAN: the kiwi node in the device tree, driven by qca_cld3_kiwi_v2, the
 # one WLAN driver the phone's own modules.load lists. The cfg80211 that
 # driver sits on wants the kernel's rfkill, which is loaded first from the
