@@ -762,6 +762,9 @@ mod tests {
         let haptics = cfg.haptics.expect("the 14 Pro has a motor");
         assert_eq!((haptics.drive_swings, haptics.max_amplitude), (1.2, Some(0.45)), "the motor is held short of its stops");
         assert_eq!(haptics.strength, Strength { lightest: 0.2, strongest: 0.6 });
+    }
+
+    #[test]
     fn parses_nezha() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
         assert_eq!(cfg.device.codename, "nezha");
