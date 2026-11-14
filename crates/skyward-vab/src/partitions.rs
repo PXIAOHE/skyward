@@ -344,17 +344,17 @@ fn dm_node(name: &str) -> Result<String> {
 /// that is not mapped is left as it is.
 fn unmap(name: &str, point: &Path) -> Result<()> {
     let Some(dev) = dm::status(name)? else { return Ok(()) };
-    if mount::visible(point)?.is_some_and(|v| v.device == dev) {
-        if let Err(e) = mount::umount_over(point) {
-            // A program the service scan does not name still holds it: it
-            // leaves the tree at once and keeps its device, so the mount
-            // page can put it back without mapping it again.
-            if !busy_error(&e) {
-                return Err(e);
-            }
-            mount::umount_detach_over(point)?;
-            return Ok(());
+    if mount::visible(point)?.is_some_and(|v| v.device == dev)
+        && let Err(e) = mount::umount_over(point)
+    {
+        // A program the service scan does not name still holds it: it leaves
+        // the tree at once and keeps its device, so the mount page can put it
+        // back without mapping it again.
+        if !busy_error(&e) {
+            return Err(e);
         }
+        mount::umount_detach_over(point)?;
+        return Ok(());
     }
     // The device may be held yet, by a detached mount an earlier release
     // left behind or by the files kept in memory: it stays until let go,
@@ -435,10 +435,10 @@ pub fn release_partitions(slot: Slot, busy: &[PathBuf]) -> Result<()> {
         // behind that still holds its device, as does what was kept in
         // memory for the programs that run from it: the device stays until
         // let go, and the mount page mounts it again as it is.
-        if let Err(e) = snapshots::unmap_snapshot(&m.partition) {
-            if !busy_error(&e) {
-                return Err(e);
-            }
+        if let Err(e) = snapshots::unmap_snapshot(&m.partition)
+            && !busy_error(&e)
+        {
+            return Err(e);
         }
     }
     Ok(())
