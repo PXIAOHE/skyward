@@ -6960,25 +6960,25 @@ impl App {
         Vec::new()
     }
 
+    #[allow(clippy::collapsible_if)]
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
         // A finger on the dark panel lights nothing, as on the phone's own
         // system, where the power key lights it -- except that two taps close
         // together in time and place are that system's double tap, which does.
         if !self.display_on {
-            if let Touch::Down(x, y) = ev
-                && self.state.double_tap
-                && self.state.double_tap_supported
-            {
-                let tap = Tap { x, y };
-                let doubled = self
-                    .tapped
-                    .filter(|(first, at)| now.saturating_sub(*at) <= Tap::WINDOW_MS && first.doubles(&tap));
-                if doubled.is_some() {
-                    self.tapped = None;
-                    self.wake(now);
-                    return Vec::new();
+            if let Touch::Down(x, y) = ev {
+                if self.state.double_tap && self.state.double_tap_supported {
+                    let tap = Tap { x, y };
+                    let doubled = self
+                        .tapped
+                        .filter(|(first, at)| now.saturating_sub(*at) <= Tap::WINDOW_MS && first.doubles(&tap));
+                    if doubled.is_some() {
+                        self.tapped = None;
+                        self.wake(now);
+                        return Vec::new();
+                    }
+                    self.tapped = Some((tap, now));
                 }
-                self.tapped = Some((tap, now));
             }
             return Vec::new();
         }

@@ -1737,10 +1737,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(p) = &part_worker {
             fds.push(p.fd());
         }
-        if let Ok(held) = wlan_of(&wlan) {
-            if let Some(w) = held.as_ref() {
-                fds.push(w.fd());
-            }
+        if let Ok(held) = wlan_of(&wlan)
+            && let Some(w) = held.as_ref()
+        {
+            fds.push(w.fd());
         }
         if let Some(c) = &checker {
             fds.push(c.fd());
