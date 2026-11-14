@@ -162,6 +162,87 @@ fn resonance(file: &str) -> Result<f32> {
     Ok(tenths as f32 / 10.0)
 }
 
+/// 3527 mV of the 8500 mV its device tree gives.
+const TICKS_STRENGTH: f32 = 0.415;
+
+/// highest voltage times the magnitude.
+fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
+    // The driver tells the two kinds apart by the length in bytes of what
+    // the effect points to, and loads nothing for any other length, though
+    // the upload still succeeds. For a waveform it keeps it reads the
+    // waveform's number from the first of three values and writes how long
+    // it plays into the other two, in whole seconds and then milliseconds.
+    let mut kept: [i16; 3] = [0; 3];
+    let mut samples = Samples { index: 0, length: 0, rate: RATE, data: std::ptr::null() };
+    let (len, data) = match click {
+        Click::Kept(id) => {
+            kept[0] = *id;
+            (std::mem::size_of_val(&kept), kept.as_mut_ptr())
+        }
+        Click::Samples { data, rate } => {
+            samples.length = u32::try_from(data.len())?;
+            samples.rate = *rate;
+            samples.data = data.as_ptr();
+            (std::mem::size_of::<Samples>(), (&mut samples as *mut Samples).cast::<i16>())
+        }
+    };
+    let periodic = libc::ff_periodic_effect {
+        waveform: FF_CUSTOM,
+        period: 0,
+        magnitude: (share.clamp(0.0, 1.0) * f32::from(i16::MAX)).round() as i16,
+        offset: 0,
+        phase: 0,
+        envelope: libc::ff_envelope { attack_length: 0, attack_level: 0, fade_length: 0, fade_level: 0 },
+        custom_len: len as u32,
+        custom_data: data,
+    };
+    let mut effect = libc::ff_effect {
+        type_: FF_PERIODIC,
+        id: -1,
+        direction: 0,
+        trigger: libc::ff_trigger { button: 0, interval: 0 },
+        replay: libc::ff_replay { length: 0, delay: 0 },
+        u: [0; 4],
+    };
+    // The union holds the periodic effect; it is exactly as large.
+    const _: () = assert!(std::mem::size_of::<libc::ff_periodic_effect>() == std::mem::size_of::<[u64; 4]>());
+    effect.u = unsafe { std::mem::transmute::<libc::ff_periodic_effect, [u64; 4]>(periodic) };
+    // EVIOCSFF: _IOW('E', 0x80, struct ff_effect)
+    let size = std::mem::size_of::<libc::ff_effect>() as u32;
+    let request = (1u32 << 30) | (size << 16) | (u32::from(b'E') << 8) | 0x80;
+    if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, &mut effect) } < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let length = match click {
+        Click::Kept(id) => {
+            let [_, seconds, millis] = kept;
+            let length = Duration::from_secs(u64::try_from(seconds)?) + Duration::from_millis(u64::try_from(millis)?);
+            ensure!(!length.is_zero(), "the driver loaded waveform {id} without saying how long it plays");
+            length
+        }
+        // The queue is full before the samples start playing.
+        Click::Samples { data, rate } => Duration::from_secs_f64(data.len() as f64 / f64::from(*rate)),
+    };
+    Ok(Loaded { slot: effect.id, length })
+}
+
+/// Start the loaded effect in slot `id`.
+fn play(dev: &mut File, id: i16) -> io::Result<()> {
+    let event = libc::input_event { time: libc::timeval { tv_sec: 0, tv_usec: 0 }, type_: EV_FF, code: id as u16, value: 1 };
+    let bytes = unsafe { std::slice::from_raw_parts((&event as *const libc::input_event).cast::<u8>(), std::mem::size_of::<libc::input_event>()) };
+    dev.write_all(bytes)
+}
+
+/// Take the effect in slot `id` away, which stops it for good.
+fn erase(dev: &File, id: i16) -> io::Result<()> {
+    // EVIOCRMFF: _IOW('E', 0x81, int)
+    let request = (1u32 << 30) | ((std::mem::size_of::<libc::c_int>() as u32) << 16) | (u32::from(b'E') << 8) | 0x81;
+    if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, libc::c_int::from(id)) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
