@@ -242,7 +242,6 @@ mod tests {
     /// system's saved images go over what is there only once it is picked
     /// and swiped.
     #[test]
-    #[ignore = "waits for the boot partition check, which comes with 990abf5"]
     fn boot_partitions_written_by_another_hand_are_told_of_and_written_over_once_swiped() {
         use skyward_systems::Held;
         let (f, i) = (fonts(), info());
@@ -260,7 +259,6 @@ mod tests {
     /// page neither shows the main system as the one that starts nor has
     /// anything to switch.
     #[test]
-    #[ignore = "waits for the boot partition check, which comes with 990abf5"]
     fn boot_partitions_nothing_is_kept_of_are_not_shown_as_the_main_systems() {
         use skyward_systems::Held;
         let (f, i) = (fonts(), info());
