@@ -841,6 +841,9 @@ mod tests {
         let stock = DeviceConfig::parse(include_str!("../../../devices/shennong.toml")).unwrap().stock.expect("a stock build to build on");
         assert_eq!(stock.version, "OS3.0.309.0.WNBCNXM");
         assert!(stock.package.ends_with(".zip") && stock.package.contains("/OS3.0.309.0.WNBCNXM/"), "{}", stock.package);
+    }
+
+    #[test]
     fn each_phones_programs_run_as_their_init_scripts_run_them() {
         let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
         let ishtar = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
