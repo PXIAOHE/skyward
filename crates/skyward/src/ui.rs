@@ -2273,7 +2273,7 @@ impl Pages<'_> {
         {
             let power = self.app.state.wlan.as_ref().map(|w| w.power.clone());
             if matches!(power, Some(WlanPower::Off | WlanPower::Failed(_))) {
-                wlan_worker(&self.wlan)?.send(wlan::Command::On)?;
+                wlan_worker(&self.wlan)?.send(wlan::Command::On);
                 let _ = skyward_sys::kmsg("the WLAN is opened for the network kept");
             }
             if matches!(power, Some(WlanPower::On)) {
@@ -2292,7 +2292,7 @@ impl Pages<'_> {
                         name: found.name,
                         security: found.security,
                         password: saved.password,
-                    })?;
+                    });
                 }
             }
         }
