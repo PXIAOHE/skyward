@@ -52,7 +52,14 @@ fn read(slot: skyward_vab::Slot) -> Result<Phone> {
     let mut partitions = Vec::new();
     for name in PARTITIONS {
         let named = format!("{name}{}", slot.suffix());
-        let partition = mounted.iter().find(|m| m.partition == named).with_context(|| format!("{named} is not mounted"))?;
+        // A partition the recovery did not mount says nothing of the phone's
+        // programs; the ones it did are read. A phone whose recovery brings up
+        // fewer partitions than its init does still has its keys started from
+        // what there is.
+        let Some(partition) = mounted.iter().find(|m| m.partition == named) else {
+            let _ = skyward_sys::kmsg(&format!("{named} is not mounted; its programs are not read"));
+            continue;
+        };
         partitions.push(Partition::mounted(name, &partition.mount_point));
     }
     Phone::read(partitions, properties)
