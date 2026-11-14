@@ -1304,6 +1304,10 @@ impl<'a> Pages<'a> {
         let locale = request.locale.as_deref().or(info.locale.as_deref());
         let named = locale.map(Lang::for_locale).transpose()?;
         app.take_settings(kept.settings(), named);
+        // The order the file manager was left in.
+        if let Some((key, desc, folders)) = sortmem::read() {
+            app.take_sort(key, desc, folders);
+        }
         let keeper = Keeper::new(&kept);
         skyward_sys::kmsg(&format!(
             "the pages speak {:?}, {}, and the locale named is {}",
@@ -1635,6 +1639,19 @@ impl<'a> Pages<'a> {
         self.skyward_told(now)?;
         self.decrypt_told(now)?;
         self.fetch_told(now)?;
+        // What the server is doing, and the order the file manager was put in,
+        // written down once.
+        if let Some(s) = &self.server {
+            self.app.serving_count(s.served());
+        }
+        if let Some((key, desc, folders)) = self.app.sort_to_save()
+            && let Err(e) = sortmem::write(key, desc, folders)
+        {
+            let _ = skyward_sys::kmsg(&format!("the file manager's order was not kept: {e:#}"));
+        }
+        // The page another device reaches says what it was told; the field on
+        // the download page takes it once.
+        self.app.state.fetch_portal = self.fetch_portal.clone();
         self.shell_told()?;
         self.take_in(drive_told, now)?;
         self.offer_storage(now)
