@@ -4,7 +4,7 @@
 //! them, so no phone is told of them by hand, and a system that names them
 //! otherwise after an update is followed as it is.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use skyward_config::Service;
 use skyward_programs::naming::{self, Does};
 use skyward_programs::phone::{self, Partition, Phone, PARTITIONS};
