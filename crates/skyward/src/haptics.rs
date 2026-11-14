@@ -243,6 +243,23 @@ fn erase(dev: &File, id: i16) -> io::Result<()> {
     Ok(())
 }
 
+
+/// how long it plays.
+struct Loaded {
+    slot: i16,
+    length: Duration,
+}
+
+/// `custom_fifo_data` lays them out.
+#[repr(C)]
+struct Samples {
+    /// Unused by the driver.
+    index: u32,
+    length: u32,
+    rate: u32,
+    data: *const i8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
