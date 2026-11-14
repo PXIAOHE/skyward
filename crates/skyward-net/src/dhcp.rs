@@ -204,8 +204,23 @@ mod client {
     /// sending it again as long as none comes; give up after the last wait.
     fn exchange(s: &UdpSocket, to: SocketAddrV4, question: &[u8], xid: u32, mac: [u8; 6], stop: &AtomicBool) -> Result<Option<Reply>> {
         let mut buf = [0u8; 1500];
+        let asked = Message::from_bytes(question)
+            .ok()
+            .and_then(|m| m.opts().msg_type())
+            .map_or("?", |k| match k {
+                MessageType::Discover => "DISCOVER",
+                MessageType::Request => "REQUEST",
+                MessageType::Decline => "DECLINE",
+                MessageType::Release => "RELEASE",
+                MessageType::Inform => "INFORM",
+                MessageType::Offer => "OFFER",
+                MessageType::Ack => "ACK",
+                MessageType::Nak => "NAK",
+            });
         for wait in WAITS {
-            s.send_to(question, to).context("send a DHCP question")?;
+            let sent = s.send_to(question, to).context("send a DHCP question")?;
+            eprintln!("dhcp: {asked} xid={xid:08x} sent {sent} bytes to {to}");
+            let mut seen = 0u32;
             let until = Instant::now() + Duration::from_secs(wait);
             while Instant::now() < until {
                 if stop.load(Ordering::Relaxed) {
@@ -213,8 +228,21 @@ mod client {
                 }
                 match s.recv(&mut buf) {
                     Ok(n) => {
-                        if let Some(r) = reply(&buf[..n], xid, mac) {
-                            return Ok(Some(r));
+                        seen += 1;
+                        let what = Message::from_bytes(&buf[..n])
+                            .ok()
+                            .map(|m| format!("op={:?} xid={:08x} type={:?} yiaddr={}", m.opcode(), m.xid(), m.opts().msg_type(), m.yiaddr()))
+                            .unwrap_or_else(|| "unreadable".to_string());
+                        match reply(&buf[..n], xid, mac) {
+                            Some(r) => {
+                                eprintln!("dhcp: {n} bytes, {what} -> {r:?}");
+                                return Ok(Some(r));
+                            }
+                            None => {
+                                if seen <= 3 {
+                                    eprintln!("dhcp: {n} bytes, {what} -> not an answer to xid={xid:08x}");
+                                }
+                            }
                         }
                     }
                     Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
