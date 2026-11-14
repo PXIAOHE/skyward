@@ -43,12 +43,15 @@ pub(super) fn unlock(app: &mut App, f: &Fonts, now: u64) {
     if !app.locked {
         return;
     }
-    // The knob's track is set as the lock is drawn.
-    app.frame(f, &info());
-    let track = app.lock_track.expect("the lock's knob is drawn");
-    let (x, y) = (track.x + track.h / 2.0, track.y + track.h / 2.0);
-    app.touch(Touch::Down(x, y), f, now);
-    app.touch(Touch::Move(track.x + track.w, y), f, now + 20);
+    // The knob's track is laid out as the lock is drawn, which needs the page
+    // behind it; the geometry is the same wherever it is drawn, so it is
+    // worked out here rather than drawn.
+    let m = app.theme().m;
+    let (x, w, h) = (m.margin, m.w as f32 - m.margin * 2.0, m.dp(56.0));
+    let top = m.h as f32 - m.dp(150.0);
+    let y = top + h / 2.0;
+    app.touch(Touch::Down(x + h / 2.0, y), f, now);
+    app.touch(Touch::Move(x + w, y), f, now + 20);
     app.touch(Touch::Up, f, now + 40);
     assert!(!app.locked, "the knob went all the way across");
 }

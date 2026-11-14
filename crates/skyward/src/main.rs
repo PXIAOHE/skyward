@@ -456,7 +456,7 @@ fn main() -> Result<()> {
             // The programs the recovery service started for the phone's
             // keys are read from the partitions again, as it read them;
             // where they do not show, it started none.
-            let mut programs = cfg.services.clone();
+            let programs = cfg.services.clone();
             match booted_slot().and_then(|slot| keys::found(slot, secure::libraries()?.as_deref())?.steps) {
                 Ok(steps) => programs.extend(keys::programs(&steps)),
                 Err(e) => eprintln!("the programs of the phone's keys are not known: {e:#}"),

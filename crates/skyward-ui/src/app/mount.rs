@@ -105,6 +105,7 @@ mod tests {
             MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: held },
             MountRow { base: "vendor".into(), point: "/vendor".into(), mounted: true, holders: Vec::new() },
         ]));
+        unlock(&mut app, &f, 0);
         let frame = app.frame(&f, &i);
         assert!(matches!(frame.hits[0].action, Action::Unavailable(_)), "the programs using odm keep it");
         assert_eq!(frame.hits[1].action, Action::MountToggle(1));

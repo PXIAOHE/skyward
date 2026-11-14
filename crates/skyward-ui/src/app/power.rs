@@ -384,6 +384,9 @@ mod tests {
         press(&mut app, Key::Power, 0);
         app.tick(365);
         app.plugged(1000, true);
+        // The panel wakes to a lock; the touch that sends the charging screen
+        // away comes off the lock, which is then dragged across.
+        unlock(&mut app, &f, 1500);
         app.touch(Touch::Down(x, y), &f, 1500);
         app.touch(Touch::Up, &f, 1550);
         assert!(!app.charge_shown(), "the touch sent it away");
@@ -404,6 +407,7 @@ mod tests {
         press(&mut app, Key::Power, 0);
         app.tick(365);
         app.plugged(1000, true);
+        unlock(&mut app, &f, 1500);
         let mut c = Canvas::new(W, H);
         app.compose(&mut c, &f, &i, "12:00", 3000);
         let px = |x: u32, y: u32| {
