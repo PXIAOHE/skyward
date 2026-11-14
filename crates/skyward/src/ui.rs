@@ -1634,6 +1634,7 @@ impl<'a> Pages<'a> {
         self.updates_told(now)?;
         self.skyward_told(now)?;
         self.decrypt_told(now)?;
+        self.fetch_told(now)?;
         self.shell_told()?;
         self.take_in(drive_told, now)?;
         self.offer_storage(now)
@@ -1805,6 +1806,9 @@ impl<'a> Pages<'a> {
         }
         if let Some(m) = &self.merger {
             fds.push(m.fd());
+        }
+        if let Some(f) = &self.fetcher {
+            fds.push(f.fd());
         }
         if let Some(d) = &self.decryptor {
             fds.push(d.fd());
@@ -2415,6 +2419,30 @@ impl Pages<'_> {
         if updated {
             self.skyward_updater = None;
         }
+        Ok(())
+    }
+
+    /// How the fetch of a file from an address went.
+    fn fetch_told(&mut self, now: u64) -> Result<()> {
+        let Some(f) = &self.fetcher else { return Ok(()) };
+        let (done, total) = f.progress();
+        self.app.fetch_progress(done, total);
+        let Some(ended) = f.ended() else { return Ok(()) };
+        match ended {
+            fetch::Ended::Done { path, bytes } => {
+                skyward_sys::kmsg(&format!("the fetch ended: {bytes} bytes in {}", path.display()))?;
+                self.app.fetch_ended(Ok((path.display().to_string(), bytes)), now);
+            }
+            fetch::Ended::Failed(why) => {
+                skyward_sys::kmsg(&format!("the fetch failed: {why}"))?;
+                self.app.fetch_ended(Err(why), now);
+            }
+            fetch::Ended::Stopped => {
+                skyward_sys::kmsg("the fetch was stopped")?;
+                self.app.fetch_stopped(now);
+            }
+        }
+        self.fetcher = None;
         Ok(())
     }
 
