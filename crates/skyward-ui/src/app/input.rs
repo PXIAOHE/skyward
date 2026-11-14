@@ -327,7 +327,13 @@ impl App {
     fn lock_touch(&mut self, ev: Touch, now: u64) -> Vec<Effect> {
         match ev {
             Touch::Down(x, y) => {
-                if let Some(track) = self.lock_track {
+                // The knob's track is where the lock draws it; a lock not yet
+                // drawn still takes a finger there.
+                let track = self.lock_track.unwrap_or_else(|| {
+                    let m = self.theme().m;
+                    Rect::new(m.margin, m.h as f32 - m.dp(150.0), m.w as f32 - m.margin * 2.0, m.dp(56.0))
+                });
+                {
                     let knob = track.x + (track.w - track.h) * self.unlock;
                     let reach = track.h * 0.6;
                     let on = x >= track.x - reach
@@ -337,12 +343,14 @@ impl App {
                     if on {
                         self.drag = Drag::Lock { track, grab: x - knob };
                     }
+                    eprintln!("LOCK down x={x} y={y} track={track:?} knob={knob} on={on}");
                 }
             }
             Touch::Move(x, _) => {
                 if let Drag::Lock { track, grab } = self.drag {
                     let travel = (track.w - track.h).max(1.0);
                     let along = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
+                    eprintln!("LOCK move x={x} along={along}");
                     if (along - self.unlock).abs() > f32::EPSILON {
                         self.unlock = along;
                         self.dirty = true;
