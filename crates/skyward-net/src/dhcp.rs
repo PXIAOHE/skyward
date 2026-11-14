@@ -147,6 +147,8 @@ pub use client::{obtain, keep, Kept};
 mod client {
     use super::{discover, extend, reply, request, Lease, Reply};
     use anyhow::{bail, Context, Result};
+    use dhcproto::v4::{Message, MessageType};
+    use dhcproto::Decodable;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
     use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicBool, Ordering};
