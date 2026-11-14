@@ -103,7 +103,7 @@ pub fn sort_entries(rows: &mut [FileRow], key: SortKey, desc: bool, folders_firs
 impl App {
     /// Order the file manager's entries the way its state now says, and keep
     /// that order for the next start.
-    fn resort_files(&mut self) {
+    pub(super) fn resort_files(&mut self) {
         if let Ok(entries) = &mut self.state.files.entries {
             sort_entries(entries, self.state.sort_key, self.state.sort_desc, self.state.sort_folders_first);
         }
@@ -129,7 +129,7 @@ impl App {
     }
 
     /// Begin fetching what the address typed on the page names.
-    fn fetch_start(&mut self, now: u64) -> Vec<Effect> {
+    pub(super) fn fetch_start(&mut self, now: u64) -> Vec<Effect> {
         let l = self.state.lang;
         if self.fetching() {
             return Vec::new();
@@ -157,7 +157,7 @@ impl App {
     }
 
     /// Take the address from the small file a computer can leave behind.
-    fn fetch_from_file(&mut self, now: u64) {
+    pub(super) fn fetch_from_file(&mut self, now: u64) {
         let l = self.state.lang;
         let at = std::path::Path::new("/storage/emulated/0/Download/link.txt");
         match std::fs::read_to_string(at) {

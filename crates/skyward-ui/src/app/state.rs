@@ -106,6 +106,9 @@ pub struct State {
     /// lock its users' own files wait on.
     pub data: Data,
     pub code: String,
+    /// Whether the screen lock is kept, so that the data partition opens as
+    /// the recovery starts next time.
+    pub remember: bool,
     /// How the file manager orders its entries, and which side.
     pub sort_key: SortKey,
     pub sort_desc: bool,
@@ -254,6 +257,7 @@ impl Default for State {
             systems_work: None,
             system_notice: None,
             data: Data::Closed,
+            remember: false,
             sort_key: SortKey::Name,
             sort_desc: false,
             sort_folders_first: true,
