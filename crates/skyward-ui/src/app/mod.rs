@@ -634,6 +634,7 @@ const UNLOCK_BACK_MS: u64 = 220;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum Drag {
+    #[default]
     Idle,
     /// Finger down and not yet past the touch slop. `edge` is set when the
     /// press began at a screen edge (true for the left one).
