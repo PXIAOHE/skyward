@@ -38,8 +38,24 @@ pub(super) fn info() -> DeviceInfo {
 
 /// Where on screen the first control doing `action` sits.
 /// Where on screen the control doing `action` is: among the page's
+/// Drag the lock's knob across, so that the page behind it can be worked.
+pub(super) fn unlock(app: &mut App, f: &Fonts, now: u64) {
+    if !app.locked {
+        return;
+    }
+    // The knob's track is set as the lock is drawn.
+    app.frame(f, &info());
+    let track = app.lock_track.expect("the lock's knob is drawn");
+    let (x, y) = (track.x + track.h / 2.0, track.y + track.h / 2.0);
+    app.touch(Touch::Down(x, y), f, now);
+    app.touch(Touch::Move(track.x + track.w, y), f, now + 20);
+    app.touch(Touch::Up, f, now + 40);
+    assert!(!app.locked, "the knob went all the way across");
+}
+
 /// controls, on its pinned strip, or a row of its long list.
 pub(super) fn spot(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action) -> (f32, f32) {
+    unlock(app, f, 0);
     let (t, scroll) = (app.theme(), app.top().1);
     let fr = app.frame(f, i);
     if let Some(h) = fr.hits.iter().find(|h| h.action == action) {
@@ -70,6 +86,9 @@ pub(super) fn tap(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action) -> V
 }
 
 pub(super) fn tap_at(app: &mut App, f: &Fonts, i: &DeviceInfo, action: Action, now: u64) -> Vec<Effect> {
+    // A page behind the lock is not reachable; the tests work pages, so the
+    // lock is taken off first.
+    unlock(app, f, now);
     let (x, y) = spot(app, f, i, action);
     let mut fx = app.touch(Touch::Down(x, y), f, now);
     fx.extend(app.touch(Touch::Up, f, now));

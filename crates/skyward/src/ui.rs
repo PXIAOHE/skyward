@@ -1592,12 +1592,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         asked = None;
                     }
                     untaken(&mut unread.battery, "the battery", battery.as_ref().err())?;
-                    if let Ok(battery) = battery {
-                        if battery != info.battery {
-                            plug(&mut app, &info.battery, &battery, now)?;
-                            info.battery = battery;
-                            app.refresh();
-                        }
+                    if let Ok(battery) = battery
+                        && battery != info.battery
+                    {
+                        plug(&mut app, &info.battery, &battery, now)?;
+                        info.battery = battery;
+                        app.refresh();
                     }
                 }
                 Reading::All(all, at) => {
@@ -1605,12 +1605,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         asked = None;
                     }
                     untaken(&mut unread.details, "the phone's details", all.as_ref().as_ref().err())?;
-                    if let Ok(all) = *all {
-                        if at >= read_at && all != info {
-                            plug(&mut app, &info.battery, &all.battery, now)?;
-                            info = all;
-                            app.refresh();
-                        }
+                    if let Ok(all) = *all
+                        && at >= read_at
+                        && all != info
+                    {
+                        plug(&mut app, &info.battery, &all.battery, now)?;
+                        info = all;
+                        app.refresh();
                     }
                 }
             }

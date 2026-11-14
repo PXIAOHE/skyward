@@ -312,6 +312,8 @@ mod tests {
         assert_eq!(app.top().1, 0.0, "nor scrolled the page");
         press(&mut app, Key::Power, 200);
         assert!(app.display_on());
+        // The panel wakes to a lock; the page is behind it.
+        unlock(&mut app, &f, 300);
         tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 700);
         assert_eq!(app.screen(), Screen::Settings, "a tap on the lit panel does");
     }
