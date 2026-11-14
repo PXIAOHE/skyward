@@ -607,9 +607,10 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     let mut told = registering.clone();
     told.extend(described.into_iter().filter(|name| !registering.contains(name)));
     if !told.is_empty() {
-        let described = secure::publish_descriptions(&told)?;
+        secure::publish_descriptions(&told)?;
         skyward_sys::kmsg(&format!(
-            "the service directory is told of {described} of the phone's own services"
+            "the service directory is told of {} of the phone's own services",
+            told.len()
         ))?;
     }
     let libraries = secure::libraries()?;
@@ -932,7 +933,8 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_pr
             }
             let found = secure::libraries().and_then(|libraries| keys::found(slot, libraries.as_deref()));
             let steps = found.as_ref().ok().and_then(|found| found.steps.as_deref().ok());
-            let programs = steps.map(keys::programs).unwrap_or_default();
+            let programs: Vec<skyward_programs::secure::Started> =
+                steps.map(keys::programs).unwrap_or_default();
             // Without them the screen still shows and the keys still work,
             // so this reason goes to the kernel log as well.
             if let Err(e) = bring_up(cfg, slot, found) {
