@@ -2832,6 +2832,24 @@ pub fn update(cx: &Ctx) -> Frame {
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::Merge) });
         let note = l.pick(["合并后无法回到更新前的系统。", "合併後無法回到更新前的系統。", "Once merged, the system from before the update can't come back."]);
         y = widgets::footnote(&mut c, t, f, track.y + track.h, note);
+    } else if s.update == Standing::Compressed {
+        // These are served by snapuserd, which a recovery does not run, so
+        // there is nothing here to slide: what has to happen is said instead.
+        // The lines are given one at a time, as the wrapping keeps no break
+        // of its own.
+        let first = l.pick([
+            "这类更新的快照由系统进程解压合并，恢复模式无法完成。",
+            "這類更新的快照由系統程序解壓合併，恢復模式無法完成。",
+            "Snapshots of this kind are decompressed and merged by a system process, which a recovery does not run.",
+        ]);
+        let second = l.pick([
+            "重启进入新系统后会自动合并，期间不要断电，也不要再进入恢复模式。",
+            "重新啟動進入新系統後會自動合併，期間不要斷電，也不要再進入恢復模式。",
+            "They merge on their own once the new system starts: do not cut the power, and do not come back here, until it has.",
+        ]);
+        let mut note = y + t.m.dp(24.0);
+        note = widgets::footnote(&mut c, t, f, note, first);
+        y = widgets::footnote(&mut c, t, f, note, second);
     }
     Frame::new(t, fit(c, t, y), out, l.pick(UPDATE), top)
 }

@@ -5923,7 +5923,20 @@ impl App {
                     (Outcome::Failed(_), Install::Scripting { running: true, .. }) => Some(Damage::Script),
                     _ => None,
                 };
+                // An update is the two ways a system lands in a slot: a
+                // package that installs itself, or an image flashed there.
+                let written = matches!(
+                    outcome,
+                    Outcome::Installed { .. } | Outcome::Flashed { .. }
+                );
                 *install = Install::Finished { outcome, damage };
+                // An update that has just been written leaves the system in
+                // pieces until it is merged, and the merge is what the next
+                // thing to do is: the page is opened for it rather than left
+                // for someone to find.
+                if written && matches!(self.state.update, Standing::Waiting | Standing::Compressed) {
+                    self.open(Screen::Update);
+                }
             }
         }
         if self.screen() == Screen::Installing {
