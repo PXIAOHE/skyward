@@ -90,6 +90,9 @@ impl App {
             Action::Toggle(switch) => {
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
+                    Switch::WlanAuto => &mut self.state.wlan_auto,
+                    Switch::WlanKeep => &mut self.state.wlan_keep,
+                    Switch::DoubleTap => &mut self.state.double_tap,
                     Switch::FileTransfer => &mut self.state.file_transfer,
                     Switch::Compress => &mut self.state.compress,
                     Switch::Verify => &mut self.state.verify,
@@ -103,6 +106,12 @@ impl App {
                 self.refresh();
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
+                }
+                if switch == Switch::WlanAuto {
+                    return vec![Effect::WlanAuto(now_on)];
+                }
+                if switch == Switch::WlanKeep {
+                    return vec![Effect::WlanKeep(now_on)];
                 }
             }
             Action::MountToggle(i) => {
