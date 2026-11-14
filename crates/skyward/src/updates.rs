@@ -312,12 +312,12 @@ fn fetch(
             }
             // Past a megabyte, a source that is still this slow is worth
             // leaving for the next one.
-            if rate > 0 && rate < TOO_SLOW {
-                if let Progress::Downloading { done, .. } = p {
-                    if done > 1 << 20 {
-                        slow.store(true, Ordering::Relaxed);
-                    }
-                }
+            if rate > 0
+                && rate < TOO_SLOW
+                && let Progress::Downloading { done, .. } = p
+                && done > 1 << 20
+            {
+                slow.store(true, Ordering::Relaxed);
             }
             last = Some((p, rate));
         };

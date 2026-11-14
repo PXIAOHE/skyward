@@ -1769,17 +1769,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             app.serving_count(s.served());
         }
         // The order the file manager was put in, written down once.
-        if let Some((key, desc, folders)) = app.sort_to_save() {
-            if let Err(e) = sortmem::write(key, desc, folders) {
-                let _ = skyward_sys::kmsg(&format!("the file manager's order was not kept: {e:#}"));
-            }
+        if let Some((key, desc, folders)) = app.sort_to_save()
+            && let Err(e) = sortmem::write(key, desc, folders)
+        {
+            let _ = skyward_sys::kmsg(&format!("the file manager's order was not kept: {e:#}"));
         }
         // The download page offers a page another device can reach, where a
         // long address is typed and handed over: it is served while that page
         // is open, and what is typed there fills its field.
         if app.screen() == skyward_ui::app::Screen::Fetch {
-            if portal.is_none() && portal_retry_at.is_none_or(|at| now >= at) {
-                if let Some(ip) = skyward_net::iface::address(&wire).ok().flatten() {
+            if portal.is_none()
+                && portal_retry_at.is_none_or(|at| now >= at)
+                && let Some(ip) = skyward_net::iface::address(&wire).ok().flatten()
+            {
                     match crate::portal::Portal::start(&ip.to_string()) {
                         Ok(p) => {
                             let _ = skyward_sys::kmsg(&format!("the download page is served at {}", p.url()));
@@ -1794,11 +1796,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                 }
             }
-            if let Some(p) = &portal {
-                if let Some(link) = p.take() {
-                    let _ = skyward_sys::kmsg("a link came from the page another device opened");
-                    app.hand_link(link, now);
-                }
+            if let Some(p) = &portal
+                && let Some(link) = p.take()
+            {
+                let _ = skyward_sys::kmsg("a link came from the page another device opened");
+                app.hand_link(link, now);
             }
         } else if portal.is_some() {
             portal = None;
@@ -1812,8 +1814,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             }
         }
         // The network kept, joined once the WLAN has it in view.
-        if app.state.wlan_auto && !wlan_joined {
-            if let Some(saved) = wlan_kept.saved.clone() {
+        if app.state.wlan_auto
+            && !wlan_joined
+            && let Some(saved) = wlan_kept.saved.clone()
+        {
                 let power = app.state.wlan.as_ref().map(|w| w.power.clone());
                 if !wlan_opened && matches!(power, Some(WlanPower::Off | WlanPower::Failed(_))) {
                     wlan_opened = true;
