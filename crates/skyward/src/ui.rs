@@ -1,5 +1,7 @@
 use crate::backup;
 use crate::fetch;
+use crate::fileserve;
+use crate::remember;
 use crate::wlanmem;
 use crate::decrypt::{self, Decryptor};
 use crate::filework;
@@ -2551,6 +2553,17 @@ impl Pages<'_> {
                 Incoming::Asked(asked) => {
                     skyward_sys::kmsg(&format!("asked on the recovery socket: {asked:?}"))?;
                     answer(asked, self.fastboot)
+                }
+                // The touchscreen's own double tap, reported as the wakeup
+                // key: a dark panel is lit the way its power key lights it.
+                Incoming::Input(Event::Wake) => {
+                    if self.app.panel_lit() || !self.app.state.double_tap {
+                        Vec::new()
+                    } else {
+                        let mut fx = self.app.key(skyward_ui::app::Key::Power, now);
+                        fx.extend(self.app.key_up(skyward_ui::app::Key::Power, now));
+                        fx
+                    }
                 }
                 Incoming::Input(Event::Touch(t, at)) => self.app.touch(t, &self.fonts, at),
                 Incoming::Input(Event::Key(k, true)) => self.app.key(k, now),
