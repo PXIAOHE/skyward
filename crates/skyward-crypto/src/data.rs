@@ -32,10 +32,6 @@ pub const SDCARD: &str = "/sdcard";
 /// The phone's owner, the first of its users.
 const OWNER: u32 = 0;
 
-/// The hardware reads and writes in 4096-byte units, so the partition is
-/// mapped in whole multiples of eight 512-byte sectors.
-const SECTORS_PER_UNIT: u64 = 8;
-
 /// Unwrap the key the phone keeps for its data partition and give the
 /// storage hardware the form of it that lasts until the phone is started
 /// again.
