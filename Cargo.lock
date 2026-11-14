@@ -1824,6 +1824,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcodegen"
+version = "1.8.0"
+
+[[package]]
 name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2555,6 +2559,7 @@ dependencies = [
  "libc",
  "png",
  "proc-macro2",
+ "qrcodegen",
  "serde",
  "serde_json",
  "skyward-info",
