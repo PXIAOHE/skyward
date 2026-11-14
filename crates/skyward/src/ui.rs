@@ -15,6 +15,7 @@ use crate::readings::{Reading, Readings};
 use crate::secure;
 use crate::services;
 use crate::settings;
+use crate::sortmem;
 use crate::systems;
 use crate::updates;
 use crate::wipe::{self, Eraser, Step};
