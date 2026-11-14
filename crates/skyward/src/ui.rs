@@ -1794,7 +1794,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             portal_retry_at = Some(now + 3000);
                         }
                     }
-                }
             }
             if let Some(p) = &portal
                 && let Some(link) = p.take()
@@ -1835,7 +1834,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         )?;
                     }
                 }
-            }
         }
         // A WLAN that did not come up is tried again a few times.
         if app.state.wlan_auto && !wlan_joined && wlan_retries < 3 {
