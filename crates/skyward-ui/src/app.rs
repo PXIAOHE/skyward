@@ -5155,7 +5155,6 @@ impl App {
                             _ => self.shade_press = Some((hit, y)),
                         }
                         return Vec::new();
-                    }
                 }
                 self.drag = Drag::Shade { start: y, from: self.shade };
                 Vec::new()
