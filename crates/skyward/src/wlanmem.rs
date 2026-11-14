@@ -57,12 +57,12 @@ pub fn read() -> Kept {
             _ => {}
         }
     }
-    if kept.keep {
-        if let (Some(ssid), Some(password)) = (ssid, password) {
-            if !ssid.is_empty() && !password.is_empty() {
-                kept.saved = Some(Saved { ssid, password });
-            }
-        }
+    if kept.keep
+        && let (Some(ssid), Some(password)) = (ssid, password)
+        && !ssid.is_empty()
+        && !password.is_empty()
+    {
+        kept.saved = Some(Saved { ssid, password });
     }
     kept
 }
