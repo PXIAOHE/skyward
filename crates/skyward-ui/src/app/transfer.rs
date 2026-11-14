@@ -256,7 +256,7 @@ impl App {
     }
 
     /// The server could not be brought up.
-    pub fn serving_failed(&mut self, why: String) {
+    pub fn serve_failed(&mut self, why: String) {
         self.state.serving = Serving::Failed(why);
         self.refresh();
     }
@@ -273,5 +273,59 @@ impl App {
     pub fn serving_stopped(&mut self) {
         self.state.serving = Serving::Idle;
         self.refresh();
+    }
+}
+
+impl App {
+    /// Whether the panel is lit: touches are worked by the page then, and a
+    /// dark one is where the double tap that lights it is looked for.
+    pub fn panel_lit(&self) -> bool {
+        self.display_on
+    }
+
+    /// The date the lock shows, as the system keeps it.
+    pub fn set_date(&mut self, date: String) {
+        if self.date != date {
+            self.date = date;
+            if self.locked {
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Open `screen` over the page shown.
+    pub fn go(&mut self, screen: Screen) {
+        self.open(screen);
+    }
+
+    /// The page another device reaches to hand a link over, once it serves.
+    pub fn set_portal(&mut self, at: Option<String>) {
+        if self.state.fetch_portal != at {
+            self.state.fetch_portal = at;
+            self.dirty = true;
+        }
+    }
+
+    /// A link another device typed on that page.
+    pub fn hand_link(&mut self, link: String, now: u64) {
+        self.state.fetch_url = link;
+        let said = self.state.lang.pick([
+            "已从另一台手机取回链接",
+            "已從另一台手機取回連結",
+            "The link came from the other device",
+        ]);
+        self.say(said, now);
+        self.refresh();
+    }
+
+    /// How far along the bar under the sign has come, 0 to 1.
+    pub fn data_progress(&self) -> f32 {
+        self.state.data_progress
+    }
+
+    /// Whether the decrypt page is up and the data partition is still being
+    /// opened, which is when the ring and the bar move.
+    pub fn decrypt_waiting(&self) -> bool {
+        self.screen() == Screen::Decrypt && matches!(self.state.data, Data::Closed | Data::Opening)
     }
 }

@@ -1172,6 +1172,16 @@ pub struct App {
     /// The terminal page's shell, from when it is first opened; it goes on
     /// while other pages show.
     term: Option<Term>,
+    /// Whether the panel woke to a lock over the page, how far its knob has
+    /// been dragged, and where that knob was last drawn.
+    locked: bool,
+    unlock: f32,
+    lock_track: Option<Rect>,
+    /// The date the lock shows, as the system keeps it.
+    date: String,
+    /// When a hand let the lock's knob go short of the end, and where it was
+    /// then: the knob eases back from there over [`UNLOCK_BACK_MS`].
+    unlock_back: Option<(u64, f32)>,
     display_on: bool,
     /// When the screen was last touched or a key pressed; set on the first
     /// tick, so the time before the UI started does not count.
@@ -1272,6 +1282,11 @@ impl App {
             snap: false,
             glow: None,
             term: None,
+            locked: false,
+            unlock: 0.0,
+            lock_track: None,
+            date: String::new(),
+            unlock_back: None,
             display_on: true,
             active: None,
             woke_at: None,
